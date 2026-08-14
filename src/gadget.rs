@@ -1,6 +1,7 @@
 //! Privileged Linux USB gadget lifecycle and worker supervision.
 
 use crate::diagnostics::Level;
+use crate::usb_identity::{UsbIdentity, USB_IDENTITY};
 use crate::STOP_REQUESTED;
 use std::env;
 use std::ffi::{c_char, c_void, CString};
@@ -28,6 +29,7 @@ const F_SETFD: c_int = 2;
 const PR_SET_PDEATHSIG: c_int = 1;
 const PR_SET_NO_NEW_PRIVS: c_int = 38;
 const SIGTERM: c_int = 15;
+
 unsafe extern "C" {
     fn geteuid() -> u32;
     fn getppid() -> c_int;
@@ -124,8 +126,11 @@ impl Runtime {
         let udc = select_udc(requested_udc)?;
         write_attribute(&format!("{GADGET}/UDC"), &udc)?;
         println!(
-            "Virtual YubiKey attached through UDC {udc} as 1050:0404; protocol worker is user {}; press Ctrl-C to stop",
-            identity.name
+            "Virtual YubiKey attached through UDC {udc} as {:04x}:{:04x} ({}); protocol worker is user {}; press Ctrl-C to stop",
+            UsbIdentity::VENDOR_ID,
+            USB_IDENTITY.product_id(),
+            USB_IDENTITY.product(),
+            identity.name,
         );
         Ok(runtime)
     }
@@ -199,10 +204,19 @@ impl Runtime {
     }
 
     fn populate_gadget(&self) -> io::Result<()> {
-        write_attribute(&format!("{GADGET}/idVendor"), "0x1050")?;
-        write_attribute(&format!("{GADGET}/idProduct"), "0x0404")?;
+        write_attribute(
+            &format!("{GADGET}/idVendor"),
+            &format!("0x{:04x}", UsbIdentity::VENDOR_ID),
+        )?;
+        write_attribute(
+            &format!("{GADGET}/idProduct"),
+            &format!("0x{:04x}", USB_IDENTITY.product_id()),
+        )?;
         write_attribute(&format!("{GADGET}/bcdUSB"), "0x0200")?;
-        write_attribute(&format!("{GADGET}/bcdDevice"), "0x0580")?;
+        write_attribute(
+            &format!("{GADGET}/bcdDevice"),
+            &format!("0x{:04x}", USB_IDENTITY.bcd_device()),
+        )?;
         write_attribute(&format!("{GADGET}/bDeviceClass"), "0x00")?;
         write_attribute(&format!("{GADGET}/bDeviceSubClass"), "0x00")?;
         write_attribute(&format!("{GADGET}/bDeviceProtocol"), "0x00")?;
@@ -213,7 +227,10 @@ impl Runtime {
             &self.serial.to_string(),
         )?;
         write_attribute(&format!("{GADGET}/strings/0x409/manufacturer"), "Yubico")?;
-        write_attribute(&format!("{GADGET}/strings/0x409/product"), "YubiKey CCID")?;
+        write_attribute(
+            &format!("{GADGET}/strings/0x409/product"),
+            USB_IDENTITY.product(),
+        )?;
 
         fs::create_dir(format!("{GADGET}/configs/c.1"))?;
         write_attribute(&format!("{GADGET}/configs/c.1/MaxPower"), "30")?;
