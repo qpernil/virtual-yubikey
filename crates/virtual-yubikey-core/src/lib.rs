@@ -1,0 +1,391 @@
+//! Transport-neutral logical YubiKey emulator.
+//!
+//! This crate owns device identity, ISO 7816 routing, applet state, and APDU
+//! behavior. It deliberately contains no USB, CCID, PC/SC, PKCS #11, or
+//! operating-system integration.
+
+mod crypto;
+mod fido;
+mod preview_sign;
+
+pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
+pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+
+pub const ATR: [u8; 23] = [
+    0x3b, 0xfd, 0x13, 0x00, 0x00, 0x81, 0x31, 0xfe, 0x15, 0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59,
+    0x75, 0x62, 0x69, 0x4b, 0x65, 0x79, 0x40,
+];
+
+const INS_SELECT: u8 = 0xa4;
+const INS_GET_RESPONSE: u8 = 0xc0;
+const INS_READ_DEVICE_INFO: u8 = 0x1d;
+const INS_CTAP_CBOR: u8 = 0x10;
+const ISO7816_SUCCESS: u16 = 0x9000;
+const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Applet {
+    Management,
+    Fido2,
+}
+
+impl Applet {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Management => "management",
+            Self::Fido2 => "fido2",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceProfile {
+    pub serial: u32,
+    pub firmware: [u8; 3],
+    pub usb_supported_capabilities: u16,
+    pub usb_enabled_capabilities: u16,
+    pub form_factor: u8,
+}
+
+impl DeviceProfile {
+    pub const fn yubikey_5_8_ccid(serial: u32) -> Self {
+        Self {
+            serial,
+            firmware: [5, 8, 0],
+            usb_supported_capabilities: 0x0404,
+            usb_enabled_capabilities: 0x0404,
+            form_factor: 0x01,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct VirtualYubiKey {
+    profile: DeviceProfile,
+    selected: Option<Applet>,
+    chained_command: Vec<u8>,
+    pending_response: Vec<u8>,
+    fido: fido::FidoState,
+}
+
+impl VirtualYubiKey {
+    pub fn new(profile: DeviceProfile) -> Self {
+        Self {
+            profile,
+            selected: None,
+            chained_command: Vec::new(),
+            pending_response: Vec::new(),
+            fido: fido::FidoState::new(),
+        }
+    }
+
+    pub fn profile(&self) -> &DeviceProfile {
+        &self.profile
+    }
+
+    pub fn selected_applet(&self) -> Option<Applet> {
+        self.selected
+    }
+
+    pub fn power_on(&mut self) {
+        self.reset();
+    }
+
+    pub fn power_off(&mut self) {
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        self.selected = None;
+        self.chained_command.clear();
+        self.pending_response.clear();
+        self.fido.reset_connection();
+    }
+
+    pub fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
+        let command = match CommandApdu::decode(raw) {
+            Ok(command) => command,
+            Err(_) => return ResponseApdu::status(0x6700).encode(),
+        };
+
+        if command.cla == 0 && command.ins == INS_GET_RESPONSE {
+            return self.take_response(command.le).encode();
+        }
+
+        if command.ins == INS_SELECT && command.p1 == 0x04 {
+            return self.select(command.data).encode();
+        }
+
+        match self.selected {
+            Some(Applet::Management) => self.management(&command).encode(),
+            Some(Applet::Fido2) => self.fido2(&command).encode(),
+            None => ResponseApdu::status(0x6999).encode(),
+        }
+    }
+
+    fn select(&mut self, aid: &[u8]) -> ResponseApdu {
+        self.chained_command.clear();
+        self.pending_response.clear();
+        if aid == MANAGEMENT_AID {
+            self.selected = Some(Applet::Management);
+            let mut data = MANAGEMENT_SELECT_PREFIX.to_vec();
+            let [major, minor, patch] = self.profile.firmware;
+            data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
+            ResponseApdu::success(data)
+        } else if aid == FIDO2_AID {
+            self.selected = Some(Applet::Fido2);
+            ResponseApdu::success(b"U2F_V2".to_vec())
+        } else {
+            self.selected = None;
+            ResponseApdu::status(0x6a82)
+        }
+    }
+
+    fn management(&self, command: &CommandApdu<'_>) -> ResponseApdu {
+        if command.cla != 0 || command.ins != INS_READ_DEVICE_INFO || command.p2 != 0 {
+            return ResponseApdu::status(0x6d00);
+        }
+        if command.p1 != 0 {
+            return ResponseApdu::status(0x6a86);
+        }
+
+        let mut body = Vec::new();
+        push_tlv(
+            &mut body,
+            0x01,
+            &self.profile.usb_supported_capabilities.to_be_bytes(),
+        );
+        push_tlv(&mut body, 0x02, &self.profile.serial.to_be_bytes());
+        push_tlv(
+            &mut body,
+            0x03,
+            &self.profile.usb_enabled_capabilities.to_be_bytes(),
+        );
+        push_tlv(&mut body, 0x04, &[self.profile.form_factor]);
+        push_tlv(&mut body, 0x05, &self.profile.firmware);
+        push_tlv(&mut body, 0x08, &[0]);
+
+        let mut response = Vec::with_capacity(body.len() + 1);
+        response.push(body.len() as u8);
+        response.extend_from_slice(&body);
+        ResponseApdu::success(response)
+    }
+
+    fn fido2(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+        if command.ins != INS_CTAP_CBOR || command.p2 != 0 {
+            return ResponseApdu::status(0x6d00);
+        }
+
+        self.chained_command.extend_from_slice(command.data);
+        if command.cla & 0x10 != 0 {
+            return ResponseApdu::status(ISO7816_SUCCESS);
+        }
+
+        let request = std::mem::take(&mut self.chained_command);
+        let response = fido::exchange(&mut self.fido, &request);
+        self.pending_response = response;
+        self.take_response(command.le)
+    }
+
+    fn take_response(&mut self, le: Option<u32>) -> ResponseApdu {
+        let requested = le.unwrap_or(256).min(256) as usize;
+        let count = requested.min(self.pending_response.len());
+        let remaining = self.pending_response.split_off(count);
+        let data = std::mem::replace(&mut self.pending_response, remaining);
+        let status = if self.pending_response.is_empty() {
+            ISO7816_SUCCESS
+        } else {
+            0x6100 | u16::try_from(self.pending_response.len().min(256)).unwrap_or(0)
+        };
+        ResponseApdu { data, status }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandApdu<'a> {
+    pub cla: u8,
+    pub ins: u8,
+    pub p1: u8,
+    pub p2: u8,
+    pub data: &'a [u8],
+    pub le: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApduDecodeError {
+    TooShort,
+    InvalidLength,
+}
+
+impl<'a> CommandApdu<'a> {
+    pub fn decode(raw: &'a [u8]) -> Result<Self, ApduDecodeError> {
+        if raw.len() < 4 {
+            return Err(ApduDecodeError::TooShort);
+        }
+        let (data, le) = match raw.len() {
+            4 => (&raw[4..4], None),
+            5 => (&raw[4..4], Some(short_le(raw[4]))),
+            _ if raw[4] != 0 => {
+                let length = usize::from(raw[4]);
+                let end = 5 + length;
+                if raw.len() == end {
+                    (&raw[5..end], None)
+                } else if raw.len() == end + 1 {
+                    (&raw[5..end], Some(short_le(raw[end])))
+                } else {
+                    return Err(ApduDecodeError::InvalidLength);
+                }
+            }
+            7 => (
+                &raw[7..7],
+                Some(extended_le(u16::from_be_bytes([raw[5], raw[6]]))),
+            ),
+            _ => {
+                if raw.len() < 7 {
+                    return Err(ApduDecodeError::InvalidLength);
+                }
+                let length = usize::from(u16::from_be_bytes([raw[5], raw[6]]));
+                if length == 0 {
+                    return Err(ApduDecodeError::InvalidLength);
+                }
+                let end = 7 + length;
+                if raw.len() == end {
+                    (&raw[7..end], None)
+                } else if raw.len() == end + 2 {
+                    (
+                        &raw[7..end],
+                        Some(extended_le(u16::from_be_bytes([raw[end], raw[end + 1]]))),
+                    )
+                } else {
+                    return Err(ApduDecodeError::InvalidLength);
+                }
+            }
+        };
+        Ok(Self {
+            cla: raw[0],
+            ins: raw[1],
+            p1: raw[2],
+            p2: raw[3],
+            data,
+            le,
+        })
+    }
+}
+
+fn short_le(value: u8) -> u32 {
+    if value == 0 {
+        256
+    } else {
+        u32::from(value)
+    }
+}
+
+fn extended_le(value: u16) -> u32 {
+    if value == 0 {
+        65_536
+    } else {
+        u32::from(value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseApdu {
+    pub data: Vec<u8>,
+    pub status: u16,
+}
+
+impl ResponseApdu {
+    pub fn success(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            status: ISO7816_SUCCESS,
+        }
+    }
+
+    pub fn status(status: u16) -> Self {
+        Self {
+            data: Vec::new(),
+            status,
+        }
+    }
+
+    pub fn encode(mut self) -> Vec<u8> {
+        self.data.extend_from_slice(&self.status.to_be_bytes());
+        self.data
+    }
+}
+
+fn push_tlv(output: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    output.push(tag);
+    output.push(value.len() as u8);
+    output.extend_from_slice(value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn select(aid: &[u8]) -> Vec<u8> {
+        [
+            vec![0, INS_SELECT, 0x04, 0, aid.len() as u8],
+            aid.to_vec(),
+            vec![0],
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn management_identity_is_derived_from_profile() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(0x01020304));
+        assert_eq!(
+            device.transmit(&select(&MANAGEMENT_AID)),
+            [b"Virtual mgr - FW version 5.8.0".as_slice(), &[0x90, 0]].concat()
+        );
+        let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
+        assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
+        assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
+        assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn reset_clears_selected_applet() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        device.transmit(&select(&FIDO2_AID));
+        assert_eq!(device.selected_applet(), Some(Applet::Fido2));
+        device.reset();
+        assert_eq!(device.selected_applet(), None);
+        assert_eq!(
+            device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 4]),
+            [0x69, 0x99]
+        );
+    }
+
+    #[test]
+    fn fido_command_chaining_and_get_response_are_transport_neutral() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        device.transmit(&select(&FIDO2_AID));
+        assert_eq!(
+            device.transmit(&[0x90, INS_CTAP_CBOR, 0, 0, 1, 0xff]),
+            [0x90, 0]
+        );
+        assert_eq!(
+            device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 0xaa]),
+            [0x01, 0x90, 0]
+        );
+
+        let first = device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 4, 1]);
+        assert_eq!(first[0], 0);
+        assert_eq!(first[1], 0x61);
+        let remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
+        assert_eq!(&remainder[remainder.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn parses_short_and_extended_apdu_cases() {
+        assert_eq!(CommandApdu::decode(&[0, 1, 2, 3]).unwrap().le, None);
+        assert_eq!(CommandApdu::decode(&[0, 1, 2, 3, 0]).unwrap().le, Some(256));
+        let extended = CommandApdu::decode(&[0, 1, 2, 3, 0, 0, 1, 0xaa, 0, 0]).unwrap();
+        assert_eq!(extended.data, &[0xaa]);
+        assert_eq!(extended.le, Some(65_536));
+    }
+}

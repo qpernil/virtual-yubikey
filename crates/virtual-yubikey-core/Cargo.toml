@@ -1,0 +1,19 @@
+[package]
+name = "virtual-yubikey-core"
+version = "0.1.0"
+edition = "2021"
+description = "Transport-neutral logical YubiKey emulator"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+aes = "0.8.4"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+minicbor = { version = "2.3.0", features = ["alloc"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
+sha2 = "0.11.0"
+signature = "3.0.0"
+subtle = "2.6.1"
+zeroize = "1.9.0"
