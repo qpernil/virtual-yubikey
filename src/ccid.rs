@@ -2,7 +2,6 @@
 
 use crate::diagnostics::{self, Level};
 use crate::smartcard::{Card, ATR};
-use virtual_yubikey_core::{shared_fido_authenticator, SharedFidoAuthenticator};
 
 const PC_TO_RDR_SET_PARAMETERS: u8 = 0x61;
 const PC_TO_RDR_ICC_POWER_ON: u8 = 0x62;
@@ -38,13 +37,9 @@ pub(crate) struct Device {
 
 impl Device {
     pub(crate) fn new(serial: u32) -> Self {
-        Self::with_fido(serial, shared_fido_authenticator())
-    }
-
-    pub(crate) fn with_fido(serial: u32, fido: SharedFidoAuthenticator) -> Self {
         Self {
             active: false,
-            card: Card::with_fido(serial, fido),
+            card: Card::new(serial),
             buffered: Vec::new(),
         }
     }

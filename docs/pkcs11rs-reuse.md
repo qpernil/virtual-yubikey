@@ -14,8 +14,9 @@ ownership, privilege separation, and systemd integration. PC/SC,
 CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
 The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
-`pkcs11rs` can continue transporting FIDO/CTAP over ISO 7816 APDUs. Both paths
-use the same authenticator state rather than separate applet implementations.
+The physical USB CCID reader exposes Management only. `pkcs11rs` should use HID
+or its direct-USB connector for FIDO and use CCID for Management discovery. The
+core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 
 ## Current boundary
 
@@ -39,7 +40,7 @@ and keeps standalone Pi builds reproducible.
    `pkcs11rs` as conformance fixtures.
 2. Run the core's FIDO, PIN, credential-management and `previewSign`
    registration/signing tests through the standalone logical device.
-3. Exercise the same commands through the Pi's USB CCID transport.
+3. Exercise FIDO through the Pi's USB HID transport and Management through CCID.
 4. Add a small `pkcs11rs` test adapter and run the existing mock test suite
    against the core. Only then remove the duplicate test implementation.
 5. Use workspace path dependencies during coordinated development. For independent clones,

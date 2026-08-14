@@ -21,7 +21,7 @@ use std::sync::mpsc::{self, TryRecvError};
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
-use virtual_yubikey_core::{shared_fido_authenticator, SharedFidoAuthenticator};
+use virtual_yubikey_core::FidoAuthenticator;
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
@@ -102,22 +102,20 @@ impl Endpoints {
             mut ccid_notification_pending,
         } = self;
         let (completion_tx, completion_rx) = mpsc::channel();
-        let fido = shared_fido_authenticator();
 
         // FunctionFS endpoint reads remain synchronous after enable even when
         // opened O_NONBLOCK, so keep the bulk OUT endpoint in its own thread.
         let ccid_completion = completion_tx.clone();
-        let ccid_fido = fido.clone();
         thread::Builder::new()
             .name("ccid-usb".to_owned())
             .spawn(move || {
-                let _ = ccid_completion
-                    .send(("CCID", serve_ccid(ccid_out, ccid_in, serial, ccid_fido)));
+                let _ = ccid_completion.send(("CCID", serve_ccid(ccid_out, ccid_in, serial)));
             })?;
 
         thread::Builder::new()
             .name("fido-hid".to_owned())
             .spawn(move || {
+                let fido = FidoAuthenticator::new();
                 let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido)));
             })?;
 
@@ -170,14 +168,9 @@ impl Endpoints {
 }
 
 #[cfg(target_os = "linux")]
-fn serve_ccid(
-    mut output: File,
-    mut input: File,
-    serial: u32,
-    fido: SharedFidoAuthenticator,
-) -> io::Result<()> {
+fn serve_ccid(mut output: File, mut input: File, serial: u32) -> io::Result<()> {
     let mut request = [0_u8; MAX_TRANSFER];
-    let mut ccid = crate::ccid::Device::with_fido(serial, fido);
+    let mut ccid = crate::ccid::Device::new(serial);
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
             Ok(0) => {}
@@ -196,7 +189,7 @@ fn serve_ccid(
 }
 
 #[cfg(target_os = "linux")]
-fn serve_hid(mut hid: File, fido: SharedFidoAuthenticator) -> io::Result<()> {
+fn serve_hid(mut hid: File, mut fido: FidoAuthenticator) -> io::Result<()> {
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
     let mut ctaphid = crate::ctaphid::Device::new([5, 8, 0]);
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
@@ -221,10 +214,7 @@ fn serve_hid(mut hid: File, fido: SharedFidoAuthenticator) -> io::Result<()> {
                         report[4]
                     ),
                 );
-                let replies = ctaphid.receive(&report, |request| match fido.lock() {
-                    Ok(mut authenticator) => authenticator.exchange(request),
-                    Err(_) => vec![0x7f],
-                });
+                let replies = ctaphid.receive(&report, |request| fido.exchange(request));
                 for reply in replies {
                     hid.write_all(&reply)?;
                 }

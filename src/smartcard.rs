@@ -1,14 +1,11 @@
 //! Diagnostic adapter from CCID to the transport-neutral logical device.
 
 use crate::diagnostics::{self, Level};
-use virtual_yubikey_core::{
-    shared_fido_authenticator, Applet, CommandApdu, DeviceProfile, SharedFidoAuthenticator,
-    VirtualYubiKey,
-};
+use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey, FIDO2_AID};
 
 pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
-pub(crate) use virtual_yubikey_core::{FIDO2_AID, MANAGEMENT_AID};
+pub(crate) use virtual_yubikey_core::MANAGEMENT_AID;
 
 pub(crate) struct Card {
     device: VirtualYubiKey,
@@ -16,12 +13,8 @@ pub(crate) struct Card {
 
 impl Card {
     pub(crate) fn new(serial: u32) -> Self {
-        Self::with_fido(serial, shared_fido_authenticator())
-    }
-
-    pub(crate) fn with_fido(serial: u32, fido: SharedFidoAuthenticator) -> Self {
         Self {
-            device: VirtualYubiKey::with_fido(DeviceProfile::yubikey_5_8_ccid(serial), fido),
+            device: VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(serial)),
         }
     }
 
@@ -69,7 +62,20 @@ impl Card {
             ),
         }
 
-        let response = self.device.transmit(raw);
+        let response = if command.as_ref().is_ok_and(|command| {
+            command.ins == 0xa4 && command.p1 == 0x04 && command.data == FIDO2_AID
+        }) {
+            self.device.reset();
+            diagnostics::log(
+                Level::Info,
+                "fido2",
+                "ccid_transport_unavailable",
+                format_args!("use=fido_hid"),
+            );
+            vec![0x6a, 0x82]
+        } else {
+            self.device.transmit(raw)
+        };
         if let Ok(command) = command {
             self.log_outcome(&command, &response);
         }
@@ -110,24 +116,6 @@ impl Card {
                     format_args!(
                         "serial={} version={major}.{minor}.{patch} usb_capabilities=0x{:04x} page={} sw={status:04x}",
                         profile.serial, profile.usb_enabled_capabilities(), command.p1
-                    ),
-                );
-            }
-            Some(Applet::Fido2) if command.ins == 0x10 => {
-                let ctap_command = command.data.first().copied();
-                diagnostics::log(
-                    Level::Info,
-                    "fido2",
-                    if ctap_command == Some(0x04) {
-                        "get_info"
-                    } else {
-                        "ctap_exchange"
-                    },
-                    format_args!(
-                        "command={} payload_length={} sw={status:04x}",
-                        ctap_command
-                            .map_or_else(|| "none".to_owned(), |value| format!("{value:02x}")),
-                        command.data.len().saturating_sub(1)
                     ),
                 );
             }
@@ -191,15 +179,10 @@ mod tests {
     }
 
     #[test]
-    fn routes_fido_through_the_shared_core() {
+    fn directs_usb_fido_clients_to_hid() {
         let mut card = Card::new(1);
-        assert_eq!(
-            card.transmit(&select(&FIDO2_AID)),
-            [b"U2F_V2".as_slice(), &[0x90, 0]].concat()
-        );
-        let response = card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04, 0]);
-        assert_eq!(response[0], 0);
-        assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+        assert_eq!(card.transmit(&select(&FIDO2_AID)), [0x6a, 0x82]);
+        assert_eq!(card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04, 0]), [0x69, 0x99]);
     }
 
     #[test]
