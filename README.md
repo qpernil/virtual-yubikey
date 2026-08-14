@@ -9,10 +9,10 @@ It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
 
-The current feasibility build exposes one USB CCID interface and implements
-enough YubiKey Management and FIDO2 smart-card behavior for discovery and
-protocol experiments. The next phase will reuse the richer virtual YubiKey and
-`previewSign` implementation already present in `pkcs11rs`.
+The current build exposes one USB CCID interface. Its logical device lives in
+the transport-neutral `virtual-yubikey-core` workspace crate, which implements
+YubiKey Management and CTAP 2.1 behavior including PIN authorization,
+credential management, resident credentials, and `previewSign`.
 
 ## Current behavior
 
@@ -21,12 +21,8 @@ protocol experiments. The next phase will reuse the richer virtual YubiKey and
 | USB identity | `1050:0404`, `Yubico`, `YubiKey CCID`, `bcdDevice` `0x0580` |
 | CCID transport | Class `0x0b`, T=1, one inserted slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| FIDO2 | AID `A0000006472F0001`, SELECT and `authenticatorGetInfo` |
+| FIDO2 | AID `A0000006472F0001`, CTAP 2.1, Client PIN protocols 1/2, credential management, resident credentials and `previewSign` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
-
-This repository no longer exposes a YubiHSM vendor interface. A future YubiHSM
-mock belongs as a software backend in `yubihsm-connector`, using its normal HTTP
-API. See [the reuse plan](docs/pkcs11rs-reuse.md).
 
 The program uses Yubico's USB VID/PID solely for controlled compatibility
 testing. Do not distribute a product that presents itself as genuine Yubico
@@ -36,13 +32,28 @@ hardware.
 
 | Module | Responsibility |
 | --- | --- |
+| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, Management and FIDO applet state |
 | `main.rs` | Process orchestration and signal handling |
 | `cli.rs` | Command-line validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
 | `gadget.rs` | Privileged ConfigFS lifecycle and worker supervision |
 | `functionfs.rs` | Unprivileged FunctionFS transport and CCID USB descriptors |
 | `ccid.rs` | CCID framing, reader state, and smart-card activation |
-| `smartcard.rs` | YubiKey Management and FIDO2 APDU routing |
+| `smartcard.rs` | Diagnostics adapter between CCID and `virtual-yubikey-core` |
+
+## Developing virtual firmware
+
+The workspace deliberately separates the logical device from its physical
+transport. `virtual-yubikey-core` is the firmware layer: a profile supplies the
+firmware version, serial number, capabilities and form factor, while the core
+owns installed applets and their state. The outer binary acts as the board and
+USB controller by providing ConfigFS, FunctionFS and CCID.
+
+New firmware behavior should therefore be developed and tested as APDU vectors
+in the core first, then exercised through CCID and finally against real host
+applications. USB descriptors and Management capability reports must continue
+to derive from the same profile so the device never advertises behavior its
+firmware does not implement.
 
 ## Hardware and operating system
 
@@ -135,18 +146,3 @@ cat /sys/class/udc/fe980000.usb/state
 ```
 
 With a data-capable host connection, the UDC state should be `configured`.
-
-### Migrating from `yubihsm-mock`
-
-Stop and remove the old unit before installing the renamed service so it cannot
-hold the UDC or leave a second enabled service:
-
-```sh
-sudo systemctl disable --now yubihsm-mock.service
-sudo rm /etc/systemd/system/yubihsm-mock.service
-sudo rm /usr/local/sbin/yubihsm-mock
-sudo systemctl daemon-reload
-```
-
-Then clone or rename the checkout to `/home/per/virtual-yubikey` and follow the
-service installation commands above.
