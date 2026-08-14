@@ -9,4 +9,12 @@ keywords = ["raspberry-pi", "usb-gadget", "functionfs", "yubikey"]
 categories = ["development-tools::testing", "hardware-support"]
 publish = false
 
-# Deliberately dependency-free. Linux interfaces are called directly.
+[workspace]
+members = ["crates/virtual-yubikey-core"]
+resolver = "2"
+
+[dependencies]
+virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
+
+# The USB binary deliberately calls Linux interfaces directly. Protocol and
+# emulator dependencies live in the transport-neutral core crate.
