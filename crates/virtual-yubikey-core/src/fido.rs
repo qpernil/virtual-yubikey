@@ -102,10 +102,6 @@ impl FidoState {
             preview_credential: None,
         }
     }
-
-    pub(crate) fn reset_connection(&mut self) {
-        self.key_agreement = None;
-    }
 }
 
 pub(crate) fn exchange(state: &mut FidoState, request: &[u8]) -> Vec<u8> {
