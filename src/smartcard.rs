@@ -1,7 +1,10 @@
 //! Diagnostic adapter from CCID to the transport-neutral logical device.
 
 use crate::diagnostics::{self, Level};
-use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey};
+use virtual_yubikey_core::{
+    shared_fido_authenticator, Applet, CommandApdu, DeviceProfile, SharedFidoAuthenticator,
+    VirtualYubiKey,
+};
 
 pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
@@ -13,8 +16,12 @@ pub(crate) struct Card {
 
 impl Card {
     pub(crate) fn new(serial: u32) -> Self {
+        Self::with_fido(serial, shared_fido_authenticator())
+    }
+
+    pub(crate) fn with_fido(serial: u32, fido: SharedFidoAuthenticator) -> Self {
         Self {
-            device: VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(serial)),
+            device: VirtualYubiKey::with_fido(DeviceProfile::yubikey_5_8_ccid(serial), fido),
         }
     }
 

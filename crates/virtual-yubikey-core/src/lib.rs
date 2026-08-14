@@ -8,6 +8,8 @@ mod crypto;
 mod fido;
 mod preview_sign;
 
+use std::sync::{Arc, Mutex};
+
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
 
@@ -100,22 +102,55 @@ impl DeviceProfile {
 }
 
 #[derive(Debug)]
+pub struct FidoAuthenticator {
+    state: fido::FidoState,
+}
+
+impl FidoAuthenticator {
+    pub fn new() -> Self {
+        Self {
+            state: fido::FidoState::new(),
+        }
+    }
+
+    pub fn exchange(&mut self, request: &[u8]) -> Vec<u8> {
+        fido::exchange(&mut self.state, request)
+    }
+}
+
+impl Default for FidoAuthenticator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type SharedFidoAuthenticator = Arc<Mutex<FidoAuthenticator>>;
+
+pub fn shared_fido_authenticator() -> SharedFidoAuthenticator {
+    Arc::new(Mutex::new(FidoAuthenticator::new()))
+}
+
+#[derive(Debug)]
 pub struct VirtualYubiKey {
     profile: DeviceProfile,
     selected: Option<Applet>,
     chained_command: Vec<u8>,
     pending_response: Vec<u8>,
-    fido: fido::FidoState,
+    fido: SharedFidoAuthenticator,
 }
 
 impl VirtualYubiKey {
     pub fn new(profile: DeviceProfile) -> Self {
+        Self::with_fido(profile, shared_fido_authenticator())
+    }
+
+    pub fn with_fido(profile: DeviceProfile, fido: SharedFidoAuthenticator) -> Self {
         Self {
             profile,
             selected: None,
             chained_command: Vec::new(),
             pending_response: Vec::new(),
-            fido: fido::FidoState::new(),
+            fido,
         }
     }
 
@@ -139,7 +174,6 @@ impl VirtualYubiKey {
         self.selected = None;
         self.chained_command.clear();
         self.pending_response.clear();
-        self.fido.reset_connection();
     }
 
     pub fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
@@ -222,7 +256,11 @@ impl VirtualYubiKey {
         }
 
         let request = std::mem::take(&mut self.chained_command);
-        let response = fido::exchange(&mut self.fido, &request);
+        let response = self
+            .fido
+            .lock()
+            .map(|mut fido| fido.exchange(&request))
+            .unwrap_or_else(|_| vec![0x7f]);
         self.pending_response = response;
         self.take_response(command.le)
     }
