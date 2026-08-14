@@ -3,7 +3,9 @@
 use crate::diagnostics::{self, Level};
 use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey};
 
-pub(crate) use virtual_yubikey_core::{ATR, FIDO2_AID, MANAGEMENT_AID};
+pub(crate) use virtual_yubikey_core::ATR;
+#[cfg(test)]
+pub(crate) use virtual_yubikey_core::{FIDO2_AID, MANAGEMENT_AID};
 
 pub(crate) struct Card {
     device: VirtualYubiKey,
