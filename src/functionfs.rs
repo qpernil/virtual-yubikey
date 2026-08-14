@@ -20,6 +20,8 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, TryRecvError};
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
+#[cfg(target_os = "linux")]
+use virtual_yubikey_core::{shared_fido_authenticator, SharedFidoAuthenticator};
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
@@ -27,7 +29,12 @@ const MAX_TRANSFER: usize = 16 * 1024;
 const O_NONBLOCK_LINUX: i32 = 0x800;
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_worker(serial: u32, ready_fd: i32, functionfs: &Path) -> io::Result<()> {
+pub(crate) fn run_worker(
+    serial: u32,
+    ready_fd: i32,
+    hid_fd: i32,
+    functionfs: &Path,
+) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -41,6 +48,8 @@ pub(crate) fn run_worker(serial: u32, ready_fd: i32, functionfs: &Path) -> io::R
 
     // SAFETY: the supervisor passes ownership of this descriptor to the worker.
     let mut ready = unsafe { File::from_raw_fd(ready_fd) };
+    // SAFETY: the supervisor opens and passes ownership of the HID gadget descriptor.
+    let hid = unsafe { File::from_raw_fd(hid_fd) };
     let endpoints = Endpoints::open(functionfs)?;
     ready.write_all(b"R")?;
     drop(ready);
@@ -50,7 +59,7 @@ pub(crate) fn run_worker(serial: u32, ready_fd: i32, functionfs: &Path) -> io::R
         "ready",
         format_args!("serial={serial} functionfs={}", functionfs.display()),
     );
-    endpoints.serve(serial)
+    endpoints.serve(serial, hid)
 }
 
 #[cfg(target_os = "linux")]
@@ -84,7 +93,7 @@ impl Endpoints {
         })
     }
 
-    fn serve(self, serial: u32) -> io::Result<()> {
+    fn serve(self, serial: u32, hid: File) -> io::Result<()> {
         let Self {
             mut ep0,
             ccid_out,
@@ -93,13 +102,23 @@ impl Endpoints {
             mut ccid_notification_pending,
         } = self;
         let (completion_tx, completion_rx) = mpsc::channel();
+        let fido = shared_fido_authenticator();
 
         // FunctionFS endpoint reads remain synchronous after enable even when
         // opened O_NONBLOCK, so keep the bulk OUT endpoint in its own thread.
+        let ccid_completion = completion_tx.clone();
+        let ccid_fido = fido.clone();
         thread::Builder::new()
             .name("ccid-usb".to_owned())
             .spawn(move || {
-                let _ = completion_tx.send(serve_ccid(ccid_out, ccid_in, serial));
+                let _ = ccid_completion
+                    .send(("CCID", serve_ccid(ccid_out, ccid_in, serial, ccid_fido)));
+            })?;
+
+        thread::Builder::new()
+            .name("fido-hid".to_owned())
+            .spawn(move || {
+                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido)));
             })?;
 
         while !STOP_REQUESTED.load(Ordering::Relaxed) {
@@ -125,11 +144,16 @@ impl Endpoints {
             }
 
             match completion_rx.try_recv() {
-                Ok(Ok(())) => {
-                    return Err(io::Error::other("CCID endpoint worker exited unexpectedly"));
+                Ok((transport, Ok(()))) => {
+                    return Err(io::Error::other(format!(
+                        "{transport} endpoint worker exited unexpectedly"
+                    )));
                 }
-                Ok(Err(error)) => {
-                    return Err(with_context(error, "CCID endpoint worker failed"));
+                Ok((transport, Err(error))) => {
+                    return Err(with_context(
+                        error,
+                        &format!("{transport} endpoint worker failed"),
+                    ));
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
@@ -146,9 +170,14 @@ impl Endpoints {
 }
 
 #[cfg(target_os = "linux")]
-fn serve_ccid(mut output: File, mut input: File, serial: u32) -> io::Result<()> {
+fn serve_ccid(
+    mut output: File,
+    mut input: File,
+    serial: u32,
+    fido: SharedFidoAuthenticator,
+) -> io::Result<()> {
     let mut request = [0_u8; MAX_TRANSFER];
-    let mut ccid = crate::ccid::Device::new(serial);
+    let mut ccid = crate::ccid::Device::with_fido(serial, fido);
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
             Ok(0) => {}
@@ -160,6 +189,48 @@ fn serve_ccid(mut output: File, mut input: File, serial: u32) -> io::Result<()> 
             Err(error) if transient_endpoint_error(&error) => {
                 thread::sleep(Duration::from_millis(5));
             }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn serve_hid(mut hid: File, fido: SharedFidoAuthenticator) -> io::Result<()> {
+    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+    let mut ctaphid = crate::ctaphid::Device::new([5, 8, 0]);
+    while !STOP_REQUESTED.load(Ordering::Relaxed) {
+        match hid.read(&mut report) {
+            Ok(0) => {}
+            Ok(length) if length != report.len() => {
+                diagnostics::log(
+                    Level::Info,
+                    "ctaphid",
+                    "report_rejected",
+                    format_args!("reason=invalid_length length={length}"),
+                );
+            }
+            Ok(_) => {
+                diagnostics::log(
+                    Level::Debug,
+                    "ctaphid",
+                    "report",
+                    format_args!(
+                        "channel={:08x} command={:02x}",
+                        u32::from_be_bytes(report[0..4].try_into().unwrap()),
+                        report[4]
+                    ),
+                );
+                let replies = ctaphid.receive(&report, |request| match fido.lock() {
+                    Ok(mut authenticator) => authenticator.exchange(request),
+                    Err(_) => vec![0x7f],
+                });
+                for reply in replies {
+                    hid.write_all(&reply)?;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if endpoint_is_gone(&error) => return Ok(()),
             Err(error) => return Err(error),
         }
     }

@@ -1,15 +1,13 @@
 # Virtual YubiKey
 
-`virtual-yubikey` makes a Raspberry Pi enumerate as a CCID-only YubiKey for
-compatibility testing. CCID is intentional: `pkcs11rs` carries FIDO/CTAP over
-smart-card APDUs, so this target does not need a separate FIDO HID interface.
-If compatibility testing finds a host or application that requires FIDO HID,
-we will add it as a second interface without changing the CCID applet model.
+`virtual-yubikey` makes a Raspberry Pi enumerate as a composite FIDO HID and
+CCID YubiKey for compatibility testing. Both transports route CTAP commands to
+the same logical authenticator; CCID additionally exposes YubiKey Management.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
 
-The current build exposes one USB CCID interface. Its logical device lives in
+The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
 YubiKey Management and CTAP 2.1 behavior including PIN authorization,
 credential management, resident credentials, and `previewSign`.
@@ -18,7 +16,8 @@ credential management, resident credentials, and `previewSign`.
 
 | Layer | Behavior |
 | --- | --- |
-| USB identity | `1050:0404`, `Yubico`, `YubiKey CCID`, `bcdDevice` `0x0580` |
+| USB identity | `1050:0406`, `Yubico`, `YubiKey FIDO+CCID`, `bcdDevice` `0x0580` |
+| FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | FIDO2 | AID `A0000006472F0001`, CTAP 2.1, Client PIN protocols 1/2, credential management, resident credentials and `previewSign` |
@@ -38,6 +37,7 @@ hardware.
 | `diagnostics.rs` | Structured, payload-safe logging |
 | `gadget.rs` | Privileged ConfigFS lifecycle and worker supervision |
 | `functionfs.rs` | Unprivileged FunctionFS transport and CCID USB descriptors |
+| `ctaphid.rs` | CTAPHID channels, packet reassembly, command routing and response fragmentation |
 | `ccid.rs` | CCID framing, reader state, and smart-card activation |
 | `smartcard.rs` | Diagnostics adapter between CCID and `virtual-yubikey-core` |
 
@@ -105,10 +105,11 @@ sudo ./target/release/virtual-yubikey --run-as per
 ```
 
 The process starts as a small root supervisor because ConfigFS gadget creation,
-mounting FunctionFS, and binding the UDC require root. It immediately launches
-a fresh copy as the selected unprivileged account; that worker owns FunctionFS
-and handles all host-controlled USB protocol data. There is no standard Pi
-group equivalent to `dialout` for gadget administration.
+mounting FunctionFS, creating the HID gadget, and binding the UDC require root.
+It opens `/dev/hidg0`, then launches a fresh copy as the selected unprivileged
+account with that descriptor inherited. The worker owns FunctionFS and handles
+all host-controlled USB protocol data without regaining privileges. There is no
+standard Pi group equivalent to `dialout` for gadget administration.
 
 Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
 instances, and a later start recovers stale state left by a crash. Options:

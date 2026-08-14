@@ -21,6 +21,7 @@ use std::time::Duration;
 const CONFIGFS: &str = "/sys/kernel/config";
 const GADGET: &str = "/sys/kernel/config/usb_gadget/virtual-yubikey";
 pub(crate) const FUNCTIONFS: &str = "/dev/ffs-virtual-yubikey";
+const HID_DEVICE: &str = "/dev/hidg0";
 const LOCK_FILE: &str = "/run/lock/virtual-yubikey.lock";
 
 const LOCK_EX: c_int = 2;
@@ -117,11 +118,17 @@ impl Runtime {
             Some(&mount_options),
         )?;
         runtime.mounted_functionfs = true;
-        runtime.worker = Some(spawn_worker(serial, &identity, log_level)?);
+        let hid = open_hid_device()?;
+        runtime.worker = Some(spawn_worker(serial, &identity, log_level, &hid)?);
+        drop(hid);
 
         symlink(
             &format!("{GADGET}/functions/ffs.virtual-yubikey"),
             &format!("{GADGET}/configs/c.1/ffs.virtual-yubikey"),
+        )?;
+        symlink(
+            &format!("{GADGET}/functions/hid.virtual-yubikey"),
+            &format!("{GADGET}/configs/c.1/hid.virtual-yubikey"),
         )?;
         let udc = select_udc(requested_udc)?;
         write_attribute(&format!("{GADGET}/UDC"), &udc)?;
@@ -234,7 +241,18 @@ impl Runtime {
 
         fs::create_dir(format!("{GADGET}/configs/c.1"))?;
         write_attribute(&format!("{GADGET}/configs/c.1/MaxPower"), "30")?;
-        fs::create_dir(format!("{GADGET}/functions/ffs.virtual-yubikey"))
+        fs::create_dir(format!("{GADGET}/functions/ffs.virtual-yubikey"))?;
+        let hid = format!("{GADGET}/functions/hid.virtual-yubikey");
+        fs::create_dir(&hid)?;
+        write_attribute(&format!("{hid}/protocol"), "0")?;
+        write_attribute(&format!("{hid}/subclass"), "0")?;
+        write_attribute(&format!("{hid}/report_length"), "64")?;
+        fs::write(format!("{hid}/report_desc"), fido_report_descriptor()).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("write HID report descriptor: {error}"),
+            )
+        })
     }
 }
 
@@ -302,11 +320,17 @@ fn query_account_id(flag: &str, name: &str) -> io::Result<u32> {
         .map_err(|_| io::Error::other(format!("id returned an invalid numeric ID for {name:?}")))
 }
 
-fn spawn_worker(serial: u32, identity: &WorkerIdentity, log_level: Level) -> io::Result<Child> {
+fn spawn_worker(
+    serial: u32,
+    identity: &WorkerIdentity,
+    log_level: Level,
+    hid: &File,
+) -> io::Result<Child> {
     let executable = env::current_exe()?;
     let (mut supervisor_ready, worker_ready) = UnixStream::pair()?;
     supervisor_ready.set_read_timeout(Some(Duration::from_secs(10)))?;
     let ready_fd = worker_ready.as_raw_fd();
+    let hid_fd = hid.as_raw_fd();
     let parent_pid = std::process::id() as c_int;
     let uid = identity.uid;
     let gid = identity.gid;
@@ -318,6 +342,8 @@ fn spawn_worker(serial: u32, identity: &WorkerIdentity, log_level: Level) -> io:
             &serial.to_string(),
             "--worker-fd",
             &ready_fd.to_string(),
+            "--hid-fd",
+            &hid_fd.to_string(),
             "--log-level",
             log_level.as_str(),
         ])
@@ -332,6 +358,9 @@ fn spawn_worker(serial: u32, identity: &WorkerIdentity, log_level: Level) -> io:
     unsafe {
         command.pre_exec(move || {
             if fcntl(ready_fd, F_SETFD, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if fcntl(hid_fd, F_SETFD, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
             if setgroups(0, std::ptr::null()) != 0 {
@@ -374,6 +403,48 @@ fn spawn_worker(serial: u32, identity: &WorkerIdentity, log_level: Level) -> io:
         ));
     }
     Ok(child)
+}
+
+fn open_hid_device() -> io::Result<File> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match OpenOptions::new().read(true).write(true).open(HID_DEVICE) {
+            Ok(device) => return Ok(device),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("open {HID_DEVICE}: {error}"),
+                ));
+            }
+        }
+    }
+}
+
+fn fido_report_descriptor() -> &'static [u8] {
+    &[
+        0x06, 0xd0, 0xf1, // Usage Page (FIDO Alliance)
+        0x09, 0x01, // Usage (Authenticator Device)
+        0xa1, 0x01, // Collection (Application)
+        0x09, 0x20, // Usage (Input Report Data)
+        0x15, 0x00, // Logical Minimum (0)
+        0x26, 0xff, 0x00, // Logical Maximum (255)
+        0x75, 0x08, // Report Size (8)
+        0x95, 0x40, // Report Count (64)
+        0x81, 0x02, // Input (Data, Variable, Absolute)
+        0x09, 0x21, // Usage (Output Report Data)
+        0x15, 0x00, // Logical Minimum (0)
+        0x26, 0xff, 0x00, // Logical Maximum (255)
+        0x75, 0x08, // Report Size (8)
+        0x95, 0x40, // Report Count (64)
+        0x91, 0x02, // Output (Data, Variable, Absolute)
+        0xc0, // End Collection
+    ]
 }
 
 fn stop_worker(worker: &mut Option<Child>) -> io::Result<()> {
@@ -496,10 +567,16 @@ fn unbind_gadget() -> io::Result<()> {
 
 fn remove_gadget_tree() -> io::Result<()> {
     remove_file_if_exists(Path::new(&format!(
+        "{GADGET}/configs/c.1/hid.virtual-yubikey"
+    )))?;
+    remove_file_if_exists(Path::new(&format!(
         "{GADGET}/configs/c.1/ffs.virtual-yubikey"
     )))?;
     remove_dir_if_exists(Path::new(&format!(
         "{GADGET}/functions/ffs.virtual-yubikey"
+    )))?;
+    remove_dir_if_exists(Path::new(&format!(
+        "{GADGET}/functions/hid.virtual-yubikey"
     )))?;
     remove_dir_if_exists(Path::new(&format!("{GADGET}/configs/c.1/strings/0x409")))?;
     remove_dir_if_exists(Path::new(&format!("{GADGET}/configs/c.1")))?;

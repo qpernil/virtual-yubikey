@@ -12,22 +12,21 @@ proven over the standalone and USB paths.
 The Linux USB layers remain here: ConfigFS, FunctionFS, CCID framing, endpoint
 ownership, privilege separation, and systemd integration. PC/SC,
 CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
-The USB gadget deliberately remains CCID-only because `pkcs11rs` transports
-FIDO/CTAP commands over ISO 7816 APDUs; no FIDO HID interface is currently
-required. If host compatibility tests demonstrate that an application requires
-FIDO HID, add it as a separate USB interface backed by the same shared emulator
-state rather than implementing a second applet stack.
+The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
+HID for FIDO operations even when the same physical device has a CCID interface.
+`pkcs11rs` can continue transporting FIDO/CTAP over ISO 7816 APDUs. Both paths
+use the same authenticator state rather than separate applet implementations.
 
 ## Current boundary
 
 | Component | Responsibility |
 | --- | --- |
 | `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management behavior, FIDO routing and logical device state |
-| `virtual-yubikey` binary | ConfigFS, FunctionFS, CCID, privilege separation, diagnostics and systemd integration |
+| `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
 | future `pkcs11rs` adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
 ```text
-virtual-yubikey USB/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
+virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
 ```
 
 The core does not depend on either top-level application. This avoids a cycle
