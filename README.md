@@ -1,8 +1,8 @@
 # Virtual YubiKey
 
 `virtual-yubikey` makes a Raspberry Pi enumerate as a composite FIDO HID and
-CCID YubiKey for compatibility testing. Both transports route CTAP commands to
-the same logical authenticator; CCID additionally exposes YubiKey Management.
+CCID YubiKey for compatibility testing. HID carries FIDO/CTAP; CCID exposes
+YubiKey Management. The USB CCID reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -18,9 +18,9 @@ credential management, resident credentials, and `previewSign`.
 | --- | --- |
 | USB identity | `1050:0406`, `Yubico`, `YubiKey FIDO+CCID`, `bcdDevice` `0x0580` |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
-| CCID transport | Class `0x0b`, T=1, one inserted slot, bulk OUT/IN and interrupt IN |
+| CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| FIDO2 | AID `A0000006472F0001`, CTAP 2.1, Client PIN protocols 1/2, credential management, resident credentials and `previewSign` |
+| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, credential management, resident credentials and `previewSign` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
 The program uses Yubico's USB VID/PID solely for controlled compatibility
@@ -123,6 +123,12 @@ instances, and a later start recovers stale state left by a crash. Options:
 
 Trace logging includes complete protocol payloads and may expose PINs or
 cryptographic material as the emulator grows.
+
+All currently implemented CTAP operations complete synchronously. Before a
+future operation waits for user presence or other slow work, its execution must
+move off the transport loop: FIDO HID must emit CTAPHID KEEPALIVE and accept
+CANCEL, while CCID must emit command time-extension responses. HID and CCID
+already have independent transport threads and separate connection state.
 
 ## Install as a service
 
