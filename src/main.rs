@@ -12,6 +12,8 @@ mod functionfs;
 mod gadget;
 #[cfg(any(target_os = "linux", test))]
 mod smartcard;
+#[cfg(any(target_os = "linux", test))]
+mod usb_identity;
 
 use std::env;
 use std::io;
