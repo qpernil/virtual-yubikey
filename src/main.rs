@@ -6,6 +6,8 @@
 #[cfg(any(target_os = "linux", test))]
 mod ccid;
 mod cli;
+#[cfg(any(target_os = "linux", test))]
+mod ctaphid;
 mod diagnostics;
 mod functionfs;
 #[cfg(target_os = "linux")]
@@ -43,6 +45,7 @@ fn run() -> io::Result<()> {
             return functionfs::run_worker(
                 options.serial,
                 _ready_fd,
+                options.hid_fd.expect("validated with --worker-fd"),
                 Path::new(gadget::FUNCTIONFS),
             );
         }
@@ -69,7 +72,7 @@ fn run() -> io::Result<()> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (options.udc, options.run_as);
+        let _ = (options.udc, options.run_as, options.hid_fd);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "USB gadget mode is Linux-only",

@@ -8,10 +8,10 @@ pub(crate) struct UsbInterfaces {
 }
 
 impl UsbInterfaces {
-    pub(crate) const fn ccid_only() -> Self {
+    pub(crate) const fn fido_ccid() -> Self {
         Self {
             otp: false,
-            fido: false,
+            fido: true,
             ccid: true,
         }
     }
@@ -61,7 +61,7 @@ impl UsbIdentity {
     }
 }
 
-pub(crate) const USB_IDENTITY: UsbIdentity = UsbIdentity::yubikey_5_8(UsbInterfaces::ccid_only());
+pub(crate) const USB_IDENTITY: UsbIdentity = UsbIdentity::yubikey_5_8(UsbInterfaces::fido_ccid());
 
 #[cfg(test)]
 mod tests {
@@ -70,8 +70,8 @@ mod tests {
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
         assert_eq!(UsbIdentity::VENDOR_ID, 0x1050);
-        assert_eq!(USB_IDENTITY.product_id(), 0x0404);
-        assert_eq!(USB_IDENTITY.product(), "YubiKey CCID");
+        assert_eq!(USB_IDENTITY.product_id(), 0x0406);
+        assert_eq!(USB_IDENTITY.product(), "YubiKey FIDO+CCID");
         assert_eq!(USB_IDENTITY.bcd_device(), 0x0580);
 
         let composite = UsbIdentity::yubikey_5_8(UsbInterfaces {
