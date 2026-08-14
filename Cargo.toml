@@ -1,0 +1,12 @@
+[package]
+name = "virtual-yubikey"
+version = "0.1.0"
+edition = "2021"
+description = "A privilege-separated virtual YubiKey for Linux USB gadget mode"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["raspberry-pi", "usb-gadget", "functionfs", "yubikey"]
+categories = ["development-tools::testing", "hardware-support"]
+publish = false
+
+# Deliberately dependency-free. Linux interfaces are called directly.
