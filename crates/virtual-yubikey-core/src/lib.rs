@@ -22,6 +22,8 @@ const INS_READ_DEVICE_INFO: u8 = 0x1d;
 const INS_CTAP_CBOR: u8 = 0x10;
 const ISO7816_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
+const CAPABILITY_CCID: u16 = 0x0004;
+const CAPABILITY_FIDO2: u16 = 0x0200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
@@ -38,13 +40,44 @@ impl Applet {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppletConfiguration {
+    pub management: bool,
+    pub fido2: bool,
+}
+
+impl AppletConfiguration {
+    pub const fn yubikey_5_8_preview_sign() -> Self {
+        Self {
+            management: true,
+            fido2: true,
+        }
+    }
+
+    pub const fn contains(self, applet: Applet) -> bool {
+        match applet {
+            Applet::Management => self.management,
+            Applet::Fido2 => self.fido2,
+        }
+    }
+
+    pub const fn usb_capabilities(self) -> u16 {
+        let ccid = if self.management || self.fido2 {
+            CAPABILITY_CCID
+        } else {
+            0
+        };
+        let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
+        ccid | fido2
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceProfile {
     pub serial: u32,
     pub firmware: [u8; 3],
-    pub usb_supported_capabilities: u16,
-    pub usb_enabled_capabilities: u16,
     pub form_factor: u8,
+    pub applets: AppletConfiguration,
 }
 
 impl DeviceProfile {
@@ -52,10 +85,17 @@ impl DeviceProfile {
         Self {
             serial,
             firmware: [5, 8, 0],
-            usb_supported_capabilities: 0x0404,
-            usb_enabled_capabilities: 0x0404,
             form_factor: 0x01,
+            applets: AppletConfiguration::yubikey_5_8_preview_sign(),
         }
+    }
+
+    pub const fn usb_supported_capabilities(&self) -> u16 {
+        self.applets.usb_capabilities()
+    }
+
+    pub const fn usb_enabled_capabilities(&self) -> u16 {
+        self.applets.usb_capabilities()
     }
 }
 
@@ -126,13 +166,13 @@ impl VirtualYubiKey {
     fn select(&mut self, aid: &[u8]) -> ResponseApdu {
         self.chained_command.clear();
         self.pending_response.clear();
-        if aid == MANAGEMENT_AID {
+        if aid == MANAGEMENT_AID && self.profile.applets.contains(Applet::Management) {
             self.selected = Some(Applet::Management);
             let mut data = MANAGEMENT_SELECT_PREFIX.to_vec();
             let [major, minor, patch] = self.profile.firmware;
             data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
             ResponseApdu::success(data)
-        } else if aid == FIDO2_AID {
+        } else if aid == FIDO2_AID && self.profile.applets.contains(Applet::Fido2) {
             self.selected = Some(Applet::Fido2);
             ResponseApdu::success(b"U2F_V2".to_vec())
         } else {
@@ -153,13 +193,13 @@ impl VirtualYubiKey {
         push_tlv(
             &mut body,
             0x01,
-            &self.profile.usb_supported_capabilities.to_be_bytes(),
+            &self.profile.usb_supported_capabilities().to_be_bytes(),
         );
         push_tlv(&mut body, 0x02, &self.profile.serial.to_be_bytes());
         push_tlv(
             &mut body,
             0x03,
-            &self.profile.usb_enabled_capabilities.to_be_bytes(),
+            &self.profile.usb_enabled_capabilities().to_be_bytes(),
         );
         push_tlv(&mut body, 0x04, &[self.profile.form_factor]);
         push_tlv(&mut body, 0x05, &self.profile.firmware);
@@ -343,6 +383,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 2, 4]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 2, 4]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }

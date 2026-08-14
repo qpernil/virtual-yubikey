@@ -102,7 +102,7 @@ impl Card {
                     },
                     format_args!(
                         "serial={} version={major}.{minor}.{patch} usb_capabilities=0x{:04x} page={} sw={status:04x}",
-                        profile.serial, profile.usb_enabled_capabilities, command.p1
+                        profile.serial, profile.usb_enabled_capabilities(), command.p1
                     ),
                 );
             }
