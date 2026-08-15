@@ -106,10 +106,12 @@ sudo ./target/release/virtual-yubikey --run-as per
 
 The process starts as a small root supervisor because ConfigFS gadget creation,
 mounting FunctionFS, creating the HID gadget, and binding the UDC require root.
-It opens `/dev/hidg0`, then launches a fresh copy as the selected unprivileged
-account with that descriptor inherited. The worker owns FunctionFS and handles
-all host-controlled USB protocol data without regaining privileges. There is no
-standard Pi group equivalent to `dialout` for gadget administration.
+It launches a fresh copy as the selected unprivileged account, waits for that
+worker to publish the FunctionFS descriptors, then binds the gadget. Once
+`/dev/hidg0` appears, the supervisor assigns that node to the worker account and
+signals the worker to open it. The worker handles all host-controlled USB
+protocol data without regaining privileges. There is no standard Pi group
+equivalent to `dialout` for gadget administration.
 
 Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
 instances, and a later start recovers stale state left by a crash. Options:

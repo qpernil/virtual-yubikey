@@ -45,8 +45,8 @@ fn run() -> io::Result<()> {
             return functionfs::run_worker(
                 options.serial,
                 _ready_fd,
-                options.hid_fd.expect("validated with --worker-fd"),
                 Path::new(gadget::FUNCTIONFS),
+                Path::new(gadget::HID_DEVICE),
             );
         }
         #[cfg(not(target_os = "linux"))]
@@ -72,7 +72,7 @@ fn run() -> io::Result<()> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (options.udc, options.run_as, options.hid_fd);
+        let _ = (options.udc, options.run_as);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "USB gadget mode is Linux-only",

@@ -6,10 +6,11 @@ use crate::STOP_REQUESTED;
 use std::env;
 use std::ffi::{c_char, c_void, CString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_int, c_ulong};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{chown, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -21,7 +22,7 @@ use std::time::Duration;
 const CONFIGFS: &str = "/sys/kernel/config";
 const GADGET: &str = "/sys/kernel/config/usb_gadget/virtual-yubikey";
 pub(crate) const FUNCTIONFS: &str = "/dev/ffs-virtual-yubikey";
-const HID_DEVICE: &str = "/dev/hidg0";
+pub(crate) const HID_DEVICE: &str = "/dev/hidg0";
 const LOCK_FILE: &str = "/run/lock/virtual-yubikey.lock";
 
 const LOCK_EX: c_int = 2;
@@ -118,9 +119,8 @@ impl Runtime {
             Some(&mount_options),
         )?;
         runtime.mounted_functionfs = true;
-        let hid = open_hid_device()?;
-        runtime.worker = Some(spawn_worker(serial, &identity, log_level, &hid)?);
-        drop(hid);
+        let (worker, mut control) = spawn_worker(serial, &identity, log_level)?;
+        runtime.worker = Some(worker);
 
         symlink(
             &format!("{GADGET}/functions/ffs.virtual-yubikey"),
@@ -132,6 +132,9 @@ impl Runtime {
         )?;
         let udc = select_udc(requested_udc)?;
         write_attribute(&format!("{GADGET}/UDC"), &udc)?;
+        prepare_hid_device(identity.uid, identity.gid)?;
+        control.write_all(b"H")?;
+        drop(control);
         println!(
             "Virtual YubiKey attached through UDC {udc} as {:04x}:{:04x} ({}); protocol worker is user {}; press Ctrl-C to stop",
             UsbIdentity::VENDOR_ID,
@@ -324,13 +327,11 @@ fn spawn_worker(
     serial: u32,
     identity: &WorkerIdentity,
     log_level: Level,
-    hid: &File,
-) -> io::Result<Child> {
+) -> io::Result<(Child, UnixStream)> {
     let executable = env::current_exe()?;
     let (mut supervisor_ready, worker_ready) = UnixStream::pair()?;
     supervisor_ready.set_read_timeout(Some(Duration::from_secs(10)))?;
     let ready_fd = worker_ready.as_raw_fd();
-    let hid_fd = hid.as_raw_fd();
     let parent_pid = std::process::id() as c_int;
     let uid = identity.uid;
     let gid = identity.gid;
@@ -342,8 +343,6 @@ fn spawn_worker(
             &serial.to_string(),
             "--worker-fd",
             &ready_fd.to_string(),
-            "--hid-fd",
-            &hid_fd.to_string(),
             "--log-level",
             log_level.as_str(),
         ])
@@ -358,9 +357,6 @@ fn spawn_worker(
     unsafe {
         command.pre_exec(move || {
             if fcntl(ready_fd, F_SETFD, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if fcntl(hid_fd, F_SETFD, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
             if setgroups(0, std::ptr::null()) != 0 {
@@ -402,27 +398,28 @@ fn spawn_worker(
             "protocol worker sent an invalid readiness message",
         ));
     }
-    Ok(child)
+    Ok((child, supervisor_ready))
 }
 
-fn open_hid_device() -> io::Result<File> {
+fn prepare_hid_device(uid: u32, gid: u32) -> io::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        match OpenOptions::new().read(true).write(true).open(HID_DEVICE) {
-            Ok(device) => return Ok(device),
-            Err(error)
-                if error.kind() == io::ErrorKind::NotFound
-                    && std::time::Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("open {HID_DEVICE}: {error}"),
-                ));
-            }
+        if Path::new(HID_DEVICE).exists() {
+            chown(HID_DEVICE, Some(uid), Some(gid)).map_err(|error| {
+                io::Error::new(error.kind(), format!("chown {HID_DEVICE}: {error}"))
+            })?;
+            fs::set_permissions(HID_DEVICE, fs::Permissions::from_mode(0o600)).map_err(
+                |error| io::Error::new(error.kind(), format!("chmod {HID_DEVICE}: {error}")),
+            )?;
+            return Ok(());
         }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{HID_DEVICE} did not appear after binding the gadget"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
