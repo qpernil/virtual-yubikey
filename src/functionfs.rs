@@ -129,7 +129,7 @@ impl Endpoints {
         thread::Builder::new()
             .name("fido-hid".to_owned())
             .spawn(move || {
-                let fido = FidoAuthenticator::new();
+                let fido = FidoAuthenticator::for_serial(serial);
                 let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido, serial)));
             })?;
 

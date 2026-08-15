@@ -47,6 +47,7 @@ impl From<()> for Error {
 
 #[derive(Debug)]
 pub(crate) struct FidoState {
+    device_identifier: [u8; 16],
     pin: Option<Zeroizing<Vec<u8>>>,
     key_agreement: Option<SecretKey>,
     pin_uv_auth_token: Zeroizing<Vec<u8>>,
@@ -77,7 +78,7 @@ struct PreviewCredential {
 }
 
 impl FidoState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(device_identifier: [u8; 16]) -> Self {
         let private_key = SecretKey::from_slice(&[0x11; 32])
             .expect("fixed resident credential key must be valid");
         let public_key = private_key.public_key().to_sec1_point(false);
@@ -94,6 +95,7 @@ impl FidoState {
             counter: 0,
         };
         Self {
+            device_identifier,
             pin: Some(Zeroizing::new(b"123456".to_vec())),
             key_agreement: None,
             pin_uv_auth_token: Zeroizing::new(vec![0x5a; 32]),
@@ -820,10 +822,11 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
 }
 
 fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
+    let encrypted_identifier = encrypted_device_identifier(state)?;
     let mut response = vec![CTAP2_OK];
     let mut encoder = Encoder::new(&mut response);
     encoder
-        .map(8)
+        .map(9)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -897,8 +900,30 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .u8(13)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(4)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(25)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&encrypted_identifier)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     Ok(response)
+}
+
+fn encrypted_device_identifier(state: &FidoState) -> Result<Vec<u8>, Error> {
+    let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), state.pin_uv_auth_token.as_ref());
+    let mut key = Zeroizing::new([0u8; 16]);
+    hkdf.expand(b"encIdentifier", key.as_mut())
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut iv = [0u8; AES_BLOCK_SIZE];
+    getrandom::fill(&mut iv).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let ciphertext = aes_cbc(
+        key.as_ref(),
+        &iv,
+        &state.device_identifier,
+        Direction::Encrypt,
+    )?;
+    let mut encrypted = iv.to_vec();
+    encrypted.extend_from_slice(&ciphertext);
+    Ok(encrypted)
 }
 
 #[derive(Default)]
@@ -1312,8 +1337,28 @@ mod tests {
     const EXPECTED_TICKET: &str = "27987995f184a44cfa548d104b0a461d0487fc739dbcdabc293ac5469221da91b220e04c681074ec4692a76ffacb9043dec2847ea9060fd42da267f66852e63589f0c00dc88f290d660c65a65a50c86361";
 
     #[test]
+    fn ppuat_decrypts_a_stable_device_identifier() {
+        let identifier = *b"virtual-test-id!";
+        let state = FidoState::new(identifier);
+        let encrypted = encrypted_device_identifier(&state).unwrap();
+        assert_eq!(encrypted.len(), AES_BLOCK_SIZE * 2);
+
+        let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), state.pin_uv_auth_token.as_ref());
+        let mut key = [0u8; 16];
+        hkdf.expand(b"encIdentifier", &mut key).unwrap();
+        let decrypted = aes_cbc(
+            &key,
+            &encrypted[..AES_BLOCK_SIZE],
+            &encrypted[AES_BLOCK_SIZE..],
+            Direction::Decrypt,
+        )
+        .unwrap();
+        assert_eq!(decrypted, identifier);
+    }
+
+    #[test]
     fn client_pin_reports_retries_for_management_clients() {
-        let mut state = FidoState::new();
+        let mut state = FidoState::new(*b"virtual-test-id!");
         let mut request = vec![AUTHENTICATOR_CLIENT_PIN];
         Encoder::new(&mut request)
             .map(2)
@@ -1339,7 +1384,7 @@ mod tests {
 
     #[test]
     fn get_info_uses_canonical_option_key_order() {
-        let mut state = FidoState::new();
+        let mut state = FidoState::new(*b"virtual-test-id!");
         let response = exchange(&mut state, &[AUTHENTICATOR_GET_INFO]);
         assert_eq!(response[0], CTAP2_OK);
 
@@ -1347,6 +1392,7 @@ mod tests {
         let fields = decoder.map().unwrap().unwrap();
         let mut versions = Vec::new();
         let mut options = Vec::new();
+        let mut encrypted_identifier = None;
         for _ in 0..fields {
             match decoder.u8().unwrap() {
                 1 => {
@@ -1362,6 +1408,7 @@ mod tests {
                         decoder.bool().unwrap();
                     }
                 }
+                25 => encrypted_identifier = Some(decoder.bytes().unwrap().to_vec()),
                 _ => decoder.skip().unwrap(),
             }
         }
@@ -1378,11 +1425,12 @@ mod tests {
                 "pinUvAuthToken",
             ]
         );
+        assert_eq!(encrypted_identifier.unwrap().len(), AES_BLOCK_SIZE * 2);
     }
 
     #[test]
     fn credential_management_reports_resident_credential_metadata() {
-        let mut state = FidoState::new();
+        let mut state = FidoState::new(*b"virtual-test-id!");
         let mut request = vec![AUTHENTICATOR_CREDENTIAL_MANAGEMENT];
         Encoder::new(&mut request)
             .map(3)
@@ -1412,7 +1460,7 @@ mod tests {
 
     #[test]
     fn preview_sign_registration_and_assertion_complete_a_verified_cycle() {
-        let mut state = FidoState::new();
+        let mut state = FidoState::new(*b"virtual-test-id!");
         let client_data_hash = [0x33; 32];
         let pin_auth = pin_auth(&client_data_hash);
 
