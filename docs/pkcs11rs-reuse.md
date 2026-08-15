@@ -5,9 +5,9 @@
 Keep `virtual-yubikey` and `pkcs11rs` as separate Git repositories. The Pi
 gadget must not depend on the complete PKCS #11 provider. The transport-neutral
 `virtual-yubikey-core` crate therefore lives in this repository. Reusable
-behavior from the feature-gated `pkcs11rs` test mock has been migrated
-manually into the core; `pkcs11rs` remains unchanged until the new crate is
-proven over the standalone and USB paths.
+behavior from the feature-gated `pkcs11rs` test mock was migrated manually into
+the core and proven over the standalone and USB paths. `pkcs11rs` now consumes
+`virtual-yubikey-core` through its optional `mock-yubikey` feature.
 
 The Linux USB layers remain here: ConfigFS, FunctionFS, CCID framing, endpoint
 ownership, privilege separation, and systemd integration. PC/SC,
@@ -24,7 +24,7 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 | --- | --- |
 | `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management behavior, FIDO routing and logical device state |
 | `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
-| future `pkcs11rs` adapter | Implements the provider's internal connector trait by calling the core directly in tests |
+| `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
 ```text
 virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
@@ -41,10 +41,13 @@ and keeps standalone Pi builds reproducible.
 2. Run the core's FIDO, PIN, credential-management and `previewSign`
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID transport and Management through CCID.
-4. Add a small `pkcs11rs` test adapter and run the existing mock test suite
-   against the core. Only then remove the duplicate test implementation.
+4. Keep the `pkcs11rs` mock adapter and its full-cycle PKCS #11 tests running
+   against the core as new applets are migrated.
 5. Use workspace path dependencies during coordinated development. For independent clones,
    publish the crates or pin Git dependencies to exact locked revisions.
+
+Applet migration and secure-channel extraction are planned in
+[`applet-roadmap.md`](applet-roadmap.md).
 
 ## Acceptance criteria
 

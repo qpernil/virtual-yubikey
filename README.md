@@ -55,6 +55,10 @@ applications. USB descriptors and Management capability reports must continue
 to derive from the same profile so the device never advertises behavior its
 firmware does not implement.
 
+See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the planned FIDO,
+PIV, YubiHSM Auth, secure-channel/Issuer SD, and OpenPGP work, including the
+code-sharing boundary with `pkcs11rs`.
+
 ## Hardware and operating system
 
 A Pi Zero 2 W is the simplest target. Use its **USB** micro-USB connector, not
