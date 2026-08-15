@@ -1,6 +1,9 @@
 //! CTAP 2.1 applet state and commands, including the previewSign extension.
 
-use crate::crypto::{aes_cbc, Direction, AES_BLOCK_SIZE};
+use crate::{
+    crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
+    FidoConfiguration,
+};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use minicbor::Encoder;
@@ -78,7 +81,7 @@ struct PreviewCredential {
 }
 
 impl FidoState {
-    pub(crate) fn new(device_identifier: [u8; 16]) -> Self {
+    pub(crate) fn new(device_identifier: [u8; 16], configuration: FidoConfiguration) -> Self {
         let private_key = SecretKey::from_slice(&[0x11; 32])
             .expect("fixed resident credential key must be valid");
         let public_key = private_key.public_key().to_sec1_point(false);
@@ -94,16 +97,25 @@ impl FidoState {
                 .expect("fixed resident credential public key must encode"),
             counter: 0,
         };
+        let pin_uv_auth_token_length = if configuration.pin_uv_auth_protocols.contains(&2) {
+            32
+        } else {
+            16
+        };
         Self {
             device_identifier,
-            pin: Some(Zeroizing::new(b"123456".to_vec())),
+            pin: configuration.initial_pin.map(Zeroizing::new),
             key_agreement: None,
-            pin_uv_auth_token: Zeroizing::new(vec![0x5a; 32]),
-            pin_uv_auth_protocols: vec![2, 1],
-            permissioned_pin_uv_auth_tokens: true,
+            pin_uv_auth_token: Zeroizing::new(vec![0x5a; pin_uv_auth_token_length]),
+            pin_uv_auth_protocols: configuration.pin_uv_auth_protocols,
+            permissioned_pin_uv_auth_tokens: configuration.permissioned_pin_uv_auth_tokens,
             resident_credential,
             preview_credential: None,
         }
+    }
+
+    pub(crate) fn reset_connection(&mut self) {
+        self.key_agreement = None;
     }
 }
 
@@ -1339,7 +1351,7 @@ mod tests {
     #[test]
     fn ppuat_decrypts_a_stable_device_identifier() {
         let identifier = *b"virtual-test-id!";
-        let state = FidoState::new(identifier);
+        let state = FidoState::new(identifier, FidoConfiguration::default());
         let encrypted = encrypted_device_identifier(&state).unwrap();
         assert_eq!(encrypted.len(), AES_BLOCK_SIZE * 2);
 
@@ -1358,7 +1370,7 @@ mod tests {
 
     #[test]
     fn client_pin_reports_retries_for_management_clients() {
-        let mut state = FidoState::new(*b"virtual-test-id!");
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
         let mut request = vec![AUTHENTICATOR_CLIENT_PIN];
         Encoder::new(&mut request)
             .map(2)
@@ -1384,7 +1396,7 @@ mod tests {
 
     #[test]
     fn get_info_uses_canonical_option_key_order() {
-        let mut state = FidoState::new(*b"virtual-test-id!");
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
         let response = exchange(&mut state, &[AUTHENTICATOR_GET_INFO]);
         assert_eq!(response[0], CTAP2_OK);
 
@@ -1430,7 +1442,7 @@ mod tests {
 
     #[test]
     fn credential_management_reports_resident_credential_metadata() {
-        let mut state = FidoState::new(*b"virtual-test-id!");
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
         let mut request = vec![AUTHENTICATOR_CREDENTIAL_MANAGEMENT];
         Encoder::new(&mut request)
             .map(3)
@@ -1460,7 +1472,7 @@ mod tests {
 
     #[test]
     fn preview_sign_registration_and_assertion_complete_a_verified_cycle() {
-        let mut state = FidoState::new(*b"virtual-test-id!");
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
         let client_data_hash = [0x33; 32];
         let pin_auth = pin_auth(&client_data_hash);
 

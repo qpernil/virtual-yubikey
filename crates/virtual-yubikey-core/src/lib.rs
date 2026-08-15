@@ -80,6 +80,52 @@ pub struct DeviceProfile {
     pub applets: AppletConfiguration,
 }
 
+/// Configurable FIDO applet behavior used by transports and test fixtures.
+///
+/// The default models the FIDO behavior of the virtual YubiKey 5.8 profile:
+/// PIN `123456`, PIN/UV auth protocols 2 and 1, and permissioned tokens.
+pub struct FidoConfiguration {
+    pub(crate) initial_pin: Option<Vec<u8>>,
+    pub(crate) pin_uv_auth_protocols: Vec<u8>,
+    pub(crate) permissioned_pin_uv_auth_tokens: bool,
+}
+
+impl FidoConfiguration {
+    pub fn yubikey_5_8_preview_sign() -> Self {
+        Self {
+            initial_pin: Some(b"123456".to_vec()),
+            pin_uv_auth_protocols: vec![2, 1],
+            permissioned_pin_uv_auth_tokens: true,
+        }
+    }
+
+    pub fn with_pin(mut self, pin: impl Into<Vec<u8>>) -> Self {
+        self.initial_pin = Some(pin.into());
+        self
+    }
+
+    pub fn without_pin(mut self) -> Self {
+        self.initial_pin = None;
+        self
+    }
+
+    pub fn with_pin_uv_auth_protocols(mut self, protocols: impl Into<Vec<u8>>) -> Self {
+        self.pin_uv_auth_protocols = protocols.into();
+        self
+    }
+
+    pub fn with_permissioned_pin_uv_auth_tokens(mut self, supported: bool) -> Self {
+        self.permissioned_pin_uv_auth_tokens = supported;
+        self
+    }
+}
+
+impl Default for FidoConfiguration {
+    fn default() -> Self {
+        Self::yubikey_5_8_preview_sign()
+    }
+}
+
 impl DeviceProfile {
     pub const fn yubikey_5_8_ccid(serial: u32) -> Self {
         Self {
@@ -136,15 +182,23 @@ impl FidoAuthenticator {
     }
 
     pub fn for_serial(serial: u32) -> Self {
+        Self::with_configuration(serial, FidoConfiguration::default())
+    }
+
+    pub fn with_configuration(serial: u32, configuration: FidoConfiguration) -> Self {
         let mut device_identifier = *b"virtual-\0\0\0\0fido";
         device_identifier[8..12].copy_from_slice(&serial.to_be_bytes());
         Self {
-            state: fido::FidoState::new(device_identifier),
+            state: fido::FidoState::new(device_identifier, configuration),
         }
     }
 
     pub fn exchange(&mut self, request: &[u8]) -> Vec<u8> {
         fido::exchange(&mut self.state, request)
+    }
+
+    pub fn reset_connection(&mut self) {
+        self.state.reset_connection();
     }
 }
 
@@ -165,7 +219,14 @@ pub struct VirtualYubiKey {
 
 impl VirtualYubiKey {
     pub fn new(profile: DeviceProfile) -> Self {
-        let fido = FidoAuthenticator::for_serial(profile.serial);
+        Self::with_fido_configuration(profile, FidoConfiguration::default())
+    }
+
+    pub fn with_fido_configuration(
+        profile: DeviceProfile,
+        configuration: FidoConfiguration,
+    ) -> Self {
+        let fido = FidoAuthenticator::with_configuration(profile.serial, configuration);
         Self {
             profile,
             selected: None,
@@ -195,6 +256,7 @@ impl VirtualYubiKey {
         self.selected = None;
         self.chained_command.clear();
         self.pending_response.clear();
+        self.fido.reset_connection();
     }
 
     pub fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
