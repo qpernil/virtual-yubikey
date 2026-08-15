@@ -810,7 +810,9 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .array(1)
+        .array(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("FIDO_2_0")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("FIDO_2_1")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -832,25 +834,25 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .bool(true)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("clientPin")
+        .str("plat")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(state.pin.is_some())
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("pinUvAuthToken")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(state.permissioned_pin_uv_auth_tokens)
+        .bool(false)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("credMgmt")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .bool(true)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("clientPin")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bool(state.pin.is_some())
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("perCredMgmtRO")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .bool(true)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("plat")
+        .str("pinUvAuthToken")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(false)
+        .bool(state.permissioned_pin_uv_auth_tokens)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(5)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1316,6 +1318,49 @@ mod tests {
         assert_eq!(decoder.u8().unwrap(), PIN_RETRIES);
         assert_eq!(decoder.u8().unwrap(), 4);
         assert!(!decoder.bool().unwrap());
+    }
+
+    #[test]
+    fn get_info_uses_canonical_option_key_order() {
+        let mut state = FidoState::new();
+        let response = exchange(&mut state, &[AUTHENTICATOR_GET_INFO]);
+        assert_eq!(response[0], CTAP2_OK);
+
+        let mut decoder = minicbor::Decoder::new(&response[1..]);
+        let fields = decoder.map().unwrap().unwrap();
+        let mut versions = Vec::new();
+        let mut options = Vec::new();
+        for _ in 0..fields {
+            match decoder.u8().unwrap() {
+                1 => {
+                    let count = decoder.array().unwrap().unwrap();
+                    for _ in 0..count {
+                        versions.push(decoder.str().unwrap().to_owned());
+                    }
+                }
+                4 => {
+                    let count = decoder.map().unwrap().unwrap();
+                    for _ in 0..count {
+                        options.push(decoder.str().unwrap().to_owned());
+                        decoder.bool().unwrap();
+                    }
+                }
+                _ => decoder.skip().unwrap(),
+            }
+        }
+
+        assert_eq!(versions, ["FIDO_2_0", "FIDO_2_1"]);
+        assert_eq!(
+            options,
+            [
+                "rk",
+                "plat",
+                "credMgmt",
+                "clientPin",
+                "perCredMgmtRO",
+                "pinUvAuthToken",
+            ]
+        );
     }
 
     #[test]
