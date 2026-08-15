@@ -396,6 +396,53 @@ fn decode_management_rp_id_hash(parameters: &[u8]) -> Result<[u8; 32], u8> {
     Ok(value)
 }
 
+fn decode_management_credential_id(parameters: &[u8]) -> Result<Vec<u8>, u8> {
+    let mut decoder = minicbor::Decoder::new(parameters);
+    let count = decoder
+        .map()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+    let mut credential_id = None;
+    for _ in 0..count {
+        match decoder.u8().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+            2 if credential_id.is_none() => {
+                let fields = decoder
+                    .map()
+                    .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                    .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+                let mut id = None;
+                let mut type_is_public_key = false;
+                for _ in 0..fields {
+                    match decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+                        "id" if id.is_none() => {
+                            id = Some(
+                                decoder
+                                    .bytes()
+                                    .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                                    .to_vec(),
+                            );
+                        }
+                        "type" => {
+                            type_is_public_key =
+                                decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)? == "public-key";
+                        }
+                        _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+                    }
+                }
+                if !type_is_public_key {
+                    return Err(CTAP2_ERR_INVALID_CBOR);
+                }
+                credential_id = id;
+            }
+            _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+        }
+    }
+    if decoder.position() != parameters.len() {
+        return Err(CTAP2_ERR_INVALID_CBOR);
+    }
+    credential_id.ok_or(CTAP2_ERR_MISSING_PARAMETER)
+}
+
 fn credential_management_rp_response(credential: &ResidentCredential) -> Result<Vec<u8>, Error> {
     let mut response = vec![CTAP2_OK];
     Encoder::new(&mut response)
@@ -498,7 +545,7 @@ fn credential_management_credential_response(
 }
 
 fn authenticator_credential_management(
-    state: &FidoState,
+    state: &mut FidoState,
     payload: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let request = match decode_credential_management_request(payload) {
@@ -544,6 +591,25 @@ fn authenticator_credential_management(
                 return Ok(vec![CTAP2_ERR_NO_CREDENTIALS]);
             }
             credential_management_credential_response(&state.resident_credential)
+        }
+        6 => {
+            let Some(parameters) = request.parameters.as_deref() else {
+                return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+            };
+            let credential_id = match decode_management_credential_id(parameters) {
+                Ok(value) => value,
+                Err(status) => return Ok(vec![status]),
+            };
+            if state
+                .preview_credential
+                .as_ref()
+                .is_some_and(|credential| credential.credential_id == credential_id)
+            {
+                state.preview_credential = None;
+                Ok(vec![CTAP2_OK])
+            } else {
+                Ok(vec![CTAP2_ERR_NO_CREDENTIALS])
+            }
         }
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
@@ -880,7 +946,7 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("perCredMgmtRO")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(true)
+        .bool(false)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("pinUvAuthToken")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1468,6 +1534,62 @@ mod tests {
         assert_eq!(decoder.u8().unwrap(), 1);
         assert_eq!(decoder.u8().unwrap(), 2);
         assert_eq!(decoder.u8().unwrap(), 24);
+    }
+
+    #[test]
+    fn credential_management_deletes_the_preview_sign_parent_credential() {
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
+        let credential_id = vec![0xa5; 32];
+        state.preview_credential = Some(PreviewCredential {
+            rp_id: "preview-sign.pkcs11rs.invalid".to_owned(),
+            credential_id: credential_id.clone(),
+            signing_key_handle: vec![0x5a; 48],
+        });
+
+        let mut parameters = Vec::new();
+        Encoder::new(&mut parameters)
+            .map(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .map(2)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(&credential_id)
+            .unwrap()
+            .str("type")
+            .unwrap()
+            .str("public-key")
+            .unwrap();
+        let mut authenticated = vec![6];
+        authenticated.extend_from_slice(&parameters);
+
+        let mut request = vec![AUTHENTICATOR_CREDENTIAL_MANAGEMENT];
+        let mut encoder = Encoder::new(&mut request);
+        encoder
+            .map(4)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(6)
+            .unwrap()
+            .u8(2)
+            .unwrap();
+        encoder.writer_mut().extend_from_slice(&parameters);
+        encoder
+            .u8(3)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(4)
+            .unwrap()
+            .bytes(&pin_auth(&authenticated))
+            .unwrap();
+
+        assert_eq!(exchange(&mut state, &request), [CTAP2_OK]);
+        assert!(state.preview_credential.is_none());
+        assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_NO_CREDENTIALS]);
     }
 
     #[test]
