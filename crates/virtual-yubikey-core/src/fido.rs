@@ -410,6 +410,22 @@ fn credential_management_rp_response(credential: &ResidentCredential) -> Result<
     Ok(response)
 }
 
+fn credential_management_metadata_response() -> Result<Vec<u8>, Error> {
+    let mut response = vec![CTAP2_OK];
+    Encoder::new(&mut response)
+        .map(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(24)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(response)
+}
+
 fn credential_management_credential_response(
     credential: &ResidentCredential,
 ) -> Result<Vec<u8>, Error> {
@@ -438,13 +454,13 @@ fn credential_management_credential_response(
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .map(2)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("type")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("public-key")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("id")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .bytes(&credential.credential_id)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("type")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("public-key")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(8)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
@@ -476,7 +492,7 @@ fn authenticator_credential_management(
         Err(status) => return Ok(vec![status]),
     };
     match request.subcommand {
-        2 | 4 => {
+        1 | 2 | 4 | 6 | 7 => {
             let Some(protocol) = request.protocol else {
                 return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
             };
@@ -499,6 +515,7 @@ fn authenticator_credential_management(
         _ => {}
     }
     match request.subcommand {
+        1 => credential_management_metadata_response(),
         2 => credential_management_rp_response(&state.resident_credential),
         3 | 5 => Ok(vec![CTAP2_ERR_NO_CREDENTIALS]),
         4 => {
@@ -1361,6 +1378,36 @@ mod tests {
                 "pinUvAuthToken",
             ]
         );
+    }
+
+    #[test]
+    fn credential_management_reports_resident_credential_metadata() {
+        let mut state = FidoState::new();
+        let mut request = vec![AUTHENTICATOR_CREDENTIAL_MANAGEMENT];
+        Encoder::new(&mut request)
+            .map(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(4)
+            .unwrap()
+            .bytes(&pin_auth(&[1]))
+            .unwrap();
+
+        let response = exchange(&mut state, &request);
+        assert_eq!(response[0], CTAP2_OK);
+        let mut decoder = minicbor::Decoder::new(&response[1..]);
+        assert_eq!(decoder.map().unwrap(), Some(2));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 24);
     }
 
     #[test]
