@@ -17,7 +17,7 @@ pub(crate) fn aes_cbc(
     data: &[u8],
     direction: Direction,
 ) -> Result<Vec<u8>, ()> {
-    if iv.len() != AES_BLOCK_SIZE || !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+    if iv.len() != AES_BLOCK_SIZE || data.len() % AES_BLOCK_SIZE != 0 {
         return Err(());
     }
 
