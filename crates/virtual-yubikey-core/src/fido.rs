@@ -25,6 +25,7 @@ const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
 const CTAP2_ERR_PIN_NOT_SET: u8 = 0x35;
 const CTAP2_ERR_PIN_POLICY_VIOLATION: u8 = 0x37;
 const CTAP2_ERR_OTHER: u8 = 0x7f;
+const PIN_RETRIES: u8 = 8;
 
 const CKR_ARGUMENTS_BAD: u64 = 1;
 const CKR_DEVICE_ERROR: u64 = 2;
@@ -903,12 +904,29 @@ fn authenticator_client_pin(state: &mut FidoState, payload: &[u8]) -> Result<Vec
         return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
     }
     match request.subcommand {
+        Some(1) => pin_retries_response(),
         Some(2) => key_agreement_response(state),
         Some(3) => set_pin(state, request),
         Some(4) => change_pin(state, request),
         Some(5 | 9) => pin_token(state, request),
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
+}
+
+fn pin_retries_response() -> Result<Vec<u8>, Error> {
+    let mut response = vec![CTAP2_OK];
+    Encoder::new(&mut response)
+        .map(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(PIN_RETRIES)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(4)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bool(false)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(response)
 }
 
 fn decode_client_pin(payload: &[u8]) -> Result<ClientPinRequest, u8> {
@@ -1273,6 +1291,32 @@ mod tests {
     const CONTEXT: &[u8] = b"ARKG-P256.test vectors";
     const EXPECTED_PUBLIC_KEY: &str = "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107dac2a1b197cc10d2376559ad6df6bc107318d5cfb90def9f4a1f5347e086c2cd";
     const EXPECTED_TICKET: &str = "27987995f184a44cfa548d104b0a461d0487fc739dbcdabc293ac5469221da91b220e04c681074ec4692a76ffacb9043dec2847ea9060fd42da267f66852e63589f0c00dc88f290d660c65a65a50c86361";
+
+    #[test]
+    fn client_pin_reports_retries_for_management_clients() {
+        let mut state = FidoState::new();
+        let mut request = vec![AUTHENTICATOR_CLIENT_PIN];
+        Encoder::new(&mut request)
+            .map(2)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(1)
+            .unwrap();
+
+        let response = exchange(&mut state, &request);
+        assert_eq!(response[0], CTAP2_OK);
+        let mut decoder = minicbor::Decoder::new(&response[1..]);
+        assert_eq!(decoder.map().unwrap(), Some(2));
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(decoder.u8().unwrap(), PIN_RETRIES);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert!(!decoder.bool().unwrap());
+    }
 
     #[test]
     fn preview_sign_registration_and_assertion_complete_a_verified_cycle() {
