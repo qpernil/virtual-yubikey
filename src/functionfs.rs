@@ -230,7 +230,40 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
                         report[4]
                     ),
                 );
-                let replies = ctaphid.receive(&report, |request| fido.exchange(request));
+                let replies = ctaphid.receive(&report, |request| {
+                    let command = request.first().copied().unwrap_or_default();
+                    diagnostics::log(
+                        Level::Info,
+                        "ctap2",
+                        "request",
+                        format_args!(
+                            "command=0x{command:02x} name={} cbor_length={}",
+                            if request.is_empty() {
+                                "missing"
+                            } else {
+                                ctap_command_name(command)
+                            },
+                            request.len().saturating_sub(1)
+                        ),
+                    );
+                    let response = fido.exchange(request);
+                    let status = response.first().copied().unwrap_or_default();
+                    diagnostics::log(
+                        Level::Info,
+                        "ctap2",
+                        "response",
+                        format_args!(
+                            "command=0x{command:02x} status=0x{status:02x} name={} cbor_length={}",
+                            if response.is_empty() {
+                                "missing"
+                            } else {
+                                ctap_status_name(status)
+                            },
+                            response.len().saturating_sub(1)
+                        ),
+                    );
+                    response
+                });
                 for reply in replies {
                     hid.write_all(&reply)?;
                 }
@@ -241,6 +274,47 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ctap_command_name(command: u8) -> &'static str {
+    match command {
+        0x01 => "make_credential",
+        0x02 => "get_assertion",
+        0x04 => "get_info",
+        0x06 => "client_pin",
+        0x07 => "reset",
+        0x08 => "get_next_assertion",
+        0x09 => "bio_enrollment",
+        0x0a => "credential_management",
+        0x0b => "selection",
+        0x0c => "large_blobs",
+        0x0d => "config",
+        _ => "unknown",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ctap_status_name(status: u8) -> &'static str {
+    match status {
+        0x00 => "ok",
+        0x01 => "invalid_command",
+        0x02 => "invalid_parameter",
+        0x03 => "invalid_length",
+        0x11 => "cbor_unexpected_type",
+        0x12 => "invalid_cbor",
+        0x14 => "missing_parameter",
+        0x27 => "operation_denied",
+        0x2e => "no_credentials",
+        0x31 => "pin_invalid",
+        0x32 => "pin_blocked",
+        0x33 => "pin_auth_invalid",
+        0x35 => "pin_not_set",
+        0x36 => "pin_required",
+        0x37 => "pin_policy_violation",
+        0x7f => "other",
+        _ => "unknown",
+    }
 }
 
 #[cfg(target_os = "linux")]
