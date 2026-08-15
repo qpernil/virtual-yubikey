@@ -97,6 +97,32 @@ impl DeviceProfile {
     pub const fn usb_enabled_capabilities(&self) -> u16 {
         self.applets.usb_capabilities()
     }
+
+    pub fn management_device_info(&self, page: u8) -> Option<Vec<u8>> {
+        if page != 0 {
+            return None;
+        }
+        let mut body = Vec::new();
+        push_tlv(
+            &mut body,
+            0x01,
+            &self.usb_supported_capabilities().to_be_bytes(),
+        );
+        push_tlv(&mut body, 0x02, &self.serial.to_be_bytes());
+        push_tlv(
+            &mut body,
+            0x03,
+            &self.usb_enabled_capabilities().to_be_bytes(),
+        );
+        push_tlv(&mut body, 0x04, &[self.form_factor]);
+        push_tlv(&mut body, 0x05, &self.firmware);
+        push_tlv(&mut body, 0x08, &[0]);
+
+        let mut response = Vec::with_capacity(body.len() + 1);
+        response.push(body.len() as u8);
+        response.extend_from_slice(&body);
+        Some(response)
+    }
 }
 
 #[derive(Debug)]
@@ -207,30 +233,10 @@ impl VirtualYubiKey {
         if command.cla != 0 || command.ins != INS_READ_DEVICE_INFO || command.p2 != 0 {
             return ResponseApdu::status(0x6d00);
         }
-        if command.p1 != 0 {
-            return ResponseApdu::status(0x6a86);
-        }
-
-        let mut body = Vec::new();
-        push_tlv(
-            &mut body,
-            0x01,
-            &self.profile.usb_supported_capabilities().to_be_bytes(),
-        );
-        push_tlv(&mut body, 0x02, &self.profile.serial.to_be_bytes());
-        push_tlv(
-            &mut body,
-            0x03,
-            &self.profile.usb_enabled_capabilities().to_be_bytes(),
-        );
-        push_tlv(&mut body, 0x04, &[self.profile.form_factor]);
-        push_tlv(&mut body, 0x05, &self.profile.firmware);
-        push_tlv(&mut body, 0x08, &[0]);
-
-        let mut response = Vec::with_capacity(body.len() + 1);
-        response.push(body.len() as u8);
-        response.extend_from_slice(&body);
-        ResponseApdu::success(response)
+        self.profile
+            .management_device_info(command.p1)
+            .map(ResponseApdu::success)
+            .unwrap_or_else(|| ResponseApdu::status(0x6a86))
     }
 
     fn fido2(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {

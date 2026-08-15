@@ -130,7 +130,7 @@ impl Endpoints {
             .name("fido-hid".to_owned())
             .spawn(move || {
                 let fido = FidoAuthenticator::new();
-                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido)));
+                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido, serial)));
             })?;
 
         while !STOP_REQUESTED.load(Ordering::Relaxed) {
@@ -203,9 +203,11 @@ fn serve_ccid(mut output: File, mut input: File, serial: u32) -> io::Result<()> 
 }
 
 #[cfg(target_os = "linux")]
-fn serve_hid(mut hid: File, mut fido: FidoAuthenticator) -> io::Result<()> {
+fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Result<()> {
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
-    let mut ctaphid = crate::ctaphid::Device::new([5, 8, 0]);
+    let mut ctaphid = crate::ctaphid::Device::new(
+        virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
+    );
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match hid.read(&mut report) {
             Ok(0) => {}
