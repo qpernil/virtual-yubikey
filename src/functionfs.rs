@@ -31,9 +31,9 @@ const O_NONBLOCK_LINUX: i32 = 0x800;
 #[cfg(target_os = "linux")]
 pub(crate) fn run_worker(
     serial: u32,
-    ready_fd: i32,
-    hid_fd: i32,
+    control_fd: i32,
     functionfs: &Path,
+    hid_device: &Path,
 ) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
@@ -47,17 +47,31 @@ pub(crate) fn run_worker(
     }
 
     // SAFETY: the supervisor passes ownership of this descriptor to the worker.
-    let mut ready = unsafe { File::from_raw_fd(ready_fd) };
-    // SAFETY: the supervisor opens and passes ownership of the HID gadget descriptor.
-    let hid = unsafe { File::from_raw_fd(hid_fd) };
+    let mut control = unsafe { File::from_raw_fd(control_fd) };
     let endpoints = Endpoints::open(functionfs)?;
-    ready.write_all(b"R")?;
-    drop(ready);
+    control.write_all(b"R")?;
+    let mut attached = [0_u8; 1];
+    control.read_exact(&mut attached)?;
+    if attached != *b"H" {
+        return Err(io::Error::other(
+            "supervisor sent an invalid HID-ready message",
+        ));
+    }
+    drop(control);
+    let hid = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(hid_device)
+        .map_err(|error| with_context(error, "open FIDO HID gadget"))?;
     diagnostics::log(
         Level::Info,
         "worker",
         "ready",
-        format_args!("serial={serial} functionfs={}", functionfs.display()),
+        format_args!(
+            "serial={serial} functionfs={} hid={}",
+            functionfs.display(),
+            hid_device.display()
+        ),
     );
     endpoints.serve(serial, hid)
 }

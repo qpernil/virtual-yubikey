@@ -9,7 +9,6 @@ pub(crate) struct Options {
     pub(crate) udc: Option<String>,
     pub(crate) run_as: Option<String>,
     pub(crate) worker_fd: Option<i32>,
-    pub(crate) hid_fd: Option<i32>,
     pub(crate) log_level: Level,
 }
 
@@ -21,7 +20,6 @@ where
     let mut udc = None;
     let mut run_as = None;
     let mut worker_fd = None;
-    let mut hid_fd = None;
     let mut log_level = Level::Info;
     let mut arguments = arguments.into_iter();
 
@@ -88,24 +86,6 @@ where
                 }
                 worker_fd = Some(descriptor);
             }
-            "--hid-fd" => {
-                let value = arguments.next().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "--hid-fd needs a number")
-                })?;
-                let descriptor = value.parse::<i32>().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid HID descriptor: {value}"),
-                    )
-                })?;
-                if descriptor < 3 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "HID descriptor must be at least 3",
-                    ));
-                }
-                hid_fd = Some(descriptor);
-            }
             "--log-level" => {
                 let value = arguments.next().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--log-level needs a value")
@@ -144,18 +124,11 @@ where
             "--worker-fd cannot be combined with public runtime options",
         ));
     }
-    if worker_fd.is_some() != hid_fd.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--worker-fd and --hid-fd must be supplied together",
-        ));
-    }
     Ok(Options {
         serial,
         udc,
         run_as,
         worker_fd,
-        hid_fd,
         log_level,
     })
 }
@@ -187,7 +160,6 @@ mod tests {
                 udc: Some("fe980000.usb".to_owned()),
                 run_as: Some("per".to_owned()),
                 worker_fd: None,
-                hid_fd: None,
                 log_level: Level::Info,
             }
         );
