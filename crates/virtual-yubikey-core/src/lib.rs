@@ -132,8 +132,14 @@ pub struct FidoAuthenticator {
 
 impl FidoAuthenticator {
     pub fn new() -> Self {
+        Self::for_serial(12_345_678)
+    }
+
+    pub fn for_serial(serial: u32) -> Self {
+        let mut device_identifier = *b"virtual-\0\0\0\0fido";
+        device_identifier[8..12].copy_from_slice(&serial.to_be_bytes());
         Self {
-            state: fido::FidoState::new(),
+            state: fido::FidoState::new(device_identifier),
         }
     }
 
@@ -159,12 +165,13 @@ pub struct VirtualYubiKey {
 
 impl VirtualYubiKey {
     pub fn new(profile: DeviceProfile) -> Self {
+        let fido = FidoAuthenticator::for_serial(profile.serial);
         Self {
             profile,
             selected: None,
             chained_command: Vec::new(),
             pending_response: Vec::new(),
-            fido: FidoAuthenticator::new(),
+            fido,
         }
     }
 
