@@ -1,6 +1,7 @@
 //! CTAPHID packet framing for the FIDO HID gadget transport.
 
 use std::collections::HashSet;
+use virtual_yubikey_core::DeviceProfile;
 
 pub(crate) const REPORT_SIZE: usize = 64;
 const INIT_DATA_SIZE: usize = 57;
@@ -14,8 +15,10 @@ const CMD_INIT: u8 = 0x06;
 const CMD_CBOR: u8 = 0x10;
 const CMD_CANCEL: u8 = 0x11;
 const CMD_ERROR: u8 = 0x3f;
+const CMD_YUBIKEY_READ_CONFIG: u8 = 0x42;
 
 const ERR_INVALID_CMD: u8 = 0x01;
+const ERR_INVALID_PAR: u8 = 0x02;
 const ERR_INVALID_LEN: u8 = 0x03;
 const ERR_INVALID_SEQ: u8 = 0x04;
 const ERR_CHANNEL_BUSY: u8 = 0x06;
@@ -35,16 +38,16 @@ struct Transaction {
 
 #[derive(Debug)]
 pub(crate) struct Device {
-    firmware: [u8; 3],
+    profile: DeviceProfile,
     next_channel: u32,
     channels: HashSet<u32>,
     transaction: Option<Transaction>,
 }
 
 impl Device {
-    pub(crate) fn new(firmware: [u8; 3]) -> Self {
+    pub(crate) fn new(profile: DeviceProfile) -> Self {
         Self {
-            firmware,
+            profile,
             next_channel: 1,
             channels: HashSet::new(),
             transaction: None,
@@ -152,7 +155,7 @@ impl Device {
             response.extend_from_slice(payload);
             response.extend_from_slice(&assigned.to_be_bytes());
             response.push(2); // CTAPHID protocol version
-            response.extend_from_slice(&self.firmware);
+            response.extend_from_slice(&self.profile.firmware);
             response.push(CAPABILITY_CBOR | CAPABILITY_NMSG);
             return encode_message(channel, CMD_INIT, &response);
         }
@@ -164,6 +167,13 @@ impl Device {
         match command {
             CMD_PING => encode_message(channel, CMD_PING, payload),
             CMD_CBOR => encode_message(channel, CMD_CBOR, &exchange_cbor(payload)),
+            CMD_YUBIKEY_READ_CONFIG if payload.len() == 1 => {
+                match self.profile.management_device_info(payload[0]) {
+                    Some(config) => encode_message(channel, CMD_YUBIKEY_READ_CONFIG, &config),
+                    None => encode_message(channel, CMD_ERROR, &[ERR_INVALID_PAR]),
+                }
+            }
+            CMD_YUBIKEY_READ_CONFIG => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
             CMD_CANCEL if payload.is_empty() => Vec::new(),
             CMD_CANCEL => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
             CMD_MSG => encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD]),
@@ -223,10 +233,14 @@ mod tests {
         u32::from_be_bytes(response[0][15..19].try_into().unwrap())
     }
 
+    fn device() -> Device {
+        Device::new(DeviceProfile::yubikey_5_8_ccid(12_345_678))
+    }
+
     #[test]
     fn initializes_channel_with_firmware_and_cbor_capability() {
         let nonce = *b"12345678";
-        let mut device = Device::new([5, 8, 0]);
+        let mut device = device();
         let response = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, &nonce),
             |_| unreachable!(),
@@ -240,7 +254,7 @@ mod tests {
 
     #[test]
     fn routes_cbor_and_fragments_long_response() {
-        let mut device = Device::new([5, 8, 0]);
+        let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
             |_| unreachable!(),
@@ -259,7 +273,7 @@ mod tests {
 
     #[test]
     fn reassembles_multi_report_cbor_request() {
-        let mut device = Device::new([5, 8, 0]);
+        let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
             |_| unreachable!(),
@@ -278,9 +292,29 @@ mod tests {
 
     #[test]
     fn rejects_commands_on_unallocated_channels() {
-        let mut device = Device::new([5, 8, 0]);
+        let mut device = device();
         let response = device.receive(&initial(7, CMD_CBOR, &[4]), |_| unreachable!());
         assert_eq!(response[0][4], 0xbf);
         assert_eq!(response[0][7], ERR_INVALID_CHANNEL);
+    }
+
+    #[test]
+    fn returns_profile_device_info_over_yubico_vendor_command() {
+        let mut device = device();
+        let init = device.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_| unreachable!(),
+        );
+        let channel = assigned_channel(&init);
+        let response = device.receive(
+            &initial(channel, CMD_YUBIKEY_READ_CONFIG, &[0]),
+            |_| unreachable!(),
+        );
+        assert_eq!(response[0][4], 0xc2);
+        assert_eq!(response[0][7], 25);
+        assert!(response[0]
+            .windows(6)
+            .any(|value| value == [2, 4, 0, 188, 97, 78]));
+        assert!(response[0].windows(5).any(|value| value == [5, 3, 5, 8, 0]));
     }
 }
