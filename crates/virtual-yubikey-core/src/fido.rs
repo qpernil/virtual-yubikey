@@ -1253,13 +1253,13 @@ fn decrypt(protocol: u8, key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<
     let result = match protocol {
         1 if key.len() == 32
             && !ciphertext.is_empty()
-            && ciphertext.len().is_multiple_of(AES_BLOCK_SIZE) =>
+            && ciphertext.len() % AES_BLOCK_SIZE == 0 =>
         {
             aes_cbc(key, &[0u8; AES_BLOCK_SIZE], ciphertext, Direction::Decrypt)
         }
         2 if key.len() == 64
             && ciphertext.len() >= AES_BLOCK_SIZE * 2
-            && ciphertext.len().is_multiple_of(AES_BLOCK_SIZE) =>
+            && ciphertext.len() % AES_BLOCK_SIZE == 0 =>
         {
             aes_cbc(
                 &key[32..],
@@ -1276,7 +1276,7 @@ fn decrypt(protocol: u8, key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<
 }
 
 fn encrypt(protocol: u8, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    if !plaintext.len().is_multiple_of(AES_BLOCK_SIZE) {
+    if plaintext.len() % AES_BLOCK_SIZE != 0 {
         return Err(CKR_DEVICE_ERROR.into());
     }
     match protocol {
