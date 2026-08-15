@@ -946,7 +946,7 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("perCredMgmtRO")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(false)
+        .bool(true)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("pinUvAuthToken")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1482,8 +1482,7 @@ mod tests {
                 4 => {
                     let count = decoder.map().unwrap().unwrap();
                     for _ in 0..count {
-                        options.push(decoder.str().unwrap().to_owned());
-                        decoder.bool().unwrap();
+                        options.push((decoder.str().unwrap().to_owned(), decoder.bool().unwrap()));
                     }
                 }
                 25 => encrypted_identifier = Some(decoder.bytes().unwrap().to_vec()),
@@ -1495,12 +1494,12 @@ mod tests {
         assert_eq!(
             options,
             [
-                "rk",
-                "plat",
-                "credMgmt",
-                "clientPin",
-                "perCredMgmtRO",
-                "pinUvAuthToken",
+                ("rk".to_owned(), true),
+                ("plat".to_owned(), false),
+                ("credMgmt".to_owned(), true),
+                ("clientPin".to_owned(), true),
+                ("perCredMgmtRO".to_owned(), true),
+                ("pinUvAuthToken".to_owned(), true),
             ]
         );
         assert_eq!(encrypted_identifier.unwrap().len(), AES_BLOCK_SIZE * 2);
