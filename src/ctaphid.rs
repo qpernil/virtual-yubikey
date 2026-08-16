@@ -284,6 +284,33 @@ mod tests {
     }
 
     #[test]
+    fn fragments_an_ml_dsa_87_sized_cbor_response_without_loss() {
+        let mut device = device();
+        let init = device.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_| unreachable!(),
+        );
+        let channel = assigned_channel(&init);
+        let payload: Vec<u8> = (0..4_700).map(|index| index as u8).collect();
+        let response = device.receive(&initial(channel, CMD_CBOR, &[2]), |_| payload.clone());
+
+        assert_eq!(response.len(), 80);
+        assert_eq!(&response[0][0..7], &[0, 0, 0, 1, 0x90, 0x12, 0x5c]);
+        for (sequence, report) in response[1..].iter().enumerate() {
+            assert_eq!(report[0..4], channel.to_be_bytes());
+            assert_eq!(report[4], sequence as u8);
+        }
+        assert_eq!(response.last().unwrap()[4], 78);
+
+        let mut reconstructed = response[0][7..].to_vec();
+        for report in &response[1..] {
+            reconstructed.extend_from_slice(&report[5..]);
+        }
+        reconstructed.truncate(payload.len());
+        assert_eq!(reconstructed, payload);
+    }
+
+    #[test]
     fn reassembles_multi_report_cbor_request() {
         let mut device = device();
         let init = device.receive(
