@@ -96,7 +96,10 @@ struct ResidentCredential {
 
 #[derive(Clone)]
 enum CredentialPrivateKey {
-    Es256(SecretKey),
+    P256 {
+        algorithm: FidoCredentialAlgorithm,
+        key: SecretKey,
+    },
     MlDsa(MlDsaPrivateKey),
 }
 
@@ -112,7 +115,10 @@ impl fmt::Debug for CredentialPrivateKey {
 impl CredentialPrivateKey {
     fn generate(algorithm: FidoCredentialAlgorithm) -> Result<Self, Error> {
         match algorithm {
-            FidoCredentialAlgorithm::Es256 => Ok(Self::Es256(random_secret()?)),
+            FidoCredentialAlgorithm::Es256 | FidoCredentialAlgorithm::Esp256 => Ok(Self::P256 {
+                algorithm,
+                key: random_secret()?,
+            }),
             algorithm => MlDsaPrivateKey::generate(
                 algorithm
                     .ml_dsa_parameter_set()
@@ -128,9 +134,11 @@ impl CredentialPrivateKey {
         serialized: &[u8],
     ) -> Result<Self, &'static str> {
         match algorithm {
-            FidoCredentialAlgorithm::Es256 => SecretKey::from_slice(serialized)
-                .map(Self::Es256)
-                .map_err(|_| "persistent ES256 private key is invalid"),
+            FidoCredentialAlgorithm::Es256 | FidoCredentialAlgorithm::Esp256 => {
+                SecretKey::from_slice(serialized)
+                    .map(|key| Self::P256 { algorithm, key })
+                    .map_err(|_| "persistent P-256 private key is invalid")
+            }
             algorithm => MlDsaPrivateKey::from_seed_slice(
                 algorithm
                     .ml_dsa_parameter_set()
@@ -144,7 +152,7 @@ impl CredentialPrivateKey {
 
     fn algorithm(&self) -> FidoCredentialAlgorithm {
         match self {
-            Self::Es256(_) => FidoCredentialAlgorithm::Es256,
+            Self::P256 { algorithm, .. } => *algorithm,
             Self::MlDsa(key) => {
                 FidoCredentialAlgorithm::from_ml_dsa_parameter_set(key.parameter_set())
                     .expect("stored ML-DSA key uses a configured FIDO parameter set")
@@ -154,16 +162,16 @@ impl CredentialPrivateKey {
 
     fn serialized(&self) -> Zeroizing<Vec<u8>> {
         match self {
-            Self::Es256(key) => Zeroizing::new(key.to_bytes().to_vec()),
+            Self::P256 { key, .. } => Zeroizing::new(key.to_bytes().to_vec()),
             Self::MlDsa(key) => Zeroizing::new(key.seed().to_vec()),
         }
     }
 
     fn public_key_cose(&self) -> Result<Vec<u8>, Error> {
         match self {
-            Self::Es256(key) => {
+            Self::P256 { algorithm, key } => {
                 let public = key.public_key().to_sec1_point(false);
-                encode_ec2(public.as_bytes())
+                encode_ec2(algorithm.cose_identifier(), 1, public.as_bytes())
             }
             Self::MlDsa(key) => {
                 let algorithm =
@@ -176,7 +184,7 @@ impl CredentialPrivateKey {
 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
         match self {
-            Self::Es256(key) => {
+            Self::P256 { key, .. } => {
                 let signature: DerSignature = P256SigningKey::from(key.clone()).sign(message);
                 Ok(signature.as_bytes().to_vec())
             }
@@ -1351,10 +1359,11 @@ fn authenticator_credential_management(
     }
 }
 
-fn encode_ec2(public: &[u8]) -> Result<Vec<u8>, Error> {
-    if public.len() != 65 || public[0] != 4 {
+fn encode_ec2(algorithm: i64, curve: u8, public: &[u8]) -> Result<Vec<u8>, Error> {
+    if public.len() < 3 || public[0] != 4 || (public.len() - 1) % 2 != 0 {
         return Err(CKR_DEVICE_ERROR.into());
     }
+    let coordinate_length = (public.len() - 1) / 2;
     let mut encoded = Vec::new();
     Encoder::new(&mut encoded)
         .map(5)
@@ -1365,19 +1374,19 @@ fn encode_ec2(public: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(3)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .i8(-7)
+        .i64(algorithm)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .i8(-1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .u8(1)
+        .u8(curve)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .i8(-2)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bytes(&public[1..33])
+        .bytes(&public[1..1 + coordinate_length])
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .i8(-3)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bytes(&public[33..])
+        .bytes(&public[1 + coordinate_length..])
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     Ok(encoded)
 }
@@ -2599,7 +2608,11 @@ mod tests {
 
         let client_data_hash = [0x44; 32];
         let credential_id = restored.credentials[0].credential_id.clone();
-        let CredentialPrivateKey::Es256(private_key) = &restored.credentials[0].private_key else {
+        let CredentialPrivateKey::P256 {
+            algorithm: FidoCredentialAlgorithm::Es256,
+            key: private_key,
+        } = &restored.credentials[0].private_key
+        else {
             panic!("standard test credential should use ES256");
         };
         let verifying_key = VerifyingKey::from(private_key.public_key());
@@ -3039,6 +3052,47 @@ mod tests {
     }
 
     #[test]
+    fn esp256_credentials_persist_and_complete_verified_assertions() {
+        let algorithm = FidoCredentialAlgorithm::Esp256;
+        let identifier = *b"virtual-test-id!";
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut state = FidoState::new(identifier, configuration);
+        let request =
+            make_credential_request("esp256.example", 0x09, &[algorithm.cose_identifier()]);
+        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(state.credentials[0].private_key.algorithm(), algorithm);
+        assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 1, 32);
+
+        let encoded = state.encode_persistent().unwrap();
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut restored =
+            FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
+        let CredentialPrivateKey::P256 {
+            algorithm: FidoCredentialAlgorithm::Esp256,
+            key,
+        } = &restored.credentials[0].private_key
+        else {
+            panic!("ESP256 credential did not restore its P-256 key");
+        };
+        let verifying_key = VerifyingKey::from(key.public_key());
+        let client_data_hash = [0x79; 32];
+        let assertion_request = get_assertion_request(
+            "esp256.example",
+            &restored.credentials[0].credential_id,
+            &client_data_hash,
+        );
+        let assertion = exchange(&mut restored, &assertion_request);
+        assert_eq!(assertion[0], CTAP2_OK);
+        let mut signed = assertion_authenticator_data(&assertion[1..]);
+        signed.extend_from_slice(&client_data_hash);
+        verifying_key
+            .verify(&signed, &assertion_signature(&assertion[1..]))
+            .unwrap();
+    }
+
+    #[test]
     fn ml_dsa_credentials_persist_and_complete_verified_assertions() {
         assert_ml_dsa_cycle(FidoCredentialAlgorithm::MlDsa44, 1312, 2420);
         assert_ml_dsa_cycle(FidoCredentialAlgorithm::MlDsa65, 1952, 3309);
@@ -3119,6 +3173,27 @@ mod tests {
         assert_eq!(decoder.i64().unwrap(), algorithm.cose_identifier());
         assert_eq!(decoder.i8().unwrap(), -1);
         assert_eq!(decoder.bytes().unwrap().len(), public_key_size);
+        assert_eq!(decoder.position(), encoded.len());
+    }
+
+    fn assert_ec2_public_key(
+        encoded: &[u8],
+        algorithm: FidoCredentialAlgorithm,
+        curve: u8,
+        coordinate_length: usize,
+    ) {
+        let mut decoder = minicbor::Decoder::new(encoded);
+        assert_eq!(decoder.map().unwrap(), Some(5));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(decoder.i64().unwrap(), algorithm.cose_identifier());
+        assert_eq!(decoder.i8().unwrap(), -1);
+        assert_eq!(decoder.u8().unwrap(), curve);
+        assert_eq!(decoder.i8().unwrap(), -2);
+        assert_eq!(decoder.bytes().unwrap().len(), coordinate_length);
+        assert_eq!(decoder.i8().unwrap(), -3);
+        assert_eq!(decoder.bytes().unwrap().len(), coordinate_length);
         assert_eq!(decoder.position(), encoded.len());
     }
 
@@ -3215,8 +3290,16 @@ mod tests {
             user_name: "test-user".to_owned(),
             user_display_name: "Test User".to_owned(),
             credential_id,
-            private_key: CredentialPrivateKey::Es256(private_key),
-            public_key_cose: encode_ec2(public_key.as_bytes()).unwrap(),
+            private_key: CredentialPrivateKey::P256 {
+                algorithm: FidoCredentialAlgorithm::Es256,
+                key: private_key,
+            },
+            public_key_cose: encode_ec2(
+                FidoCredentialAlgorithm::Es256.cose_identifier(),
+                1,
+                public_key.as_bytes(),
+            )
+            .unwrap(),
             counter: 0,
             discoverable: true,
             preview: preview_handle
