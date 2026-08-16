@@ -16,6 +16,13 @@ use p384::ecdsa::SigningKey as P384SigningKey;
 use p384::SecretKey as P384SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::SecretKey as P521SecretKey;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use rsa::signature::{
+    RandomizedSigner as RsaRandomizedSigner, SignatureEncoding as RsaSignatureEncoding,
+    Signer as RsaSigner, Verifier as RsaVerifier,
+};
+use rsa::traits::PublicKeyParts;
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::{Signer, Verifier};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -27,6 +34,12 @@ pub enum SoftwareSigningAlgorithm {
     EcdsaP384Sha384,
     EcdsaP521Sha512,
     EcdsaSecp256k1Sha256,
+    RsaPssSha256,
+    RsaPssSha384,
+    RsaPssSha512,
+    RsaPkcs1Sha256,
+    RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
     MlDsa(MlDsaParameterSet),
 }
 
@@ -58,6 +71,10 @@ pub enum SoftwarePublicKey {
     MlDsa {
         parameter_set: MlDsaParameterSet,
         public_key: Vec<u8>,
+    },
+    Rsa {
+        modulus: Vec<u8>,
+        exponent: Vec<u8>,
     },
 }
 
@@ -131,9 +148,84 @@ impl SoftwarePublicKey {
                 verify_ml_dsa(*parameter_set, public_key, message, &[], signature)
                     .map_err(|_| SoftwareSigningError::InvalidSignature)
             }
+            (
+                algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
+                | SoftwareSigningAlgorithm::RsaPssSha384
+                | SoftwareSigningAlgorithm::RsaPssSha512
+                | SoftwareSigningAlgorithm::RsaPkcs1Sha256
+                | SoftwareSigningAlgorithm::RsaPkcs1Sha384
+                | SoftwareSigningAlgorithm::RsaPkcs1Sha512),
+                Self::Rsa { modulus, exponent },
+            ) => {
+                let key = RsaPublicKey::new(
+                    rsa::BigUint::from_bytes_be(modulus),
+                    rsa::BigUint::from_bytes_be(exponent),
+                )
+                .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                verify_rsa_message(algorithm, &key, message, signature)
+            }
             _ => Err(SoftwareSigningError::AlgorithmMismatch),
         }
     }
+}
+
+fn verify_rsa_message(
+    algorithm: SoftwareSigningAlgorithm,
+    key: &RsaPublicKey,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), SoftwareSigningError> {
+    match algorithm {
+        SoftwareSigningAlgorithm::RsaPssSha256 => {
+            rsa_pss_verify::<rsa::sha2::Sha256>(key, message, signature)
+        }
+        SoftwareSigningAlgorithm::RsaPssSha384 => {
+            rsa_pss_verify::<rsa::sha2::Sha384>(key, message, signature)
+        }
+        SoftwareSigningAlgorithm::RsaPssSha512 => {
+            rsa_pss_verify::<rsa::sha2::Sha512>(key, message, signature)
+        }
+        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
+            rsa_pkcs1_verify::<rsa::sha2::Sha256>(key, message, signature)
+        }
+        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
+            rsa_pkcs1_verify::<rsa::sha2::Sha384>(key, message, signature)
+        }
+        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
+            rsa_pkcs1_verify::<rsa::sha2::Sha512>(key, message, signature)
+        }
+        _ => Err(SoftwareSigningError::AlgorithmMismatch),
+    }
+}
+
+fn rsa_pss_verify<D>(
+    key: &RsaPublicKey,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), SoftwareSigningError>
+where
+    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
+{
+    let signature = rsa::pss::Signature::try_from(signature)
+        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+    rsa::pss::VerifyingKey::<D>::new(key.clone())
+        .verify(message, &signature)
+        .map_err(|_| SoftwareSigningError::InvalidSignature)
+}
+
+fn rsa_pkcs1_verify<D>(
+    key: &RsaPublicKey,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), SoftwareSigningError>
+where
+    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
+{
+    let signature = rsa::pkcs1v15::Signature::try_from(signature)
+        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+    rsa::pkcs1v15::VerifyingKey::<D>::new(key.clone())
+        .verify(message, &signature)
+        .map_err(|_| SoftwareSigningError::InvalidSignature)
 }
 
 /// A signature in the algorithm's fixed-width native representation.
@@ -160,6 +252,10 @@ pub enum SoftwareSigningKey {
     P384(P384SecretKey),
     P521(P521SecretKey),
     K256(K256SecretKey),
+    Rsa {
+        algorithm: SoftwareSigningAlgorithm,
+        key: Box<RsaPrivateKey>,
+    },
     MlDsa(MlDsaPrivateKey),
 }
 
@@ -185,6 +281,21 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaP384Sha384 => random_p384_secret().map(Self::P384),
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => random_p521_secret().map(Self::P521),
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => random_k256_secret().map(Self::K256),
+            algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
+            | SoftwareSigningAlgorithm::RsaPssSha384
+            | SoftwareSigningAlgorithm::RsaPssSha512
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha256
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha384
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha512) => {
+                let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2_048)
+                    .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+                key.precompute()
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+                Ok(Self::Rsa {
+                    algorithm,
+                    key: Box::new(key),
+                })
+            }
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::generate(parameter_set)
                     .map(Self::MlDsa)
@@ -216,6 +327,21 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => K256SecretKey::from_slice(serialized)
                 .map(Self::K256)
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
+            algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
+            | SoftwareSigningAlgorithm::RsaPssSha384
+            | SoftwareSigningAlgorithm::RsaPssSha512
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha256
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha384
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha512) => {
+                let mut key = RsaPrivateKey::from_pkcs8_der(serialized)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+                key.precompute()
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+                Ok(Self::Rsa {
+                    algorithm,
+                    key: Box::new(key),
+                })
+            }
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
                     .map(Self::MlDsa)
@@ -231,19 +357,26 @@ impl SoftwareSigningKey {
             Self::P384(_) => SoftwareSigningAlgorithm::EcdsaP384Sha384,
             Self::P521(_) => SoftwareSigningAlgorithm::EcdsaP521Sha512,
             Self::K256(_) => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            Self::Rsa { algorithm, .. } => *algorithm,
             Self::MlDsa(key) => SoftwareSigningAlgorithm::MlDsa(key.parameter_set()),
         }
     }
 
-    pub fn serialized(&self) -> Zeroizing<Vec<u8>> {
-        match self {
-            Self::P256(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::Ed25519(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::P384(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::P521(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::K256(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::MlDsa(key) => Zeroizing::new(key.seed().to_vec()),
-        }
+    pub fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
+        let serialized = match self {
+            Self::P256(key) => key.to_bytes().to_vec(),
+            Self::Ed25519(key) => key.to_bytes().to_vec(),
+            Self::P384(key) => key.to_bytes().to_vec(),
+            Self::P521(key) => key.to_bytes().to_vec(),
+            Self::K256(key) => key.to_bytes().to_vec(),
+            Self::Rsa { key, .. } => key
+                .to_pkcs8_der()
+                .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?
+                .as_bytes()
+                .to_vec(),
+            Self::MlDsa(key) => key.seed().to_vec(),
+        };
+        Ok(Zeroizing::new(serialized))
     }
 
     pub fn public_key(&self) -> SoftwarePublicKey {
@@ -264,6 +397,10 @@ impl SoftwareSigningKey {
             Self::K256(key) => SoftwarePublicKey::Ec {
                 curve: EcCurve::Secp256k1,
                 uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
+            Self::Rsa { key, .. } => SoftwarePublicKey::Rsa {
+                modulus: key.n().to_bytes_be(),
+                exponent: key.e().to_bytes_be(),
             },
             Self::MlDsa(key) => SoftwarePublicKey::MlDsa {
                 parameter_set: key.parameter_set(),
@@ -295,12 +432,53 @@ impl SoftwareSigningKey {
                     K256SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
+            Self::Rsa { algorithm, key } => rsa_sign_message(*algorithm, key, message)?,
             Self::MlDsa(key) => key
                 .sign_hedged(message, &[])
                 .map_err(|_| SoftwareSigningError::SigningFailed)?,
         };
         Ok(SoftwareSignature(signature))
     }
+}
+
+fn rsa_sign_message(
+    algorithm: SoftwareSigningAlgorithm,
+    key: &RsaPrivateKey,
+    message: &[u8],
+) -> Result<Vec<u8>, SoftwareSigningError> {
+    match algorithm {
+        SoftwareSigningAlgorithm::RsaPssSha256 => rsa_pss_sign::<rsa::sha2::Sha256>(key, message),
+        SoftwareSigningAlgorithm::RsaPssSha384 => rsa_pss_sign::<rsa::sha2::Sha384>(key, message),
+        SoftwareSigningAlgorithm::RsaPssSha512 => rsa_pss_sign::<rsa::sha2::Sha512>(key, message),
+        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
+            rsa_pkcs1_sign::<rsa::sha2::Sha256>(key, message)
+        }
+        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
+            rsa_pkcs1_sign::<rsa::sha2::Sha384>(key, message)
+        }
+        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
+            rsa_pkcs1_sign::<rsa::sha2::Sha512>(key, message)
+        }
+        _ => Err(SoftwareSigningError::AlgorithmMismatch),
+    }
+}
+
+fn rsa_pss_sign<D>(key: &RsaPrivateKey, message: &[u8]) -> Result<Vec<u8>, SoftwareSigningError>
+where
+    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
+{
+    Ok(rsa::pss::SigningKey::<D>::new(key.clone())
+        .sign_with_rng(&mut rsa::rand_core::OsRng, message)
+        .to_vec())
+}
+
+fn rsa_pkcs1_sign<D>(key: &RsaPrivateKey, message: &[u8]) -> Result<Vec<u8>, SoftwareSigningError>
+where
+    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
+{
+    Ok(rsa::pkcs1v15::SigningKey::<D>::new(key.clone())
+        .sign(message)
+        .to_vec())
 }
 
 fn random_p256_secret() -> Result<P256SecretKey, SoftwareSigningError> {
@@ -355,13 +533,14 @@ mod tests {
             SoftwareSigningAlgorithm::EcdsaP384Sha384,
             SoftwareSigningAlgorithm::EcdsaP521Sha512,
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            SoftwareSigningAlgorithm::RsaPssSha256,
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
         ] {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
-            let restored =
-                SoftwareSigningKey::from_serialized(algorithm, &key.serialized()).unwrap();
+            let serialized = key.serialized().unwrap();
+            let restored = SoftwareSigningKey::from_serialized(algorithm, &serialized).unwrap();
             assert_eq!(restored.algorithm(), algorithm);
             let public_key = key.public_key();
             assert_eq!(restored.public_key(), public_key);
