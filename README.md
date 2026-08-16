@@ -16,7 +16,7 @@ credential management, resident credentials, and `previewSign`.
 
 | Layer | Behavior |
 | --- | --- |
-| USB identity | `1050:0406`, `Yubico`, `YubiKey FIDO+CCID`, `bcdDevice` `0x0580` |
+| USB identity | Full-speed (12 Mbit/s) `1050:0406`, `Yubico`, `YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
@@ -121,7 +121,7 @@ Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
 instances, and a later start recovers stale state left by a crash. Options:
 
 ```text
---serial DECIMAL       USB and Management serial (default 12345678)
+--serial DECIMAL       Management serial (default 12345678)
 --udc NAME             select a controller instead of the first available one
 --run-as USER          unprivileged protocol worker account
 --log-level LEVEL      off, info, debug, or trace
