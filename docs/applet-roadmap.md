@@ -93,9 +93,10 @@ randomness, trust policy, persistence, transport, and error mapping.
   Authenticator, and ignored PKCS #11 hardware tests.
 - Add cancellation/keepalive behavior before introducing operations that wait
   for touch or other slow work.
-- Keep the versioned, atomic on-disk FIDO store compatible as credential fields
-  evolve. A missing file creates an empty 100-slot authenticator; corrupt state
-  fails closed instead of silently discarding credentials.
+- Keep the atomic on-disk FIDO store explicitly versioned as credential fields
+  evolve. A missing file creates an empty 100-slot authenticator; unsupported or
+  corrupt state fails closed instead of silently discarding credentials. Test
+  schema changes may deliberately require an announced empty-state reset.
 
 ### PIV
 
