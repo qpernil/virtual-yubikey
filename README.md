@@ -140,10 +140,13 @@ instances, and a later start recovers stale state left by a crash. Options:
 Trace logging includes complete protocol payloads and may expose PINs or
 cryptographic material as the emulator grows.
 
-FIDO HID `authenticatorSelection` waits for an explicit simulated touch. While
-waiting, the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
-browser-issued CTAPHID `CANCEL`. The worker exposes a mode-`0600` Unix datagram
-socket at `/run/virtual-yubikey/touch.sock` only for the lifetime of that wait.
+FIDO HID `authenticatorSelection`, `authenticatorMakeCredential`, and
+`authenticatorGetAssertion` wait for an explicit simulated touch. While waiting,
+the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
+browser-issued CTAPHID `CANCEL`. Cancellation returns
+`CTAP2_ERR_KEEPALIVE_CANCEL` without changing credential state. The worker
+exposes a mode-`0600` Unix datagram socket at
+`/run/virtual-yubikey/touch.sock` only for the lifetime of that wait.
 The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event:
 
 ```sh
@@ -158,11 +161,11 @@ payloads start with a one-byte command (`T` is touch); unknown commands are
 ignored so future simulated fingerprint commands and their payloads can extend
 the protocol without replacing the socket transport.
 
-Other currently implemented CTAP operations complete synchronously. Before
-make-credential, assertion, or another operation starts waiting for user
-presence or other slow work, it must use the same keepalive/cancellation path.
-CCID operations that wait must instead emit command time-extension responses.
-HID and CCID already have independent transport threads and connection state.
+Other currently implemented CTAP operations complete synchronously. Any future
+operation that waits for user presence or other slow work must use the same
+keepalive/cancellation path. CCID operations that wait must instead emit command
+time-extension responses. HID and CCID already have independent transport
+threads and connection state.
 
 ## Install as a service
 

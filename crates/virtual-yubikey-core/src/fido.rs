@@ -1567,6 +1567,8 @@ fn standard_assertion_response(
     total: Option<usize>,
 ) -> Result<Vec<u8>, Error> {
     let credential = state.credentials.get_mut(index).ok_or(CKR_DEVICE_ERROR)?;
+    let include_user = credential.discoverable;
+    let user_fields = if state.assertion_user_verified { 3 } else { 1 };
     credential.counter = credential.counter.saturating_add(1);
     let mut auth_data = Sha256::digest(credential.rp_id.as_bytes()).to_vec();
     auth_data.push(if state.assertion_user_verified {
@@ -1583,7 +1585,7 @@ fn standard_assertion_response(
     let mut response = vec![CTAP2_OK];
     let mut encoder = Encoder::new(&mut response);
     encoder
-        .map(4 + u64::from(total.is_some()))
+        .map(3 + u64::from(include_user) + u64::from(total.is_some()))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1604,23 +1606,29 @@ fn standard_assertion_response(
         .u8(3)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .bytes(signature.as_bytes())
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .u8(4)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .map(3)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("id")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bytes(&credential.user_id)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("name")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str(&credential.user_name)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("displayName")
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str(&credential.user_display_name)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    if include_user {
+        encoder
+            .u8(4)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .map(user_fields)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .str("id")
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .bytes(&credential.user_id)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        if state.assertion_user_verified {
+            encoder
+                .str("name")
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+                .str(&credential.user_name)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+                .str("displayName")
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+                .str(&credential.user_display_name)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        }
+    }
     if let Some(total) = total {
         encoder
             .u8(5)
@@ -2151,6 +2159,25 @@ mod tests {
             exchange(&mut state, &[AUTHENTICATOR_SELECTION, 0xa0]),
             [CTAP1_ERR_INVALID_COMMAND]
         );
+    }
+
+    #[test]
+    fn assertion_user_entity_respects_discoverability_and_verification() {
+        let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
+        state
+            .credentials
+            .push(test_credential(vec![0x22; 32], "privacy.example", None));
+
+        let response = standard_assertion_response(&mut state, 0, &[0x33; 32], None).unwrap();
+        assert_eq!(assertion_user_field_count(&response[1..]), Some(1));
+
+        state.assertion_user_verified = true;
+        let response = standard_assertion_response(&mut state, 0, &[0x44; 32], None).unwrap();
+        assert_eq!(assertion_user_field_count(&response[1..]), Some(3));
+
+        state.credentials[0].discoverable = false;
+        let response = standard_assertion_response(&mut state, 0, &[0x55; 32], None).unwrap();
+        assert_eq!(assertion_user_field_count(&response[1..]), None);
     }
     use p256::ecdsa::{Signature, VerifyingKey};
     use signature::{hazmat::PrehashVerifier, Verifier};
@@ -2806,6 +2833,18 @@ mod tests {
             }
         }
         panic!("assertion response did not contain a signature");
+    }
+
+    fn assertion_user_field_count(response: &[u8]) -> Option<u64> {
+        let mut decoder = minicbor::Decoder::new(response);
+        let count = decoder.map().unwrap().unwrap();
+        for _ in 0..count {
+            match decoder.u8().unwrap() {
+                4 => return decoder.map().unwrap(),
+                _ => decoder.skip().unwrap(),
+            }
+        }
+        None
     }
 
     fn preview_signature(authenticator_data: &[u8]) -> Vec<u8> {

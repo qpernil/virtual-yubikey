@@ -286,11 +286,10 @@ fn serve_hid(
                     ),
                 );
                 let mut persistence_error = None;
-                let mut user_presence_required = false;
+                let mut presence_error = None;
                 let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
                 let replies = ctaphid.receive(&report, |request| {
                     let command = request.first().copied().unwrap_or_default();
-                    user_presence_required = request == [0x0b];
                     diagnostics::log(
                         Level::Info,
                         "ctap2",
@@ -305,7 +304,18 @@ fn serve_hid(
                             request.len().saturating_sub(1)
                         ),
                     );
-                    let response = fido.exchange(request);
+                    let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
+                        match wait_for_touch(&mut hid, channel) {
+                            Ok(true) => fido.exchange(request),
+                            Ok(false) => vec![0x2d],
+                            Err(error) => {
+                                presence_error = Some(error);
+                                vec![0x7f]
+                            }
+                        }
+                    } else {
+                        fido.exchange(request)
+                    };
                     if fido.take_persistent_change() {
                         if let Err(error) = persist_fido_state(&fido, state_path) {
                             persistence_error = Some(error);
@@ -331,8 +341,8 @@ fn serve_hid(
                 if let Some(error) = persistence_error {
                     return Err(error);
                 }
-                if user_presence_required && !wait_for_touch(&mut hid, channel)? {
-                    continue;
+                if let Some(error) = presence_error {
+                    return Err(error);
                 }
                 for reply in replies {
                     hid.write_all(&reply)?;
