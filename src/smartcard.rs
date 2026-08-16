@@ -186,6 +186,12 @@ mod tests {
         assert_eq!(&card.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
         assert_eq!(card.transmit(&[0, 0xfd, 0, 0, 0]), [5, 8, 0, 0x90, 0]);
         assert_eq!(card.transmit(&[0, 0xf8, 0, 0, 0]), [1, 2, 3, 4, 0x90, 0]);
+        card.reset();
+        assert_eq!(
+            &card.transmit(&[0x00, 0xa4, 0x04, 0x00, 0x05, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00,])
+                [..2],
+            &[0x61, 0x11]
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub const PIV_AID: [u8; 11] = [
 ];
 
 const PIV_SELECT_AID: [u8; 9] = [0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
+const PIV_APPLICATION_PREFIX: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 const PIV_SELECT_RESPONSE: [u8; 19] = [
     0x61, 0x11, 0x4f, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4f, 0x05, 0xa0, 0x00,
     0x00, 0x03, 0x08,
@@ -34,7 +35,7 @@ const STATUS_INSTRUCTION_NOT_SUPPORTED: u16 = 0x6d00;
 const STATUS_CLASS_NOT_SUPPORTED: u16 = 0x6e00;
 
 pub(crate) fn matches_aid(aid: &[u8]) -> bool {
-    aid == PIV_AID || aid == PIV_SELECT_AID
+    aid == PIV_AID || aid == PIV_SELECT_AID || aid == PIV_APPLICATION_PREFIX
 }
 
 pub(crate) fn select_response() -> Vec<u8> {
