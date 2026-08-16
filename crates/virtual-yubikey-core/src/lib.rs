@@ -219,6 +219,12 @@ impl FidoAuthenticator {
         fido::exchange(&mut self.state, request)
     }
 
+    /// Return the ordered public-key algorithms offered by a CTAP2
+    /// authenticatorMakeCredential request without exposing request secrets.
+    pub fn make_credential_algorithms(request: &[u8]) -> Option<Vec<i64>> {
+        fido::make_credential_algorithms(request)
+    }
+
     pub fn reset_connection(&mut self) {
         self.state.reset_connection();
     }
