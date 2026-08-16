@@ -313,6 +313,18 @@ fn serve_hid(
                             format_args!("algorithms={algorithms:?}"),
                         );
                     }
+                    if let Some(algorithm) = fido.selected_make_credential_algorithm(request) {
+                        diagnostics::log(
+                            Level::Info,
+                            "ctap2",
+                            "make_credential_algorithm_selected",
+                            format_args!(
+                                "algorithm={} cose={}",
+                                algorithm.name(),
+                                algorithm.cose_identifier()
+                            ),
+                        );
+                    }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
                         match wait_for_touch(&mut hid, channel) {
                             Ok(true) => fido.exchange(request),
