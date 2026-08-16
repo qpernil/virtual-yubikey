@@ -9,15 +9,19 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixDatagram;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, TryRecvError};
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
@@ -27,6 +31,44 @@ use virtual_yubikey_core::FidoAuthenticator;
 const MAX_TRANSFER: usize = 16 * 1024;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK_LINUX: i32 = 0x800;
+#[cfg(target_os = "linux")]
+const TOUCH_SOCKET: &str = "/run/virtual-yubikey/touch.sock";
+#[cfg(target_os = "linux")]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UserPresenceCommand {
+    Touch,
+}
+
+#[cfg(target_os = "linux")]
+impl UserPresenceCommand {
+    fn decode(value: u8) -> Option<Self> {
+        match value {
+            b'T' => Some(Self::Touch),
+            // Additional command bytes can represent simulated
+            // biometric results without changing the IPC transport.
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn poll(fds: *mut PollFd, count: usize, timeout_ms: i32) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+const POLLIN: i16 = 0x0001;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn run_worker(
@@ -244,8 +286,11 @@ fn serve_hid(
                     ),
                 );
                 let mut persistence_error = None;
+                let mut user_presence_required = false;
+                let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
                 let replies = ctaphid.receive(&report, |request| {
                     let command = request.first().copied().unwrap_or_default();
+                    user_presence_required = request == [0x0b];
                     diagnostics::log(
                         Level::Info,
                         "ctap2",
@@ -286,6 +331,9 @@ fn serve_hid(
                 if let Some(error) = persistence_error {
                     return Err(error);
                 }
+                if user_presence_required && !wait_for_touch(&mut hid, channel)? {
+                    continue;
+                }
                 for reply in replies {
                     hid.write_all(&reply)?;
                 }
@@ -296,6 +344,128 @@ fn serve_hid(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct TouchSocket {
+    socket: UnixDatagram,
+}
+
+#[cfg(target_os = "linux")]
+impl TouchSocket {
+    fn bind() -> io::Result<Self> {
+        match fs::remove_file(TOUCH_SOCKET) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(with_context(error, "remove stale touch socket")),
+        }
+        let socket = UnixDatagram::bind(TOUCH_SOCKET)
+            .map_err(|error| with_context(error, "bind touch socket"))?;
+        fs::set_permissions(TOUCH_SOCKET, fs::Permissions::from_mode(0o600))?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TouchSocket {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(TOUCH_SOCKET);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_touch(hid: &mut File, channel: u32) -> io::Result<bool> {
+    let touch = TouchSocket::bind()?;
+    diagnostics::log(
+        Level::Info,
+        "fido",
+        "user_presence_wait",
+        format_args!("channel={channel:08x} socket={TOUCH_SOCKET}"),
+    );
+    let mut last_keepalive = Instant::now() - KEEPALIVE_INTERVAL;
+    let mut signal = [0_u8; 1];
+    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+
+    while !STOP_REQUESTED.load(Ordering::Relaxed) {
+        match touch.socket.recv(&mut signal) {
+            Ok(1) if UserPresenceCommand::decode(signal[0]) == Some(UserPresenceCommand::Touch) => {
+                diagnostics::log(
+                    Level::Info,
+                    "fido",
+                    "user_presence_received",
+                    format_args!("channel={channel:08x}"),
+                );
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(with_context(error, "receive touch notification")),
+        }
+
+        if input_ready(hid)? {
+            match hid.read(&mut report) {
+                Ok(length) if length == report.len() => {
+                    if crate::ctaphid::is_cancel(&report, channel) {
+                        diagnostics::log(
+                            Level::Info,
+                            "fido",
+                            "user_presence_cancelled",
+                            format_args!("channel={channel:08x}"),
+                        );
+                        return Ok(false);
+                    }
+                    diagnostics::log(
+                        Level::Debug,
+                        "ctaphid",
+                        "report_ignored_while_waiting",
+                        format_args!(
+                            "channel={:08x} command={:02x}",
+                            u32::from_be_bytes(report[0..4].try_into().unwrap()),
+                            report[4]
+                        ),
+                    );
+                }
+                Ok(0) => return Ok(false),
+                Ok(length) => diagnostics::log(
+                    Level::Info,
+                    "ctaphid",
+                    "report_rejected",
+                    format_args!("reason=invalid_length length={length}"),
+                ),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if endpoint_is_gone(&error) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+
+        if last_keepalive.elapsed() >= KEEPALIVE_INTERVAL {
+            hid.write_all(&crate::ctaphid::keepalive(channel))?;
+            last_keepalive = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn input_ready(file: &File) -> io::Result<bool> {
+    let mut descriptor = PollFd {
+        fd: file.as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `descriptor` points to one valid pollfd for the duration of the call.
+    let result = unsafe { poll(&mut descriptor, 1, 0) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(result > 0 && descriptor.revents != 0)
 }
 
 #[cfg(target_os = "linux")]

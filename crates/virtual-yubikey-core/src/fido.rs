@@ -20,6 +20,7 @@ const AUTHENTICATOR_GET_INFO: u8 = 0x04;
 const AUTHENTICATOR_CLIENT_PIN: u8 = 0x06;
 const AUTHENTICATOR_GET_NEXT_ASSERTION: u8 = 0x08;
 const AUTHENTICATOR_CREDENTIAL_MANAGEMENT: u8 = 0x0a;
+const AUTHENTICATOR_SELECTION: u8 = 0x0b;
 const CTAP2_OK: u8 = 0;
 const CTAP1_ERR_INVALID_COMMAND: u8 = 0x01;
 const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
@@ -452,6 +453,7 @@ fn exchange_inner(state: &mut FidoState, request: &[u8]) -> Result<Vec<u8>, Erro
             authenticator_get_next_assertion(state)
         }
         AUTHENTICATOR_CREDENTIAL_MANAGEMENT => authenticator_credential_management(state, payload),
+        AUTHENTICATOR_SELECTION if payload.is_empty() => Ok(vec![CTAP2_OK]),
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
 }
@@ -2140,6 +2142,16 @@ fn pin_hash_matches(protocol: u8, shared: &[u8], encrypted: &[u8], pin: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_accepts_an_empty_request_for_transport_gated_touch() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        assert_eq!(exchange(&mut state, &[AUTHENTICATOR_SELECTION]), [CTAP2_OK]);
+        assert_eq!(
+            exchange(&mut state, &[AUTHENTICATOR_SELECTION, 0xa0]),
+            [CTAP1_ERR_INVALID_COMMAND]
+        );
+    }
     use p256::ecdsa::{Signature, VerifyingKey};
     use signature::{hazmat::PrehashVerifier, Verifier};
 

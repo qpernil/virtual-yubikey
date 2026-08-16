@@ -140,11 +140,29 @@ instances, and a later start recovers stale state left by a crash. Options:
 Trace logging includes complete protocol payloads and may expose PINs or
 cryptographic material as the emulator grows.
 
-All currently implemented CTAP operations complete synchronously. Before a
-future operation waits for user presence or other slow work, its execution must
-move off the transport loop: FIDO HID must emit CTAPHID KEEPALIVE and accept
-CANCEL, while CCID must emit command time-extension responses. HID and CCID
-already have independent transport threads and separate connection state.
+FIDO HID `authenticatorSelection` waits for an explicit simulated touch. While
+waiting, the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
+browser-issued CTAPHID `CANCEL`. The worker exposes a mode-`0600` Unix datagram
+socket at `/run/virtual-yubikey/touch.sock` only for the lifetime of that wait.
+The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event:
+
+```sh
+virtual-yubikey-touch
+```
+
+The tool fails when no operation is waiting, so touches cannot be queued for a
+later request. Browser or operating-system UI remains responsible for PIN entry
+and cancellation; the IPC event represents only the physical touch. The `/run`
+directory is volatile and is also removed during clean service shutdown. IPC
+payloads start with a one-byte command (`T` is touch); unknown commands are
+ignored so future simulated fingerprint commands and their payloads can extend
+the protocol without replacing the socket transport.
+
+Other currently implemented CTAP operations complete synchronously. Before
+make-credential, assertion, or another operation starts waiting for user
+presence or other slow work, it must use the same keepalive/cancellation path.
+CCID operations that wait must instead emit command time-extension responses.
+HID and CCID already have independent transport threads and connection state.
 
 ## Install as a service
 
@@ -154,6 +172,8 @@ After a manual test succeeds:
 cd /home/per/virtual-yubikey
 sudo install -o root -g root -m 0755 \
   target/release/virtual-yubikey /usr/local/sbin/virtual-yubikey
+sudo install -o root -g root -m 0755 \
+  target/release/virtual-yubikey-touch /usr/local/bin/virtual-yubikey-touch
 sudo install -o root -g root -m 0644 \
   systemd/virtual-yubikey.service /etc/systemd/system/virtual-yubikey.service
 sudo systemctl daemon-reload

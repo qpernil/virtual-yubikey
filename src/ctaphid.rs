@@ -14,6 +14,7 @@ const CMD_MSG: u8 = 0x03;
 const CMD_INIT: u8 = 0x06;
 const CMD_CBOR: u8 = 0x10;
 const CMD_CANCEL: u8 = 0x11;
+const CMD_KEEPALIVE: u8 = 0x3b;
 const CMD_ERROR: u8 = 0x3f;
 const CMD_YUBIKEY_READ_CONFIG: u8 = 0x42;
 
@@ -26,6 +27,7 @@ const ERR_INVALID_CHANNEL: u8 = 0x0b;
 
 const CAPABILITY_CBOR: u8 = 0x04;
 const CAPABILITY_NMSG: u8 = 0x08;
+const KEEPALIVE_STATUS_UP_NEEDED: u8 = 0x02;
 
 #[derive(Debug)]
 struct Transaction {
@@ -221,6 +223,16 @@ fn encode_message(channel: u32, command: u8, payload: &[u8]) -> Vec<[u8; REPORT_
     reports
 }
 
+pub(crate) fn keepalive(channel: u32) -> [u8; REPORT_SIZE] {
+    encode_message(channel, CMD_KEEPALIVE, &[KEEPALIVE_STATUS_UP_NEEDED])[0]
+}
+
+pub(crate) fn is_cancel(report: &[u8; REPORT_SIZE], channel: u32) -> bool {
+    u32::from_be_bytes(report[0..4].try_into().unwrap()) == channel
+        && report[4] == (CMD_CANCEL | 0x80)
+        && report[5..7] == [0, 0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +328,16 @@ mod tests {
             .windows(6)
             .any(|value| value == [2, 4, 0, 188, 97, 78]));
         assert!(response[0].windows(5).any(|value| value == [5, 3, 5, 8, 0]));
+    }
+
+    #[test]
+    fn encodes_user_presence_keepalive_and_recognizes_cancel() {
+        let channel = 0x0102_0304;
+        let keepalive = keepalive(channel);
+        assert_eq!(&keepalive[..8], &[1, 2, 3, 4, 0xbb, 0, 1, 2]);
+
+        let cancel = initial(channel, CMD_CANCEL, &[]);
+        assert!(is_cancel(&cancel, channel));
+        assert!(!is_cancel(&cancel, channel + 1));
     }
 }
