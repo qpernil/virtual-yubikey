@@ -20,7 +20,7 @@ credential management, resident credentials, and `previewSign`.
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, assertions and `previewSign` |
+| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
 | Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
@@ -59,6 +59,30 @@ firmware does not implement.
 See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the planned FIDO,
 PIV, YubiHSM Auth, secure-channel/Issuer SD, and OpenPGP work, including the
 code-sharing boundary with `pkcs11rs`.
+
+## Credential algorithms
+
+The FIDO applet can create, persist, restore, assert with, and independently
+verify credentials using these COSE algorithms:
+
+| Family | Algorithms |
+| --- | --- |
+| ML-DSA | ML-DSA-44 (`-48`), ML-DSA-65 (`-49`), ML-DSA-87 (`-50`) |
+| ECDSA | ES256 (`-7`), ESP256 (`-9`), ESP384 (`-51`), ESP512 (`-52`), ES256K (`-47`) |
+| Edwards | Ed25519 (`-19`) |
+| RSA-PSS | PS256 (`-37`), PS384 (`-38`), PS512 (`-39`) |
+| RSA PKCS #1 v1.5 | RS256 (`-257`), RS384 (`-258`), RS512 (`-259`) |
+
+For post-quantum compatibility testing, the emulator deliberately prefers the
+strongest offered ML-DSA parameter set—87, then 65, then 44—before considering
+classical algorithms in client order. This is test policy rather than an attempt
+to reproduce every authenticator's negotiation policy.
+
+ML-DSA uses the RustCrypto `ml-dsa` implementation in ordinary Raspberry Pi
+software. It is suitable for interoperability development, not as evidence of
+hardware protection or production side-channel resistance. ML-DSA-87 assertions
+are large; the CTAPHID transport tests complete multi-report responses of the
+same size without truncation.
 
 ## Hardware and operating system
 
@@ -126,6 +150,11 @@ replaced. State replacement is atomic and synchronized before a successful
 mutating CTAP response is returned. The file is mode `0600`, but contains
 unencrypted test PIN and private-key material and must not be treated as secure
 hardware storage.
+
+The algorithm expansion uses persistent-state version 2. It intentionally does
+not decode the earlier test schema. Before deploying this version over an older
+development build, stop the service and remove that exact state file to start
+with an empty authenticator.
 
 Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
 instances, and a later start recovers stale state left by a crash. Options:
