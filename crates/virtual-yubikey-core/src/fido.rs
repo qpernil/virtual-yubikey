@@ -747,7 +747,10 @@ pub(crate) fn make_credential_algorithms(request: &[u8]) -> Option<Vec<i64>> {
 
 impl FidoState {
     fn select_credential_algorithm(&self, offered: &[i64]) -> Option<FidoCredentialAlgorithm> {
-        for preferred in [FidoCredentialAlgorithm::MlDsa44] {
+        for preferred in [
+            FidoCredentialAlgorithm::MlDsa65,
+            FidoCredentialAlgorithm::MlDsa44,
+        ] {
             if self.credential_algorithms.contains(&preferred)
                 && offered.contains(&preferred.cose_identifier())
             {
@@ -3024,7 +3027,7 @@ mod tests {
         let request = make_credential_request("preference.example", 0x61, &[-7, -48, -49, -50]);
         assert_eq!(
             state.selected_make_credential_algorithm(&request),
-            Some(FidoCredentialAlgorithm::MlDsa44)
+            Some(FidoCredentialAlgorithm::MlDsa65)
         );
 
         let request = make_credential_request("fallback.example", 0x62, &[-257, -7]);
@@ -3037,6 +3040,7 @@ mod tests {
     #[test]
     fn ml_dsa_credentials_persist_and_complete_verified_assertions() {
         assert_ml_dsa_cycle(FidoCredentialAlgorithm::MlDsa44, 1312, 2420);
+        assert_ml_dsa_cycle(FidoCredentialAlgorithm::MlDsa65, 1952, 3309);
     }
 
     fn assert_ml_dsa_cycle(
