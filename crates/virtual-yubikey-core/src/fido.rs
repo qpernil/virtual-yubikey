@@ -3346,6 +3346,11 @@ mod tests {
         assert_rsa_cycle(FidoCredentialAlgorithm::Rs384, "rs384.example", 0x62);
     }
 
+    #[test]
+    fn rs512_credentials_persist_and_complete_verified_assertions() {
+        assert_rsa_cycle(FidoCredentialAlgorithm::Rs512, "rs512.example", 0x63);
+    }
+
     fn assert_rsa_cycle(algorithm: FidoCredentialAlgorithm, rp_id: &str, request_marker: u8) {
         let identifier = *b"virtual-test-id!";
         let configuration =
