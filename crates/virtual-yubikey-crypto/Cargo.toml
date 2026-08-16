@@ -1,27 +1,23 @@
 [package]
-name = "virtual-yubikey-core"
+name = "virtual-yubikey-crypto"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Transport-neutral logical YubiKey emulator"
+description = "Protocol-neutral signing and verification shared by virtual-yubikey and its clients"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-virtual-yubikey-crypto = { path = "../virtual-yubikey-crypto" }
-aes = "0.8.4"
+ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
-hkdf = "0.13.0"
-hmac = "0.13.0"
-minicbor = { version = "2.3.0", features = ["alloc"] }
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
-p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
-sha2 = "0.11.0"
+rsa = { version = "0.9.10", default-features = false, features = ["sha2", "std", "u64_digit"] }
 signature = "3.0.0"
-subtle = "2.6.1"
 zeroize = "1.9.0"
 
 [dev-dependencies]
-ed25519-dalek = "3.0.0"
+sha2 = "0.11.0"

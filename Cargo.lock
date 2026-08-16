@@ -932,6 +932,23 @@ dependencies = [
  "hmac",
  "k256",
  "minicbor",
+ "p256",
+ "p384",
+ "p521",
+ "sha2 0.11.0",
+ "signature 3.0.0",
+ "subtle",
+ "virtual-yubikey-crypto",
+ "zeroize",
+]
+
+[[package]]
+name = "virtual-yubikey-crypto"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "k256",
  "ml-dsa",
  "p256",
  "p384",
@@ -939,7 +956,6 @@ dependencies = [
  "rsa",
  "sha2 0.11.0",
  "signature 3.0.0",
- "subtle",
  "zeroize",
 ]
 
