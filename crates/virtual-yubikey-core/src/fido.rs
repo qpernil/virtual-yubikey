@@ -3323,13 +3323,21 @@ mod tests {
 
     #[test]
     fn ps256_credentials_persist_and_complete_verified_assertions() {
-        let algorithm = FidoCredentialAlgorithm::Ps256;
+        assert_rsa_cycle(FidoCredentialAlgorithm::Ps256, "ps256.example", 0x37);
+    }
+
+    #[test]
+    fn ps384_credentials_persist_and_complete_verified_assertions() {
+        assert_rsa_cycle(FidoCredentialAlgorithm::Ps384, "ps384.example", 0x38);
+    }
+
+    fn assert_rsa_cycle(algorithm: FidoCredentialAlgorithm, rp_id: &str, request_marker: u8) {
         let identifier = *b"virtual-test-id!";
         let configuration =
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut state = FidoState::new(identifier, configuration);
         let request =
-            make_credential_request("ps256.example", 0x37, &[algorithm.cose_identifier()]);
+            make_credential_request(rp_id, request_marker, &[algorithm.cose_identifier()]);
         assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
         assert_rsa_public_key(&state.credentials[0].public_key_cose, algorithm, 256);
 
@@ -3339,9 +3347,9 @@ mod tests {
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
         let public_key = restored.credentials[0].private_key.key.public_key();
-        let client_data_hash = [0x74; 32];
+        let client_data_hash = [request_marker; 32];
         let assertion_request = get_assertion_request(
-            "ps256.example",
+            rp_id,
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
