@@ -1,0 +1,23 @@
+[package]
+name = "virtual-yubikey-crypto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Protocol-neutral signing and verification shared by virtual-yubikey and its clients"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ed25519-dalek = "3.0.0"
+getrandom = "0.4.3"
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
+p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
+p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "0.9.10", default-features = false, features = ["sha2", "std", "u64_digit"] }
+signature = "3.0.0"
+zeroize = "1.9.0"
+
+[dev-dependencies]
+sha2 = "0.11.0"

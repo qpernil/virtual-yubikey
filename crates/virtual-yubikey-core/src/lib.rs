@@ -6,9 +6,8 @@
 
 mod crypto;
 mod fido;
-pub mod post_quantum;
 mod preview_sign;
-pub mod software_signing;
+pub use virtual_yubikey_crypto::{post_quantum, software_signing};
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
