@@ -24,6 +24,7 @@ pub enum FidoCredentialAlgorithm {
     Es256K,
     Ps256,
     Ps384,
+    Ps512,
     MlDsa44,
     MlDsa65,
     MlDsa87,
@@ -40,6 +41,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256K => -47,
             Self::Ps256 => -37,
             Self::Ps384 => -38,
+            Self::Ps512 => -39,
             Self::MlDsa44 => -48,
             Self::MlDsa65 => -49,
             Self::MlDsa87 => -50,
@@ -56,6 +58,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256K => "es256k",
             Self::Ps256 => "ps256",
             Self::Ps384 => "ps384",
+            Self::Ps512 => "ps512",
             Self::MlDsa44 => "ml-dsa-44",
             Self::MlDsa65 => "ml-dsa-65",
             Self::MlDsa87 => "ml-dsa-87",
@@ -72,6 +75,7 @@ impl FidoCredentialAlgorithm {
             "es256k" => Some(Self::Es256K),
             "ps256" => Some(Self::Ps256),
             "ps384" => Some(Self::Ps384),
+            "ps512" => Some(Self::Ps512),
             "ml-dsa-44" => Some(Self::MlDsa44),
             "ml-dsa-65" => Some(Self::MlDsa65),
             "ml-dsa-87" => Some(Self::MlDsa87),
@@ -89,6 +93,7 @@ impl FidoCredentialAlgorithm {
             -47 => Some(Self::Es256K),
             -37 => Some(Self::Ps256),
             -38 => Some(Self::Ps384),
+            -39 => Some(Self::Ps512),
             -48 => Some(Self::MlDsa44),
             -49 => Some(Self::MlDsa65),
             -50 => Some(Self::MlDsa87),
@@ -105,7 +110,8 @@ impl FidoCredentialAlgorithm {
             | Self::Esp512
             | Self::Es256K
             | Self::Ps256
-            | Self::Ps384 => None,
+            | Self::Ps384
+            | Self::Ps512 => None,
             Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
             Self::MlDsa65 => Some(post_quantum::MlDsaParameterSet::MlDsa65),
             Self::MlDsa87 => Some(post_quantum::MlDsaParameterSet::MlDsa87),
@@ -123,6 +129,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256K => software_signing::SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
             Self::Ps256 => software_signing::SoftwareSigningAlgorithm::RsaPssSha256,
             Self::Ps384 => software_signing::SoftwareSigningAlgorithm::RsaPssSha384,
+            Self::Ps512 => software_signing::SoftwareSigningAlgorithm::RsaPssSha512,
             Self::MlDsa44 => software_signing::SoftwareSigningAlgorithm::MlDsa(
                 post_quantum::MlDsaParameterSet::MlDsa44,
             ),
@@ -241,6 +248,7 @@ impl FidoConfiguration {
                 FidoCredentialAlgorithm::Es256K,
                 FidoCredentialAlgorithm::Ps256,
                 FidoCredentialAlgorithm::Ps384,
+                FidoCredentialAlgorithm::Ps512,
                 FidoCredentialAlgorithm::MlDsa44,
                 FidoCredentialAlgorithm::MlDsa65,
                 FidoCredentialAlgorithm::MlDsa87,
