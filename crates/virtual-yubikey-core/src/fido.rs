@@ -467,6 +467,7 @@ struct PreviewRequest {
     user_display_name: Option<String>,
     client_data_hash: Option<Vec<u8>>,
     credential_ids: Vec<Vec<u8>>,
+    algorithms: Vec<i64>,
     supports_es256: bool,
     resident_key: bool,
     preview_requested: bool,
@@ -609,9 +610,24 @@ fn decode_algorithms(
                 _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
             }
         }
-        request.supports_es256 |= public_key && algorithm == Some(-7);
+        if public_key {
+            if let Some(algorithm) = algorithm {
+                request.algorithms.push(algorithm);
+                request.supports_es256 |= algorithm == -7;
+            }
+        }
     }
     Ok(())
+}
+
+pub(crate) fn make_credential_algorithms(request: &[u8]) -> Option<Vec<i64>> {
+    let (&command, payload) = request.split_first()?;
+    if command != AUTHENTICATOR_MAKE_CREDENTIAL {
+        return None;
+    }
+    decode_preview_request(payload, false)
+        .ok()
+        .map(|request| request.algorithms)
 }
 
 fn decode_options(
@@ -2749,6 +2765,62 @@ mod tests {
             .u8(2)
             .unwrap();
         exchange(state, &request)
+    }
+
+    #[test]
+    fn inspects_ordered_make_credential_algorithms() {
+        let mut request = vec![AUTHENTICATOR_MAKE_CREDENTIAL];
+        let mut encoder = Encoder::new(&mut request);
+        encoder
+            .map(4)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .bytes(&[0x55; 32])
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .map(1)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .str("example.com")
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .map(1)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(b"test-user")
+            .unwrap()
+            .u8(4)
+            .unwrap()
+            .array(4)
+            .unwrap();
+        for (algorithm, key_type) in [
+            (-48, "public-key"),
+            (-7, "public-key"),
+            (-49, "public-key"),
+            (-50, "not-public-key"),
+        ] {
+            encoder
+                .map(2)
+                .unwrap()
+                .str("alg")
+                .unwrap()
+                .i64(algorithm)
+                .unwrap()
+                .str("type")
+                .unwrap()
+                .str(key_type)
+                .unwrap();
+        }
+
+        assert_eq!(
+            make_credential_algorithms(&request),
+            Some(vec![-48, -7, -49])
+        );
     }
 
     fn management_request(subcommand: u8, parameters: Option<&[u8]>) -> Vec<u8> {

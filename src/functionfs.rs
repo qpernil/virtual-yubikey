@@ -304,6 +304,15 @@ fn serve_hid(
                             request.len().saturating_sub(1)
                         ),
                     );
+                    if let Some(algorithms) = FidoAuthenticator::make_credential_algorithms(request)
+                    {
+                        diagnostics::log(
+                            Level::Info,
+                            "ctap2",
+                            "make_credential_algorithms",
+                            format_args!("algorithms={algorithms:?}"),
+                        );
+                    }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
                         match wait_for_touch(&mut hid, channel) {
                             Ok(true) => fido.exchange(request),
