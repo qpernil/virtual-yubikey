@@ -164,7 +164,7 @@ impl CredentialPrivateKey {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
         let signature = self
             .key
-            .sign_message(message)
+            .sign_message(self.algorithm.software_signing_algorithm(), message)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         match self.algorithm.software_signing_algorithm() {
             SoftwareSigningAlgorithm::EcdsaP256Sha256 => {

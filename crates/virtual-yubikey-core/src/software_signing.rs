@@ -49,6 +49,20 @@ pub enum SoftwareSigningAlgorithm {
     MlDsa(MlDsaParameterSet),
 }
 
+impl SoftwareSigningAlgorithm {
+    const fn is_rsa(self) -> bool {
+        matches!(
+            self,
+            Self::RsaPssSha256
+                | Self::RsaPssSha384
+                | Self::RsaPssSha512
+                | Self::RsaPkcs1Sha256
+                | Self::RsaPkcs1Sha384
+                | Self::RsaPkcs1Sha512
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftwareSigningError {
     AlgorithmMismatch,
@@ -416,10 +430,7 @@ pub enum SoftwareSigningKey {
     P384(P384SecretKey),
     P521(P521SecretKey),
     K256(K256SecretKey),
-    Rsa {
-        algorithm: SoftwareSigningAlgorithm,
-        key: Box<RsaPrivateKey>,
-    },
+    Rsa(Box<RsaPrivateKey>),
     MlDsa(MlDsaPrivateKey),
 }
 
@@ -427,7 +438,7 @@ impl fmt::Debug for SoftwareSigningKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SoftwareSigningKey")
-            .field("algorithm", &self.algorithm())
+            .field("kind", &self.kind_name())
             .finish_non_exhaustive()
     }
 }
@@ -445,20 +456,17 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaP384Sha384 => random_p384_secret().map(Self::P384),
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => random_p521_secret().map(Self::P521),
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => random_k256_secret().map(Self::K256),
-            algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
+            SoftwareSigningAlgorithm::RsaPssSha256
             | SoftwareSigningAlgorithm::RsaPssSha384
             | SoftwareSigningAlgorithm::RsaPssSha512
             | SoftwareSigningAlgorithm::RsaPkcs1Sha256
             | SoftwareSigningAlgorithm::RsaPkcs1Sha384
-            | SoftwareSigningAlgorithm::RsaPkcs1Sha512) => {
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
                 let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2_048)
                     .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
                 key.precompute()
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa {
-                    algorithm,
-                    key: Box::new(key),
-                })
+                Ok(Self::Rsa(Box::new(key)))
             }
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::generate(parameter_set)
@@ -491,20 +499,17 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => K256SecretKey::from_slice(serialized)
                 .map(Self::K256)
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
-            algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
+            SoftwareSigningAlgorithm::RsaPssSha256
             | SoftwareSigningAlgorithm::RsaPssSha384
             | SoftwareSigningAlgorithm::RsaPssSha512
             | SoftwareSigningAlgorithm::RsaPkcs1Sha256
             | SoftwareSigningAlgorithm::RsaPkcs1Sha384
-            | SoftwareSigningAlgorithm::RsaPkcs1Sha512) => {
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
                 let mut key = RsaPrivateKey::from_pkcs8_der(serialized)
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
                 key.precompute()
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa {
-                    algorithm,
-                    key: Box::new(key),
-                })
+                Ok(Self::Rsa(Box::new(key)))
             }
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
@@ -514,15 +519,15 @@ impl SoftwareSigningKey {
         }
     }
 
-    pub const fn algorithm(&self) -> SoftwareSigningAlgorithm {
+    const fn kind_name(&self) -> &'static str {
         match self {
-            Self::P256(_) => SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            Self::Ed25519(_) => SoftwareSigningAlgorithm::Ed25519,
-            Self::P384(_) => SoftwareSigningAlgorithm::EcdsaP384Sha384,
-            Self::P521(_) => SoftwareSigningAlgorithm::EcdsaP521Sha512,
-            Self::K256(_) => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
-            Self::Rsa { algorithm, .. } => *algorithm,
-            Self::MlDsa(key) => SoftwareSigningAlgorithm::MlDsa(key.parameter_set()),
+            Self::P256(_) => "P-256",
+            Self::Ed25519(_) => "Ed25519",
+            Self::P384(_) => "P-384",
+            Self::P521(_) => "P-521",
+            Self::K256(_) => "secp256k1",
+            Self::Rsa(_) => "RSA",
+            Self::MlDsa(_) => "ML-DSA",
         }
     }
 
@@ -533,7 +538,7 @@ impl SoftwareSigningKey {
             Self::P384(key) => key.to_bytes().to_vec(),
             Self::P521(key) => key.to_bytes().to_vec(),
             Self::K256(key) => key.to_bytes().to_vec(),
-            Self::Rsa { key, .. } => key
+            Self::Rsa(key) => key
                 .to_pkcs8_der()
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?
                 .as_bytes()
@@ -562,7 +567,7 @@ impl SoftwareSigningKey {
                 curve: EcCurve::Secp256k1,
                 uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
             },
-            Self::Rsa { key, .. } => SoftwarePublicKey::Rsa {
+            Self::Rsa(key) => SoftwarePublicKey::Rsa {
                 modulus: key.n().to_bytes_be(),
                 exponent: key.e().to_bytes_be(),
             },
@@ -573,33 +578,45 @@ impl SoftwareSigningKey {
         }
     }
 
-    pub fn sign_message(&self, message: &[u8]) -> Result<SoftwareSignature, SoftwareSigningError> {
-        let signature = match self {
-            Self::P256(key) => {
+    pub fn sign_message(
+        &self,
+        algorithm: SoftwareSigningAlgorithm,
+        message: &[u8],
+    ) -> Result<SoftwareSignature, SoftwareSigningError> {
+        let signature = match (algorithm, self) {
+            (SoftwareSigningAlgorithm::EcdsaP256Sha256, Self::P256(key)) => {
                 let signature: p256::ecdsa::Signature =
                     P256SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
-            Self::Ed25519(key) => key.sign(message).to_bytes().to_vec(),
-            Self::P384(key) => {
+            (SoftwareSigningAlgorithm::Ed25519, Self::Ed25519(key)) => {
+                key.sign(message).to_bytes().to_vec()
+            }
+            (SoftwareSigningAlgorithm::EcdsaP384Sha384, Self::P384(key)) => {
                 let signature: p384::ecdsa::Signature =
                     P384SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
-            Self::P521(key) => {
+            (SoftwareSigningAlgorithm::EcdsaP521Sha512, Self::P521(key)) => {
                 let signature: p521::ecdsa::Signature =
                     P521SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
-            Self::K256(key) => {
+            (SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, Self::K256(key)) => {
                 let signature: k256::ecdsa::Signature =
                     K256SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
-            Self::Rsa { algorithm, key } => rsa_sign_message(*algorithm, key, message)?,
-            Self::MlDsa(key) => key
-                .sign_hedged(message, &[])
-                .map_err(|_| SoftwareSigningError::SigningFailed)?,
+            (algorithm, Self::Rsa(key)) if algorithm.is_rsa() => {
+                rsa_sign_message(algorithm, key, message)?
+            }
+            (SoftwareSigningAlgorithm::MlDsa(parameter_set), Self::MlDsa(key))
+                if parameter_set == key.parameter_set() =>
+            {
+                key.sign_hedged(message, &[])
+                    .map_err(|_| SoftwareSigningError::SigningFailed)?
+            }
+            _ => return Err(SoftwareSigningError::AlgorithmMismatch),
         };
         Ok(SoftwareSignature(signature))
     }
@@ -608,7 +625,11 @@ impl SoftwareSigningKey {
     ///
     /// This is available for ECDSA and RSA. Ed25519 and ML-DSA define their
     /// own message processing and therefore use [`Self::sign_message`].
-    pub fn sign_prehash(&self, prehash: &[u8]) -> Result<SoftwareSignature, SoftwareSigningError> {
+    pub fn sign_prehash(
+        &self,
+        algorithm: SoftwareSigningAlgorithm,
+        prehash: &[u8],
+    ) -> Result<SoftwareSignature, SoftwareSigningError> {
         macro_rules! sign_ecdsa_prehash {
             ($key:expr, $signing_key:ty, $signature:ty) => {{
                 let key = <$signing_key>::from($key.clone());
@@ -618,23 +639,23 @@ impl SoftwareSigningKey {
                 signature.to_bytes().to_vec()
             }};
         }
-        let signature = match self {
-            Self::P256(key) => {
+        let signature = match (algorithm, self) {
+            (SoftwareSigningAlgorithm::EcdsaP256Sha256, Self::P256(key)) => {
                 sign_ecdsa_prehash!(key, P256SigningKey, p256::ecdsa::Signature)
             }
-            Self::P384(key) => {
+            (SoftwareSigningAlgorithm::EcdsaP384Sha384, Self::P384(key)) => {
                 sign_ecdsa_prehash!(key, P384SigningKey, p384::ecdsa::Signature)
             }
-            Self::P521(key) => {
+            (SoftwareSigningAlgorithm::EcdsaP521Sha512, Self::P521(key)) => {
                 sign_ecdsa_prehash!(key, P521SigningKey, p521::ecdsa::Signature)
             }
-            Self::K256(key) => {
+            (SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, Self::K256(key)) => {
                 sign_ecdsa_prehash!(key, K256SigningKey, k256::ecdsa::Signature)
             }
-            Self::Rsa { algorithm, key } => rsa_sign_prehash(*algorithm, key, prehash, None)?,
-            Self::Ed25519(_) | Self::MlDsa(_) => {
-                return Err(SoftwareSigningError::AlgorithmMismatch)
+            (algorithm, Self::Rsa(key)) if algorithm.is_rsa() => {
+                rsa_sign_prehash(algorithm, key, prehash, None)?
             }
+            _ => return Err(SoftwareSigningError::AlgorithmMismatch),
         };
         Ok(SoftwareSignature(signature))
     }
@@ -642,13 +663,14 @@ impl SoftwareSigningKey {
     /// Sign a digest with RSA-PSS and a caller-selected salt length.
     pub fn sign_rsa_pss_prehash(
         &self,
+        algorithm: SoftwareSigningAlgorithm,
         prehash: &[u8],
         salt_length: usize,
     ) -> Result<SoftwareSignature, SoftwareSigningError> {
-        let Self::Rsa { algorithm, key } = self else {
+        let Self::Rsa(key) = self else {
             return Err(SoftwareSigningError::AlgorithmMismatch);
         };
-        rsa_sign_prehash(*algorithm, key, prehash, Some(salt_length)).map(SoftwareSignature)
+        rsa_sign_prehash(algorithm, key, prehash, Some(salt_length)).map(SoftwareSignature)
     }
 }
 
@@ -811,10 +833,11 @@ mod tests {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
             let serialized = key.serialized().unwrap();
             let restored = SoftwareSigningKey::from_serialized(algorithm, &serialized).unwrap();
-            assert_eq!(restored.algorithm(), algorithm);
             let public_key = key.public_key();
             assert_eq!(restored.public_key(), public_key);
-            let signature = restored.sign_message(b"shared signing test").unwrap();
+            let signature = restored
+                .sign_message(algorithm, b"shared signing test")
+                .unwrap();
             public_key
                 .verify_message(algorithm, b"shared signing test", signature.as_bytes())
                 .unwrap();
@@ -847,7 +870,7 @@ mod tests {
         ] {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
             let public_key = key.public_key();
-            let signature = key.sign_prehash(&prehash).unwrap();
+            let signature = key.sign_prehash(algorithm, &prehash).unwrap();
             public_key
                 .verify_prehash(algorithm, &prehash, signature.as_bytes())
                 .unwrap();
@@ -877,7 +900,7 @@ mod tests {
             let key = SoftwareSigningKey::from_serialized(algorithm, &original).unwrap();
             let public_key = key.public_key();
             let prehash = vec![0x5a; digest_length];
-            let signature = key.sign_prehash(&prehash).unwrap();
+            let signature = key.sign_prehash(algorithm, &prehash).unwrap();
             public_key
                 .verify_prehash(algorithm, &prehash, signature.as_bytes())
                 .unwrap();
@@ -890,7 +913,7 @@ mod tests {
         let key = SoftwareSigningKey::generate(algorithm).unwrap();
         let public_key = key.public_key();
         let prehash = [0x73; 32];
-        let signature = key.sign_rsa_pss_prehash(&prehash, 17).unwrap();
+        let signature = key.sign_rsa_pss_prehash(algorithm, &prehash, 17).unwrap();
         public_key
             .verify_rsa_pss_prehash(algorithm, &prehash, 17, signature.as_bytes())
             .unwrap();
