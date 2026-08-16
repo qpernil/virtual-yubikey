@@ -10,6 +10,7 @@ mod preview_sign;
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
 
 pub const ATR: [u8; 23] = [
     0x3b, 0xfd, 0x13, 0x00, 0x00, 0x81, 0x31, 0xfe, 0x15, 0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59,
@@ -186,11 +187,32 @@ impl FidoAuthenticator {
     }
 
     pub fn with_configuration(serial: u32, configuration: FidoConfiguration) -> Self {
-        let mut device_identifier = *b"virtual-\0\0\0\0fido";
-        device_identifier[8..12].copy_from_slice(&serial.to_be_bytes());
+        let device_identifier = device_identifier(serial);
         Self {
             state: fido::FidoState::new(device_identifier, configuration),
         }
+    }
+
+    pub fn from_persistent_state(
+        serial: u32,
+        configuration: FidoConfiguration,
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            state: fido::FidoState::decode_persistent(
+                encoded,
+                device_identifier(serial),
+                configuration,
+            )?,
+        })
+    }
+
+    pub fn persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.state.encode_persistent()
+    }
+
+    pub fn take_persistent_change(&mut self) -> bool {
+        self.state.take_persistent_change()
     }
 
     pub fn exchange(&mut self, request: &[u8]) -> Vec<u8> {
@@ -200,6 +222,12 @@ impl FidoAuthenticator {
     pub fn reset_connection(&mut self) {
         self.state.reset_connection();
     }
+}
+
+fn device_identifier(serial: u32) -> [u8; 16] {
+    let mut identifier = *b"virtual-\0\0\0\0fido";
+    identifier[8..12].copy_from_slice(&serial.to_be_bytes());
+    identifier
 }
 
 impl Default for FidoAuthenticator {
