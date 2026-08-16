@@ -6,11 +6,68 @@
 
 mod crypto;
 mod fido;
+pub mod post_quantum;
 mod preview_sign;
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FidoCredentialAlgorithm {
+    Es256,
+    MlDsa44,
+}
+
+impl FidoCredentialAlgorithm {
+    pub const fn cose_identifier(self) -> i64 {
+        match self {
+            Self::Es256 => -7,
+            Self::MlDsa44 => -48,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Es256 => "es256",
+            Self::MlDsa44 => "ml-dsa-44",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "es256" => Some(Self::Es256),
+            "ml-dsa-44" => Some(Self::MlDsa44),
+            _ => None,
+        }
+    }
+
+    pub fn from_cose_identifier(identifier: i64) -> Option<Self> {
+        match identifier {
+            -7 => Some(Self::Es256),
+            -48 => Some(Self::MlDsa44),
+            _ => None,
+        }
+    }
+
+    pub const fn ml_dsa_parameter_set(self) -> Option<post_quantum::MlDsaParameterSet> {
+        match self {
+            Self::Es256 => None,
+            Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
+        }
+    }
+
+    pub const fn from_ml_dsa_parameter_set(
+        parameter_set: post_quantum::MlDsaParameterSet,
+    ) -> Option<Self> {
+        match parameter_set {
+            post_quantum::MlDsaParameterSet::MlDsa44 => Some(Self::MlDsa44),
+            post_quantum::MlDsaParameterSet::MlDsa65 | post_quantum::MlDsaParameterSet::MlDsa87 => {
+                None
+            }
+        }
+    }
+}
 
 pub const ATR: [u8; 23] = [
     0x3b, 0xfd, 0x13, 0x00, 0x00, 0x81, 0x31, 0xfe, 0x15, 0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59,
@@ -89,6 +146,7 @@ pub struct FidoConfiguration {
     pub(crate) initial_pin: Option<Vec<u8>>,
     pub(crate) pin_uv_auth_protocols: Vec<u8>,
     pub(crate) permissioned_pin_uv_auth_tokens: bool,
+    pub(crate) credential_algorithms: Vec<FidoCredentialAlgorithm>,
 }
 
 impl FidoConfiguration {
@@ -97,6 +155,10 @@ impl FidoConfiguration {
             initial_pin: Some(b"123456".to_vec()),
             pin_uv_auth_protocols: vec![2, 1],
             permissioned_pin_uv_auth_tokens: true,
+            credential_algorithms: vec![
+                FidoCredentialAlgorithm::Es256,
+                FidoCredentialAlgorithm::MlDsa44,
+            ],
         }
     }
 
@@ -117,6 +179,14 @@ impl FidoConfiguration {
 
     pub fn with_permissioned_pin_uv_auth_tokens(mut self, supported: bool) -> Self {
         self.permissioned_pin_uv_auth_tokens = supported;
+        self
+    }
+
+    pub fn with_credential_algorithms(
+        mut self,
+        algorithms: impl Into<Vec<FidoCredentialAlgorithm>>,
+    ) -> Self {
+        self.credential_algorithms = algorithms.into();
         self
     }
 }
@@ -217,6 +287,13 @@ impl FidoAuthenticator {
 
     pub fn exchange(&mut self, request: &[u8]) -> Vec<u8> {
         fido::exchange(&mut self.state, request)
+    }
+
+    pub fn selected_make_credential_algorithm(
+        &self,
+        request: &[u8],
+    ) -> Option<FidoCredentialAlgorithm> {
+        self.state.selected_make_credential_algorithm(request)
     }
 
     /// Return the ordered public-key algorithms offered by a CTAP2
@@ -549,7 +626,10 @@ mod tests {
         let first = device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 4, 1]);
         assert_eq!(first[0], 0);
         assert_eq!(first[1], 0x61);
-        let remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
+        let mut remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
+        while remainder[remainder.len() - 2] == 0x61 {
+            remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
+        }
         assert_eq!(&remainder[remainder.len() - 2..], &[0x90, 0]);
     }
 
