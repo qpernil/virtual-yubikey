@@ -18,6 +18,7 @@ pub enum FidoCredentialAlgorithm {
     Es256,
     MlDsa44,
     MlDsa65,
+    MlDsa87,
 }
 
 impl FidoCredentialAlgorithm {
@@ -26,6 +27,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256 => -7,
             Self::MlDsa44 => -48,
             Self::MlDsa65 => -49,
+            Self::MlDsa87 => -50,
         }
     }
 
@@ -34,6 +36,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256 => "es256",
             Self::MlDsa44 => "ml-dsa-44",
             Self::MlDsa65 => "ml-dsa-65",
+            Self::MlDsa87 => "ml-dsa-87",
         }
     }
 
@@ -42,6 +45,7 @@ impl FidoCredentialAlgorithm {
             "es256" => Some(Self::Es256),
             "ml-dsa-44" => Some(Self::MlDsa44),
             "ml-dsa-65" => Some(Self::MlDsa65),
+            "ml-dsa-87" => Some(Self::MlDsa87),
             _ => None,
         }
     }
@@ -51,6 +55,7 @@ impl FidoCredentialAlgorithm {
             -7 => Some(Self::Es256),
             -48 => Some(Self::MlDsa44),
             -49 => Some(Self::MlDsa65),
+            -50 => Some(Self::MlDsa87),
             _ => None,
         }
     }
@@ -60,6 +65,7 @@ impl FidoCredentialAlgorithm {
             Self::Es256 => None,
             Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
             Self::MlDsa65 => Some(post_quantum::MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => Some(post_quantum::MlDsaParameterSet::MlDsa87),
         }
     }
 
@@ -69,7 +75,7 @@ impl FidoCredentialAlgorithm {
         match parameter_set {
             post_quantum::MlDsaParameterSet::MlDsa44 => Some(Self::MlDsa44),
             post_quantum::MlDsaParameterSet::MlDsa65 => Some(Self::MlDsa65),
-            post_quantum::MlDsaParameterSet::MlDsa87 => None,
+            post_quantum::MlDsaParameterSet::MlDsa87 => Some(Self::MlDsa87),
         }
     }
 }
@@ -164,6 +170,7 @@ impl FidoConfiguration {
                 FidoCredentialAlgorithm::Es256,
                 FidoCredentialAlgorithm::MlDsa44,
                 FidoCredentialAlgorithm::MlDsa65,
+                FidoCredentialAlgorithm::MlDsa87,
             ],
         }
     }
