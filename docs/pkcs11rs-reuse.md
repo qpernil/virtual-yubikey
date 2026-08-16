@@ -24,7 +24,8 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 | --- | --- |
 | `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management behavior, FIDO routing and logical device state |
 | `virtual-yubikey-crypto::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
-| `virtual-yubikey-crypto::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA, and ML-DSA keys, signing, verification, and compact private-key serialization |
+| `virtual-yubikey-crypto::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
+| `virtual-yubikey-crypto::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, and compact private-key serialization |
 | `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
 | `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
@@ -40,15 +41,13 @@ and keeps standalone Pi builds reproducible.
 
 The reusable signing modules contain no COSE, CTAP, USB, PKCS #11 mechanism,
 object, authorization, or error-code types. FIDO maps COSE identifiers and DER
-signature encoding around them. A future `pkcs11rs` integration should map
-mechanisms, attributes, and `CKR_*` results around the same raw operations.
+signature encoding around them. `pkcs11rs` maps mechanisms, attributes, and
+`CKR_*` results around the same raw operations.
 
-The shared RSA profiles currently cover SHA-2 with either PKCS #1 v1.5 or PSS,
-including caller-supplied prehashes and PSS salt lengths. `pkcs11rs` additionally
-supports raw RSA, SHA-1/SHA-3, and PSS configurations whose MGF digest differs
-from the message digest. Its existing generic padding and raw-RSA code must be
-promoted into this neutral layer during integration; the WebAuthn implementation
-does not silently claim those combinations are supported.
+The general RSA layer covers raw signatures, caller-controlled PKCS #1 v1.5
+payloads, SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS configurations whose
+MGF digest differs from the message digest. The higher-level WebAuthn profiles
+select only the combinations advertised by their COSE algorithms.
 
 ## Integration sequence
 
@@ -60,8 +59,8 @@ does not silently claim those combinations are supported.
 3. Exercise FIDO through the Pi's USB HID transport and Management through CCID.
 4. Keep the `pkcs11rs` mock adapter and its full-cycle PKCS #11 tests running
    against the core as new applets are migrated.
-5. Replace duplicated ML-DSA and overlapping ECDSA/RSA software operations in
-   `pkcs11rs` with the neutral APIs, retaining PKCS-specific mechanism parsing.
+5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
+   routed through the neutral APIs, retaining PKCS-specific mechanism parsing.
 6. Use workspace path dependencies during coordinated development. For independent
    clones, publish the crates or pin Git dependencies to exact locked revisions.
 
