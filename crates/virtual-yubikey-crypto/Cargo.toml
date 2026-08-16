@@ -15,7 +15,7 @@ ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "ge
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
-rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "sha2", "std", "u64_digit"] }
+rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "std", "u64_digit"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 sha3 = "0.12.0"
