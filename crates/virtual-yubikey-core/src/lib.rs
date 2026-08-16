@@ -16,6 +16,7 @@ pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FidoCredentialAlgorithm {
     Es256,
+    Esp256,
     MlDsa44,
     MlDsa65,
     MlDsa87,
@@ -25,6 +26,7 @@ impl FidoCredentialAlgorithm {
     pub const fn cose_identifier(self) -> i64 {
         match self {
             Self::Es256 => -7,
+            Self::Esp256 => -9,
             Self::MlDsa44 => -48,
             Self::MlDsa65 => -49,
             Self::MlDsa87 => -50,
@@ -34,6 +36,7 @@ impl FidoCredentialAlgorithm {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Es256 => "es256",
+            Self::Esp256 => "esp256",
             Self::MlDsa44 => "ml-dsa-44",
             Self::MlDsa65 => "ml-dsa-65",
             Self::MlDsa87 => "ml-dsa-87",
@@ -43,6 +46,7 @@ impl FidoCredentialAlgorithm {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "es256" => Some(Self::Es256),
+            "esp256" => Some(Self::Esp256),
             "ml-dsa-44" => Some(Self::MlDsa44),
             "ml-dsa-65" => Some(Self::MlDsa65),
             "ml-dsa-87" => Some(Self::MlDsa87),
@@ -53,6 +57,7 @@ impl FidoCredentialAlgorithm {
     pub fn from_cose_identifier(identifier: i64) -> Option<Self> {
         match identifier {
             -7 => Some(Self::Es256),
+            -9 => Some(Self::Esp256),
             -48 => Some(Self::MlDsa44),
             -49 => Some(Self::MlDsa65),
             -50 => Some(Self::MlDsa87),
@@ -62,7 +67,7 @@ impl FidoCredentialAlgorithm {
 
     pub const fn ml_dsa_parameter_set(self) -> Option<post_quantum::MlDsaParameterSet> {
         match self {
-            Self::Es256 => None,
+            Self::Es256 | Self::Esp256 => None,
             Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
             Self::MlDsa65 => Some(post_quantum::MlDsaParameterSet::MlDsa65),
             Self::MlDsa87 => Some(post_quantum::MlDsaParameterSet::MlDsa87),
@@ -168,6 +173,7 @@ impl FidoConfiguration {
             permissioned_pin_uv_auth_tokens: true,
             credential_algorithms: vec![
                 FidoCredentialAlgorithm::Es256,
+                FidoCredentialAlgorithm::Esp256,
                 FidoCredentialAlgorithm::MlDsa44,
                 FidoCredentialAlgorithm::MlDsa65,
                 FidoCredentialAlgorithm::MlDsa87,
