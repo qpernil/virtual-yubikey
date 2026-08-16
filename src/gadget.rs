@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -24,6 +24,7 @@ const GADGET: &str = "/sys/kernel/config/usb_gadget/virtual-yubikey";
 pub(crate) const FUNCTIONFS: &str = "/dev/ffs-virtual-yubikey";
 pub(crate) const HID_DEVICE: &str = "/dev/hidg0";
 const LOCK_FILE: &str = "/run/lock/virtual-yubikey.lock";
+const STATE_DIRECTORY: &str = "/var/lib/virtual-yubikey";
 
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
@@ -117,6 +118,7 @@ impl Runtime {
             Some(&mount_options),
         )?;
         runtime.mounted_functionfs = true;
+        prepare_state_storage(serial, &identity)?;
         let (worker, mut control) = spawn_worker(serial, &identity, log_level)?;
         runtime.worker = Some(worker);
 
@@ -260,6 +262,37 @@ impl Runtime {
                 format!("write HID report descriptor: {error}"),
             )
         })
+    }
+}
+
+pub(crate) fn state_path(serial: u32) -> PathBuf {
+    Path::new(STATE_DIRECTORY).join(format!("fido-{serial}.cbor"))
+}
+
+fn prepare_state_storage(serial: u32, identity: &WorkerIdentity) -> io::Result<()> {
+    let directory = Path::new(STATE_DIRECTORY);
+    fs::create_dir_all(directory)?;
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{STATE_DIRECTORY} is not a real directory"
+        )));
+    }
+    chown(directory, Some(identity.uid), Some(identity.gid))?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+
+    let path = state_path(serial);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            chown(&path, Some(identity.uid), Some(identity.gid))?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        }
+        Ok(_) => Err(io::Error::other(format!(
+            "{} is not a regular state file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

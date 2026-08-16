@@ -5,7 +5,7 @@ use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
 use crate::STOP_REQUESTED;
 #[cfg(target_os = "linux")]
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
@@ -48,6 +48,8 @@ pub(crate) fn run_worker(
 
     // SAFETY: the supervisor passes ownership of this descriptor to the worker.
     let mut control = unsafe { File::from_raw_fd(control_fd) };
+    let state_path = crate::gadget::state_path(serial);
+    let fido = load_fido_state(serial, &state_path)?;
     let endpoints = Endpoints::open(functionfs)?;
     control.write_all(b"R")?;
     let mut attached = [0_u8; 1];
@@ -73,7 +75,7 @@ pub(crate) fn run_worker(
             hid_device.display()
         ),
     );
-    endpoints.serve(serial, hid)
+    endpoints.serve(serial, hid, fido, &state_path)
 }
 
 #[cfg(target_os = "linux")]
@@ -107,7 +109,13 @@ impl Endpoints {
         })
     }
 
-    fn serve(self, serial: u32, hid: File) -> io::Result<()> {
+    fn serve(
+        self,
+        serial: u32,
+        hid: File,
+        fido: FidoAuthenticator,
+        state_path: &Path,
+    ) -> io::Result<()> {
         let Self {
             mut ep0,
             ccid_out,
@@ -126,12 +134,12 @@ impl Endpoints {
                 let _ = ccid_completion.send(("CCID", serve_ccid(ccid_out, ccid_in, serial)));
             })?;
 
-        thread::Builder::new()
-            .name("fido-hid".to_owned())
-            .spawn(move || {
-                let fido = FidoAuthenticator::for_serial(serial);
-                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido, serial)));
-            })?;
+        thread::Builder::new().name("fido-hid".to_owned()).spawn({
+            let state_path = state_path.to_owned();
+            move || {
+                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido, serial, &state_path)));
+            }
+        })?;
 
         while !STOP_REQUESTED.load(Ordering::Relaxed) {
             drain_events(&mut ep0, &mut ccid_notification_pending)?;
@@ -203,7 +211,12 @@ fn serve_ccid(mut output: File, mut input: File, serial: u32) -> io::Result<()> 
 }
 
 #[cfg(target_os = "linux")]
-fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Result<()> {
+fn serve_hid(
+    mut hid: File,
+    mut fido: FidoAuthenticator,
+    serial: u32,
+    state_path: &Path,
+) -> io::Result<()> {
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
     let mut ctaphid = crate::ctaphid::Device::new(
         virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
@@ -230,6 +243,7 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
                         report[4]
                     ),
                 );
+                let mut persistence_error = None;
                 let replies = ctaphid.receive(&report, |request| {
                     let command = request.first().copied().unwrap_or_default();
                     diagnostics::log(
@@ -247,6 +261,11 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
                         ),
                     );
                     let response = fido.exchange(request);
+                    if fido.take_persistent_change() {
+                        if let Err(error) = persist_fido_state(&fido, state_path) {
+                            persistence_error = Some(error);
+                        }
+                    }
                     let status = response.first().copied().unwrap_or_default();
                     diagnostics::log(
                         Level::Info,
@@ -264,6 +283,9 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
                     );
                     response
                 });
+                if let Some(error) = persistence_error {
+                    return Err(error);
+                }
                 for reply in replies {
                     hid.write_all(&reply)?;
                 }
@@ -274,6 +296,55 @@ fn serve_hid(mut hid: File, mut fido: FidoAuthenticator, serial: u32) -> io::Res
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn load_fido_state(serial: u32, path: &Path) -> io::Result<FidoAuthenticator> {
+    match fs::read(path) {
+        Ok(encoded) => FidoAuthenticator::from_persistent_state(
+            serial,
+            virtual_yubikey_core::FidoConfiguration::default(),
+            &encoded,
+        )
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("load persistent FIDO state {}: {error}", path.display()),
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(FidoAuthenticator::for_serial(serial))
+        }
+        Err(error) => Err(with_context(error, "read persistent FIDO state")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn persist_fido_state(fido: &FidoAuthenticator, path: &Path) -> io::Result<()> {
+    let encoded = fido
+        .persistent_state()
+        .map_err(|error| io::Error::other(format!("encode persistent FIDO state: {error}")))?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|error| with_context(error, "create temporary FIDO state"))?;
+    file.write_all(&encoded)
+        .map_err(|error| with_context(error, "write temporary FIDO state"))?;
+    file.sync_all()
+        .map_err(|error| with_context(error, "sync temporary FIDO state"))?;
+    drop(file);
+    fs::rename(&temporary, path)
+        .map_err(|error| with_context(error, "replace persistent FIDO state"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("persistent FIDO state has no parent directory"))?;
+    File::open(parent)?
+        .sync_all()
+        .map_err(|error| with_context(error, "sync persistent FIDO state directory"))
 }
 
 #[cfg(target_os = "linux")]
