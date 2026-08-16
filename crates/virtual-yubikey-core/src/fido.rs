@@ -2,17 +2,14 @@
 
 use crate::{
     crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
-    post_quantum::MlDsaPrivateKey,
+    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
     FidoConfiguration, FidoCredentialAlgorithm,
 };
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use minicbor::Encoder;
-use p256::ecdsa::{DerSignature, SigningKey as P256SigningKey};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
-use signature::Signer;
 use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
@@ -96,13 +93,9 @@ struct ResidentCredential {
 }
 
 #[derive(Clone)]
-enum CredentialPrivateKey {
-    P256 {
-        algorithm: FidoCredentialAlgorithm,
-        key: SecretKey,
-    },
-    Ed25519(Ed25519SigningKey),
-    MlDsa(MlDsaPrivateKey),
+struct CredentialPrivateKey {
+    algorithm: FidoCredentialAlgorithm,
+    key: SoftwareSigningKey,
 }
 
 impl fmt::Debug for CredentialPrivateKey {
@@ -116,102 +109,70 @@ impl fmt::Debug for CredentialPrivateKey {
 
 impl CredentialPrivateKey {
     fn generate(algorithm: FidoCredentialAlgorithm) -> Result<Self, Error> {
-        match algorithm {
-            FidoCredentialAlgorithm::Es256 | FidoCredentialAlgorithm::Esp256 => Ok(Self::P256 {
-                algorithm,
-                key: random_secret()?,
-            }),
-            FidoCredentialAlgorithm::Ed25519 => {
-                let mut seed = Zeroizing::new([0_u8; 32]);
-                getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-                Ok(Self::Ed25519(Ed25519SigningKey::from_bytes(&seed)))
-            }
-            algorithm => MlDsaPrivateKey::generate(
-                algorithm
-                    .ml_dsa_parameter_set()
-                    .ok_or(Error::from(CKR_DEVICE_ERROR))?,
-            )
-            .map(Self::MlDsa)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR)),
-        }
+        let key = SoftwareSigningKey::generate(algorithm.software_signing_algorithm())
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(Self { algorithm, key })
     }
 
     fn from_serialized(
         algorithm: FidoCredentialAlgorithm,
         serialized: &[u8],
     ) -> Result<Self, &'static str> {
-        match algorithm {
-            FidoCredentialAlgorithm::Es256 | FidoCredentialAlgorithm::Esp256 => {
-                SecretKey::from_slice(serialized)
-                    .map(|key| Self::P256 { algorithm, key })
-                    .map_err(|_| "persistent P-256 private key is invalid")
-            }
-            FidoCredentialAlgorithm::Ed25519 => {
-                let seed = serialized
-                    .try_into()
-                    .map_err(|_| "persistent Ed25519 seed is not 32 bytes")?;
-                Ok(Self::Ed25519(Ed25519SigningKey::from_bytes(seed)))
-            }
-            algorithm => MlDsaPrivateKey::from_seed_slice(
-                algorithm
-                    .ml_dsa_parameter_set()
-                    .ok_or("persistent ML-DSA algorithm is invalid")?,
-                serialized,
-            )
-            .map(Self::MlDsa)
-            .map_err(|_| "persistent ML-DSA seed is not 32 bytes"),
-        }
+        let key =
+            SoftwareSigningKey::from_serialized(algorithm.software_signing_algorithm(), serialized)
+                .map_err(|_| "persistent credential private key is invalid")?;
+        Ok(Self { algorithm, key })
     }
 
     fn algorithm(&self) -> FidoCredentialAlgorithm {
-        match self {
-            Self::P256 { algorithm, .. } => *algorithm,
-            Self::Ed25519(_) => FidoCredentialAlgorithm::Ed25519,
-            Self::MlDsa(key) => {
-                FidoCredentialAlgorithm::from_ml_dsa_parameter_set(key.parameter_set())
-                    .expect("stored ML-DSA key uses a configured FIDO parameter set")
-            }
-        }
+        self.algorithm
     }
 
     fn serialized(&self) -> Zeroizing<Vec<u8>> {
-        match self {
-            Self::P256 { key, .. } => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::Ed25519(key) => Zeroizing::new(key.to_bytes().to_vec()),
-            Self::MlDsa(key) => Zeroizing::new(key.seed().to_vec()),
-        }
+        self.key.serialized()
     }
 
     fn public_key_cose(&self) -> Result<Vec<u8>, Error> {
-        match self {
-            Self::P256 { algorithm, key } => {
-                let public = key.public_key().to_sec1_point(false);
-                encode_ec2(algorithm.cose_identifier(), 1, public.as_bytes())
-            }
-            Self::Ed25519(key) => encode_okp(
-                FidoCredentialAlgorithm::Ed25519.cose_identifier(),
-                6,
-                key.verifying_key().as_bytes(),
+        match self.key.public_key() {
+            SoftwarePublicKey::Ec {
+                curve,
+                uncompressed,
+            } => encode_ec2(
+                self.algorithm.cose_identifier(),
+                match curve {
+                    EcCurve::P256 => 1,
+                    EcCurve::P384 => 2,
+                },
+                &uncompressed,
             ),
-            Self::MlDsa(key) => {
-                let algorithm =
-                    FidoCredentialAlgorithm::from_ml_dsa_parameter_set(key.parameter_set())
-                        .ok_or(Error::from(CKR_DEVICE_ERROR))?;
-                encode_akp(algorithm.cose_identifier(), &key.public_key())
+            SoftwarePublicKey::Ed25519(public) => {
+                encode_okp(self.algorithm.cose_identifier(), 6, &public)
+            }
+            SoftwarePublicKey::MlDsa { public_key, .. } => {
+                encode_akp(self.algorithm.cose_identifier(), &public_key)
             }
         }
     }
 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
-        match self {
-            Self::P256 { key, .. } => {
-                let signature: DerSignature = P256SigningKey::from(key.clone()).sign(message);
-                Ok(signature.as_bytes().to_vec())
+        let signature = self
+            .key
+            .sign_message(message)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        match self.algorithm.software_signing_algorithm() {
+            SoftwareSigningAlgorithm::EcdsaP256Sha256 => {
+                p256::ecdsa::Signature::from_slice(signature.as_bytes())
+                    .map(|signature| signature.to_der().as_bytes().to_vec())
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
             }
-            Self::Ed25519(key) => Ok(key.sign(message).to_bytes().to_vec()),
-            Self::MlDsa(key) => key
-                .sign_hedged(message, &[])
-                .map_err(|_| Error::from(CKR_DEVICE_ERROR)),
+            SoftwareSigningAlgorithm::EcdsaP384Sha384 => {
+                p384::ecdsa::Signature::from_slice(signature.as_bytes())
+                    .map(|signature| signature.to_der().as_bytes().to_vec())
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+            }
+            SoftwareSigningAlgorithm::Ed25519 | SoftwareSigningAlgorithm::MlDsa(_) => {
+                Ok(signature.into_bytes())
+            }
         }
     }
 }
@@ -2435,7 +2396,7 @@ mod tests {
         let response = standard_assertion_response(&mut state, 0, &[0x55; 32], None).unwrap();
         assert_eq!(assertion_user_field_count(&response[1..]), None);
     }
-    use p256::ecdsa::{Signature, VerifyingKey};
+    use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
     use signature::{hazmat::PrehashVerifier, Verifier};
 
     const CONTEXT: &[u8] = b"ARKG-P256.test vectors";
@@ -2653,9 +2614,9 @@ mod tests {
 
         let client_data_hash = [0x44; 32];
         let credential_id = restored.credentials[0].credential_id.clone();
-        let CredentialPrivateKey::P256 {
+        let CredentialPrivateKey {
             algorithm: FidoCredentialAlgorithm::Es256,
-            key: private_key,
+            key: SoftwareSigningKey::P256(private_key),
         } = &restored.credentials[0].private_key
         else {
             panic!("standard test credential should use ES256");
@@ -3114,9 +3075,9 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey::P256 {
+        let CredentialPrivateKey {
             algorithm: FidoCredentialAlgorithm::Esp256,
-            key,
+            key: SoftwareSigningKey::P256(key),
         } = &restored.credentials[0].private_key
         else {
             panic!("ESP256 credential did not restore its P-256 key");
@@ -3154,7 +3115,11 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey::Ed25519(key) = &restored.credentials[0].private_key else {
+        let CredentialPrivateKey {
+            algorithm: FidoCredentialAlgorithm::Ed25519,
+            key: SoftwareSigningKey::Ed25519(key),
+        } = &restored.credentials[0].private_key
+        else {
             panic!("Ed25519 credential did not restore its signing key");
         };
         let verifying_key = key.verifying_key();
@@ -3172,6 +3137,47 @@ mod tests {
             assertion_signature_bytes(&assertion[1..]).as_slice(),
         )
         .unwrap();
+        verifying_key.verify(&signed, &signature).unwrap();
+    }
+
+    #[test]
+    fn esp384_credentials_persist_and_complete_verified_assertions() {
+        let algorithm = FidoCredentialAlgorithm::Esp384;
+        let identifier = *b"virtual-test-id!";
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut state = FidoState::new(identifier, configuration);
+        let request =
+            make_credential_request("esp384.example", 0x51, &[algorithm.cose_identifier()]);
+        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 2, 48);
+
+        let encoded = state.encode_persistent().unwrap();
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut restored =
+            FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
+        let CredentialPrivateKey {
+            algorithm: FidoCredentialAlgorithm::Esp384,
+            key: SoftwareSigningKey::P384(key),
+        } = &restored.credentials[0].private_key
+        else {
+            panic!("ESP384 credential did not restore its P-384 key");
+        };
+        let verifying_key = p384::ecdsa::VerifyingKey::from(key.public_key());
+        let client_data_hash = [0x77; 32];
+        let assertion_request = get_assertion_request(
+            "esp384.example",
+            &restored.credentials[0].credential_id,
+            &client_data_hash,
+        );
+        let assertion = exchange(&mut restored, &assertion_request);
+        assert_eq!(assertion[0], CTAP2_OK);
+        let mut signed = assertion_authenticator_data(&assertion[1..]);
+        signed.extend_from_slice(&client_data_hash);
+        let signature =
+            p384::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
+                .unwrap();
         verifying_key.verify(&signed, &signature).unwrap();
     }
 
@@ -3230,7 +3236,11 @@ mod tests {
         let mut signed = auth_data;
         signed.extend_from_slice(&client_data_hash);
 
-        let CredentialPrivateKey::MlDsa(key) = &restored.credentials[0].private_key else {
+        let CredentialPrivateKey {
+            key: SoftwareSigningKey::MlDsa(key),
+            ..
+        } = &restored.credentials[0].private_key
+        else {
             panic!("ML-DSA test credential has a classical private key");
         };
         crate::post_quantum::verify_ml_dsa(
@@ -3392,9 +3402,9 @@ mod tests {
             user_name: "test-user".to_owned(),
             user_display_name: "Test User".to_owned(),
             credential_id,
-            private_key: CredentialPrivateKey::P256 {
+            private_key: CredentialPrivateKey {
                 algorithm: FidoCredentialAlgorithm::Es256,
-                key: private_key,
+                key: SoftwareSigningKey::P256(private_key),
             },
             public_key_cose: encode_ec2(
                 FidoCredentialAlgorithm::Es256.cose_identifier(),
