@@ -17,6 +17,7 @@ pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
 pub enum FidoCredentialAlgorithm {
     Es256,
     Esp256,
+    Ed25519,
     MlDsa44,
     MlDsa65,
     MlDsa87,
@@ -27,6 +28,7 @@ impl FidoCredentialAlgorithm {
         match self {
             Self::Es256 => -7,
             Self::Esp256 => -9,
+            Self::Ed25519 => -19,
             Self::MlDsa44 => -48,
             Self::MlDsa65 => -49,
             Self::MlDsa87 => -50,
@@ -37,6 +39,7 @@ impl FidoCredentialAlgorithm {
         match self {
             Self::Es256 => "es256",
             Self::Esp256 => "esp256",
+            Self::Ed25519 => "ed25519",
             Self::MlDsa44 => "ml-dsa-44",
             Self::MlDsa65 => "ml-dsa-65",
             Self::MlDsa87 => "ml-dsa-87",
@@ -47,6 +50,7 @@ impl FidoCredentialAlgorithm {
         match name {
             "es256" => Some(Self::Es256),
             "esp256" => Some(Self::Esp256),
+            "ed25519" => Some(Self::Ed25519),
             "ml-dsa-44" => Some(Self::MlDsa44),
             "ml-dsa-65" => Some(Self::MlDsa65),
             "ml-dsa-87" => Some(Self::MlDsa87),
@@ -58,6 +62,7 @@ impl FidoCredentialAlgorithm {
         match identifier {
             -7 => Some(Self::Es256),
             -9 => Some(Self::Esp256),
+            -19 => Some(Self::Ed25519),
             -48 => Some(Self::MlDsa44),
             -49 => Some(Self::MlDsa65),
             -50 => Some(Self::MlDsa87),
@@ -67,7 +72,7 @@ impl FidoCredentialAlgorithm {
 
     pub const fn ml_dsa_parameter_set(self) -> Option<post_quantum::MlDsaParameterSet> {
         match self {
-            Self::Es256 | Self::Esp256 => None,
+            Self::Es256 | Self::Esp256 | Self::Ed25519 => None,
             Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
             Self::MlDsa65 => Some(post_quantum::MlDsaParameterSet::MlDsa65),
             Self::MlDsa87 => Some(post_quantum::MlDsaParameterSet::MlDsa87),
@@ -174,6 +179,7 @@ impl FidoConfiguration {
             credential_algorithms: vec![
                 FidoCredentialAlgorithm::Es256,
                 FidoCredentialAlgorithm::Esp256,
+                FidoCredentialAlgorithm::Ed25519,
                 FidoCredentialAlgorithm::MlDsa44,
                 FidoCredentialAlgorithm::MlDsa65,
                 FidoCredentialAlgorithm::MlDsa87,
