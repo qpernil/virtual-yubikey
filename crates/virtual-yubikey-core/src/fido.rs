@@ -2,7 +2,6 @@
 
 use crate::{
     crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
     FidoConfiguration, FidoCredentialAlgorithm,
 };
 use hkdf::Hkdf;
@@ -12,6 +11,11 @@ use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, S
 use sha2::{Digest, Sha256};
 use std::fmt;
 use subtle::ConstantTimeEq;
+#[cfg(test)]
+use virtual_yubikey_crypto::post_quantum;
+use virtual_yubikey_crypto::software_signing::{
+    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
@@ -3456,7 +3460,7 @@ mod tests {
         else {
             panic!("ML-DSA test credential has a classical private key");
         };
-        crate::post_quantum::verify_ml_dsa(
+        post_quantum::verify_ml_dsa(
             key.parameter_set(),
             &key.public_key(),
             &signed,

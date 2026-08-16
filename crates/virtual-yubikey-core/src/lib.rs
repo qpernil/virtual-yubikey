@@ -7,7 +7,9 @@
 mod crypto;
 mod fido;
 mod preview_sign;
-pub use virtual_yubikey_crypto::{post_quantum, software_signing};
+use virtual_yubikey_crypto::{
+    post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
+};
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
@@ -115,7 +117,7 @@ impl FidoCredentialAlgorithm {
         }
     }
 
-    pub const fn ml_dsa_parameter_set(self) -> Option<post_quantum::MlDsaParameterSet> {
+    pub const fn ml_dsa_parameter_set(self) -> Option<MlDsaParameterSet> {
         match self {
             Self::Es256
             | Self::Esp256
@@ -129,46 +131,36 @@ impl FidoCredentialAlgorithm {
             | Self::Rs256
             | Self::Rs384
             | Self::Rs512 => None,
-            Self::MlDsa44 => Some(post_quantum::MlDsaParameterSet::MlDsa44),
-            Self::MlDsa65 => Some(post_quantum::MlDsaParameterSet::MlDsa65),
-            Self::MlDsa87 => Some(post_quantum::MlDsaParameterSet::MlDsa87),
+            Self::MlDsa44 => Some(MlDsaParameterSet::MlDsa44),
+            Self::MlDsa65 => Some(MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => Some(MlDsaParameterSet::MlDsa87),
         }
     }
 
-    pub const fn software_signing_algorithm(self) -> software_signing::SoftwareSigningAlgorithm {
+    pub const fn software_signing_algorithm(self) -> SoftwareSigningAlgorithm {
         match self {
-            Self::Es256 | Self::Esp256 => {
-                software_signing::SoftwareSigningAlgorithm::EcdsaP256Sha256
-            }
-            Self::Ed25519 => software_signing::SoftwareSigningAlgorithm::Ed25519,
-            Self::Esp384 => software_signing::SoftwareSigningAlgorithm::EcdsaP384Sha384,
-            Self::Esp512 => software_signing::SoftwareSigningAlgorithm::EcdsaP521Sha512,
-            Self::Es256K => software_signing::SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
-            Self::Ps256 => software_signing::SoftwareSigningAlgorithm::RsaPssSha256,
-            Self::Ps384 => software_signing::SoftwareSigningAlgorithm::RsaPssSha384,
-            Self::Ps512 => software_signing::SoftwareSigningAlgorithm::RsaPssSha512,
-            Self::Rs256 => software_signing::SoftwareSigningAlgorithm::RsaPkcs1Sha256,
-            Self::Rs384 => software_signing::SoftwareSigningAlgorithm::RsaPkcs1Sha384,
-            Self::Rs512 => software_signing::SoftwareSigningAlgorithm::RsaPkcs1Sha512,
-            Self::MlDsa44 => software_signing::SoftwareSigningAlgorithm::MlDsa(
-                post_quantum::MlDsaParameterSet::MlDsa44,
-            ),
-            Self::MlDsa65 => software_signing::SoftwareSigningAlgorithm::MlDsa(
-                post_quantum::MlDsaParameterSet::MlDsa65,
-            ),
-            Self::MlDsa87 => software_signing::SoftwareSigningAlgorithm::MlDsa(
-                post_quantum::MlDsaParameterSet::MlDsa87,
-            ),
+            Self::Es256 | Self::Esp256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            Self::Ed25519 => SoftwareSigningAlgorithm::Ed25519,
+            Self::Esp384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
+            Self::Esp512 => SoftwareSigningAlgorithm::EcdsaP521Sha512,
+            Self::Es256K => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            Self::Ps256 => SoftwareSigningAlgorithm::RsaPssSha256,
+            Self::Ps384 => SoftwareSigningAlgorithm::RsaPssSha384,
+            Self::Ps512 => SoftwareSigningAlgorithm::RsaPssSha512,
+            Self::Rs256 => SoftwareSigningAlgorithm::RsaPkcs1Sha256,
+            Self::Rs384 => SoftwareSigningAlgorithm::RsaPkcs1Sha384,
+            Self::Rs512 => SoftwareSigningAlgorithm::RsaPkcs1Sha512,
+            Self::MlDsa44 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+            Self::MlDsa65 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
         }
     }
 
-    pub const fn from_ml_dsa_parameter_set(
-        parameter_set: post_quantum::MlDsaParameterSet,
-    ) -> Option<Self> {
+    pub const fn from_ml_dsa_parameter_set(parameter_set: MlDsaParameterSet) -> Option<Self> {
         match parameter_set {
-            post_quantum::MlDsaParameterSet::MlDsa44 => Some(Self::MlDsa44),
-            post_quantum::MlDsaParameterSet::MlDsa65 => Some(Self::MlDsa65),
-            post_quantum::MlDsaParameterSet::MlDsa87 => Some(Self::MlDsa87),
+            MlDsaParameterSet::MlDsa44 => Some(Self::MlDsa44),
+            MlDsaParameterSet::MlDsa65 => Some(Self::MlDsa65),
+            MlDsaParameterSet::MlDsa87 => Some(Self::MlDsa87),
         }
     }
 }
