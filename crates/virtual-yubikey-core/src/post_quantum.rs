@@ -42,6 +42,18 @@ pub enum MlDsaError {
     InvalidPublicKey,
     InvalidSignature,
     RandomnessUnavailable,
+    SigningFailed,
+}
+
+/// How an ML-DSA signature obtains its per-signature randomizer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MlDsaRandomization {
+    /// Use the deterministic FIPS 204 variant.
+    Deterministic,
+    /// Require fresh operating-system randomness and fail if it is unavailable.
+    Randomized,
+    /// Prefer fresh randomness but fall back to the permitted deterministic variant.
+    HedgePreferred,
 }
 
 /// An ML-DSA private key with its expanded form cached by RustCrypto.
@@ -110,20 +122,31 @@ impl MlDsaPrivateKey {
         }
     }
 
-    /// Produce a randomized FIPS 204 signature, falling back to the permitted
-    /// deterministic variant if the operating-system RNG is unavailable.
-    pub fn sign_hedged(&self, message: &[u8], context: &[u8]) -> Result<Vec<u8>, MlDsaError> {
+    pub fn sign(
+        &self,
+        message: &[u8],
+        context: &[u8],
+        randomization: MlDsaRandomization,
+    ) -> Result<Vec<u8>, MlDsaError> {
         if context.len() > 255 {
             return Err(MlDsaError::InvalidContext);
         }
         macro_rules! sign {
             ($key:expr) => {{
                 let expanded = $key.expanded_key();
-                expanded
-                    .sign_randomized(message, context, &mut getrandom::SysRng)
-                    .or_else(|_| expanded.sign_deterministic(message, context))
-                    .map(|signature| signature.encode().to_vec())
-                    .map_err(|_| MlDsaError::RandomnessUnavailable)
+                let signature = match randomization {
+                    MlDsaRandomization::Deterministic => expanded
+                        .sign_deterministic(message, context)
+                        .map_err(|_| MlDsaError::SigningFailed)?,
+                    MlDsaRandomization::Randomized => expanded
+                        .sign_randomized(message, context, &mut getrandom::SysRng)
+                        .map_err(|_| MlDsaError::RandomnessUnavailable)?,
+                    MlDsaRandomization::HedgePreferred => expanded
+                        .sign_randomized(message, context, &mut getrandom::SysRng)
+                        .or_else(|_| expanded.sign_deterministic(message, context))
+                        .map_err(|_| MlDsaError::SigningFailed)?,
+                };
+                Ok(signature.encode().to_vec())
             }};
         }
         match self {
@@ -133,27 +156,18 @@ impl MlDsaPrivateKey {
         }
     }
 
+    /// Produce a randomized FIPS 204 signature, falling back to the permitted
+    /// deterministic variant if the operating-system RNG is unavailable.
+    pub fn sign_hedged(&self, message: &[u8], context: &[u8]) -> Result<Vec<u8>, MlDsaError> {
+        self.sign(message, context, MlDsaRandomization::HedgePreferred)
+    }
+
     pub fn sign_deterministic(
         &self,
         message: &[u8],
         context: &[u8],
     ) -> Result<Vec<u8>, MlDsaError> {
-        if context.len() > 255 {
-            return Err(MlDsaError::InvalidContext);
-        }
-        macro_rules! sign {
-            ($key:expr) => {
-                $key.expanded_key()
-                    .sign_deterministic(message, context)
-                    .map(|signature| signature.encode().to_vec())
-                    .map_err(|_| MlDsaError::InvalidContext)
-            };
-        }
-        match self {
-            Self::MlDsa44(key) => sign!(key),
-            Self::MlDsa65(key) => sign!(key),
-            Self::MlDsa87(key) => sign!(key),
-        }
+        self.sign(message, context, MlDsaRandomization::Deterministic)
     }
 }
 
@@ -232,6 +246,31 @@ mod tests {
                 &signature,
             )
             .unwrap();
+
+            let randomized = key
+                .sign(
+                    b"randomized message",
+                    b"context",
+                    MlDsaRandomization::Randomized,
+                )
+                .unwrap();
+            verify_ml_dsa(
+                parameter_set,
+                &key.public_key(),
+                b"randomized message",
+                b"context",
+                &randomized,
+            )
+            .unwrap();
         }
+    }
+
+    #[test]
+    fn rejects_contexts_larger_than_fips_204_allows() {
+        let key = MlDsaPrivateKey::from_seed(MlDsaParameterSet::MlDsa44, [9; 32]);
+        assert_eq!(
+            key.sign(b"message", &[0; 256], MlDsaRandomization::HedgePreferred,),
+            Err(MlDsaError::InvalidContext)
+        );
     }
 }
