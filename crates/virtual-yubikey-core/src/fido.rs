@@ -3108,7 +3108,7 @@ mod tests {
             Some(FidoCredentialAlgorithm::MlDsa87)
         );
 
-        let request = make_credential_request("fallback.example", 0x62, &[-257, -7]);
+        let request = make_credential_request("fallback.example", 0x62, &[-999, -7]);
         assert_eq!(
             state.selected_make_credential_algorithm(&request),
             Some(FidoCredentialAlgorithm::Es256)
@@ -3334,6 +3334,11 @@ mod tests {
     #[test]
     fn ps512_credentials_persist_and_complete_verified_assertions() {
         assert_rsa_cycle(FidoCredentialAlgorithm::Ps512, "ps512.example", 0x39);
+    }
+
+    #[test]
+    fn rs256_credentials_persist_and_complete_verified_assertions() {
+        assert_rsa_cycle(FidoCredentialAlgorithm::Rs256, "rs256.example", 0x61);
     }
 
     fn assert_rsa_cycle(algorithm: FidoCredentialAlgorithm, rp_id: &str, request_marker: u8) {
