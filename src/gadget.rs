@@ -120,13 +120,15 @@ impl Runtime {
         let (worker, mut control) = spawn_worker(serial, &identity, log_level)?;
         runtime.worker = Some(worker);
 
-        symlink(
-            &format!("{GADGET}/functions/ffs.virtual-yubikey"),
-            &format!("{GADGET}/configs/c.1/ffs.virtual-yubikey"),
-        )?;
+        // ConfigFS assigns interface numbers in link order. Real FIDO+CCID
+        // YubiKeys expose HID as interface 0 and CCID as interface 1.
         symlink(
             &format!("{GADGET}/functions/hid.virtual-yubikey"),
             &format!("{GADGET}/configs/c.1/hid.virtual-yubikey"),
+        )?;
+        symlink(
+            &format!("{GADGET}/functions/ffs.virtual-yubikey"),
+            &format!("{GADGET}/configs/c.1/ffs.virtual-yubikey"),
         )?;
         let udc = select_udc(requested_udc)?;
         write_attribute(&format!("{GADGET}/UDC"), &udc)?;
