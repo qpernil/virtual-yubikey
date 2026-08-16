@@ -427,6 +427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "p521"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ad64cc32c2dc466317c12ee5853e61f159f9eab1fe7efade0395dc2e7b43449"
+dependencies = [
+ "base16ct",
+ "ecdsa",
+ "elliptic-curve",
+ "primefield",
+ "primeorder",
+ "sha2",
+]
+
+[[package]]
 name = "pkcs8"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -685,6 +699,7 @@ dependencies = [
  "ml-dsa",
  "p256",
  "p384",
+ "p521",
  "sha2",
  "signature",
  "subtle",

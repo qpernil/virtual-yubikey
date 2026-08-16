@@ -17,6 +17,7 @@ minicbor = { version = "2.3.0", features = ["alloc"] }
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
+p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 sha2 = "0.11.0"
 signature = "3.0.0"
 subtle = "2.6.1"
