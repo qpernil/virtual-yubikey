@@ -1,7 +1,9 @@
 //! Diagnostic adapter from CCID to the transport-neutral logical device.
 
 use crate::diagnostics::{self, Level};
-use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey, FIDO2_AID};
+use virtual_yubikey_core::{
+    Applet, CommandApdu, DeviceProfile, VirtualYubiKey, FIDO2_AID, PIV_AID,
+};
 
 pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
@@ -176,6 +178,14 @@ mod tests {
         let response = card.transmit(&[0, 0x1d, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn routes_piv_through_the_shared_core() {
+        let mut card = Card::new(0x01020304);
+        assert_eq!(&card.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
+        assert_eq!(card.transmit(&[0, 0xfd, 0, 0, 0]), [5, 8, 0, 0x90, 0]);
+        assert_eq!(card.transmit(&[0, 0xf8, 0, 0, 0]), [1, 2, 3, 4, 0x90, 0]);
     }
 
     #[test]
