@@ -6,7 +6,13 @@
 //! protocol identifiers, public-key containers, signature formatting, policy,
 //! and error mapping.
 
-use crate::post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey};
+use crate::{
+    post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
+    rsa_signing::{
+        rsa_sign_pkcs1v15_digest, rsa_sign_pss_digest, rsa_verify_pkcs1v15_digest,
+        rsa_verify_pss_digest, RsaHashAlgorithm, RsaPssParameters, RsaSignatureError,
+    },
+};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::SigningKey as K256SigningKey;
 use k256::SecretKey as K256SecretKey;
@@ -18,14 +24,6 @@ use p384::SecretKey as P384SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::SecretKey as P521SecretKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
-use rsa::signature::hazmat::{
-    PrehashSigner as RsaPrehashSigner, PrehashVerifier as RsaPrehashVerifier,
-    RandomizedPrehashSigner as RsaRandomizedPrehashSigner,
-};
-use rsa::signature::{
-    RandomizedSigner as RsaRandomizedSigner, SignatureEncoding as RsaSignatureEncoding,
-    Signer as RsaSigner, Verifier as RsaVerifier,
-};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
@@ -278,63 +276,26 @@ fn rsa_public_key(modulus: &[u8], exponent: &[u8]) -> Result<RsaPublicKey, Softw
     .map_err(|_| SoftwareSigningError::InvalidPublicKey)
 }
 
+fn rsa_profile(algorithm: SoftwareSigningAlgorithm) -> Option<(RsaHashAlgorithm, bool)> {
+    match algorithm {
+        SoftwareSigningAlgorithm::RsaPssSha256 => Some((RsaHashAlgorithm::Sha256, true)),
+        SoftwareSigningAlgorithm::RsaPssSha384 => Some((RsaHashAlgorithm::Sha384, true)),
+        SoftwareSigningAlgorithm::RsaPssSha512 => Some((RsaHashAlgorithm::Sha512, true)),
+        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => Some((RsaHashAlgorithm::Sha256, false)),
+        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => Some((RsaHashAlgorithm::Sha384, false)),
+        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => Some((RsaHashAlgorithm::Sha512, false)),
+        _ => None,
+    }
+}
+
 fn verify_rsa_message(
     algorithm: SoftwareSigningAlgorithm,
     key: &RsaPublicKey,
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), SoftwareSigningError> {
-    match algorithm {
-        SoftwareSigningAlgorithm::RsaPssSha256 => {
-            rsa_pss_verify::<rsa::sha2::Sha256>(key, message, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha384 => {
-            rsa_pss_verify::<rsa::sha2::Sha384>(key, message, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha512 => {
-            rsa_pss_verify::<rsa::sha2::Sha512>(key, message, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
-            rsa_pkcs1_verify::<rsa::sha2::Sha256>(key, message, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
-            rsa_pkcs1_verify::<rsa::sha2::Sha384>(key, message, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
-            rsa_pkcs1_verify::<rsa::sha2::Sha512>(key, message, signature)
-        }
-        _ => Err(SoftwareSigningError::AlgorithmMismatch),
-    }
-}
-
-fn rsa_pss_verify<D>(
-    key: &RsaPublicKey,
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
-{
-    let signature = rsa::pss::Signature::try_from(signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
-    rsa::pss::VerifyingKey::<D>::new(key.clone())
-        .verify(message, &signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)
-}
-
-fn rsa_pkcs1_verify<D>(
-    key: &RsaPublicKey,
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
-{
-    let signature = rsa::pkcs1v15::Signature::try_from(signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
-    rsa::pkcs1v15::VerifyingKey::<D>::new(key.clone())
-        .verify(message, &signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)
+    let (hash, _) = rsa_profile(algorithm).ok_or(SoftwareSigningError::AlgorithmMismatch)?;
+    verify_rsa_prehash(algorithm, key, &hash.digest(message), signature, None)
 }
 
 fn verify_rsa_prehash(
@@ -344,66 +305,34 @@ fn verify_rsa_prehash(
     signature: &[u8],
     pss_salt_length: Option<usize>,
 ) -> Result<(), SoftwareSigningError> {
-    match algorithm {
-        SoftwareSigningAlgorithm::RsaPssSha256 => {
-            rsa_pss_verify_prehash::<rsa::sha2::Sha256>(key, prehash, signature, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha384 => {
-            rsa_pss_verify_prehash::<rsa::sha2::Sha384>(key, prehash, signature, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha512 => {
-            rsa_pss_verify_prehash::<rsa::sha2::Sha512>(key, prehash, signature, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
-            rsa_pkcs1_verify_prehash::<rsa::sha2::Sha256>(key, prehash, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
-            rsa_pkcs1_verify_prehash::<rsa::sha2::Sha384>(key, prehash, signature)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
-            rsa_pkcs1_verify_prehash::<rsa::sha2::Sha512>(key, prehash, signature)
-        }
-        _ => Err(SoftwareSigningError::AlgorithmMismatch),
-    }
-}
-
-fn rsa_pss_verify_prehash<D>(
-    key: &RsaPublicKey,
-    prehash: &[u8],
-    signature: &[u8],
-    salt_length: Option<usize>,
-) -> Result<(), SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
-{
-    let signature = rsa::pss::Signature::try_from(signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
-    let key = match salt_length {
-        Some(salt_length) => {
-            rsa::pss::VerifyingKey::<D>::new_with_salt_len(key.clone(), salt_length)
-        }
-        None => rsa::pss::VerifyingKey::<D>::new(key.clone()),
+    let (hash, pss) = rsa_profile(algorithm).ok_or(SoftwareSigningError::AlgorithmMismatch)?;
+    let result = if pss {
+        rsa_verify_pss_digest(
+            key,
+            RsaPssParameters {
+                hash,
+                mgf_hash: hash,
+                salt_length: pss_salt_length.unwrap_or_else(|| hash.output_length()),
+            },
+            prehash,
+            signature,
+        )
+    } else {
+        rsa_verify_pkcs1v15_digest(key, hash, prehash, signature)
     };
-    RsaPrehashVerifier::verify_prehash(&key, prehash, &signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)
+    result.map_err(map_rsa_verification_error)
 }
 
-fn rsa_pkcs1_verify_prehash<D>(
-    key: &RsaPublicKey,
-    prehash: &[u8],
-    signature: &[u8],
-) -> Result<(), SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
-{
-    let signature = rsa::pkcs1v15::Signature::try_from(signature)
-        .map_err(|_| SoftwareSigningError::InvalidSignature)?;
-    RsaPrehashVerifier::verify_prehash(
-        &rsa::pkcs1v15::VerifyingKey::<D>::new(key.clone()),
-        prehash,
-        &signature,
-    )
-    .map_err(|_| SoftwareSigningError::InvalidSignature)
+fn map_rsa_verification_error(error: RsaSignatureError) -> SoftwareSigningError {
+    match error {
+        RsaSignatureError::InvalidKey => SoftwareSigningError::InvalidPublicKey,
+        RsaSignatureError::InputTooLong
+        | RsaSignatureError::InputOutOfRange
+        | RsaSignatureError::InvalidDigestLength
+        | RsaSignatureError::InvalidSignature
+        | RsaSignatureError::RandomnessUnavailable
+        | RsaSignatureError::OperationFailed => SoftwareSigningError::InvalidSignature,
+    }
 }
 
 /// A signature in the algorithm's fixed-width native representation.
@@ -679,21 +608,8 @@ fn rsa_sign_message(
     key: &RsaPrivateKey,
     message: &[u8],
 ) -> Result<Vec<u8>, SoftwareSigningError> {
-    match algorithm {
-        SoftwareSigningAlgorithm::RsaPssSha256 => rsa_pss_sign::<rsa::sha2::Sha256>(key, message),
-        SoftwareSigningAlgorithm::RsaPssSha384 => rsa_pss_sign::<rsa::sha2::Sha384>(key, message),
-        SoftwareSigningAlgorithm::RsaPssSha512 => rsa_pss_sign::<rsa::sha2::Sha512>(key, message),
-        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
-            rsa_pkcs1_sign::<rsa::sha2::Sha256>(key, message)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
-            rsa_pkcs1_sign::<rsa::sha2::Sha384>(key, message)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
-            rsa_pkcs1_sign::<rsa::sha2::Sha512>(key, message)
-        }
-        _ => Err(SoftwareSigningError::AlgorithmMismatch),
-    }
+    let (hash, _) = rsa_profile(algorithm).ok_or(SoftwareSigningError::AlgorithmMismatch)?;
+    rsa_sign_prehash(algorithm, key, &hash.digest(message), None)
 }
 
 fn rsa_sign_prehash(
@@ -702,74 +618,33 @@ fn rsa_sign_prehash(
     prehash: &[u8],
     pss_salt_length: Option<usize>,
 ) -> Result<Vec<u8>, SoftwareSigningError> {
-    match algorithm {
-        SoftwareSigningAlgorithm::RsaPssSha256 => {
-            rsa_pss_sign_prehash::<rsa::sha2::Sha256>(key, prehash, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha384 => {
-            rsa_pss_sign_prehash::<rsa::sha2::Sha384>(key, prehash, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPssSha512 => {
-            rsa_pss_sign_prehash::<rsa::sha2::Sha512>(key, prehash, pss_salt_length)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha256 => {
-            rsa_pkcs1_sign_prehash::<rsa::sha2::Sha256>(key, prehash)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha384 => {
-            rsa_pkcs1_sign_prehash::<rsa::sha2::Sha384>(key, prehash)
-        }
-        SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
-            rsa_pkcs1_sign_prehash::<rsa::sha2::Sha512>(key, prehash)
-        }
-        _ => Err(SoftwareSigningError::AlgorithmMismatch),
-    }
-}
-
-fn rsa_pss_sign_prehash<D>(
-    key: &RsaPrivateKey,
-    prehash: &[u8],
-    salt_length: Option<usize>,
-) -> Result<Vec<u8>, SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
-{
-    let key = match salt_length {
-        Some(salt_length) => rsa::pss::SigningKey::<D>::new_with_salt_len(key.clone(), salt_length),
-        None => rsa::pss::SigningKey::<D>::new(key.clone()),
+    let (hash, pss) = rsa_profile(algorithm).ok_or(SoftwareSigningError::AlgorithmMismatch)?;
+    let result = if pss {
+        rsa_sign_pss_digest(
+            key,
+            RsaPssParameters {
+                hash,
+                mgf_hash: hash,
+                salt_length: pss_salt_length.unwrap_or_else(|| hash.output_length()),
+            },
+            prehash,
+        )
+    } else {
+        rsa_sign_pkcs1v15_digest(key, hash, prehash)
     };
-    RsaRandomizedPrehashSigner::sign_prehash_with_rng(&key, &mut rsa::rand_core::OsRng, prehash)
-        .map(|signature: rsa::pss::Signature| signature.to_vec())
-        .map_err(|_| SoftwareSigningError::SigningFailed)
+    result.map_err(map_rsa_signing_error)
 }
 
-fn rsa_pkcs1_sign_prehash<D>(
-    key: &RsaPrivateKey,
-    prehash: &[u8],
-) -> Result<Vec<u8>, SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
-{
-    RsaPrehashSigner::sign_prehash(&rsa::pkcs1v15::SigningKey::<D>::new(key.clone()), prehash)
-        .map(|signature: rsa::pkcs1v15::Signature| signature.to_vec())
-        .map_err(|_| SoftwareSigningError::SigningFailed)
-}
-
-fn rsa_pss_sign<D>(key: &RsaPrivateKey, message: &[u8]) -> Result<Vec<u8>, SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::sha2::digest::FixedOutputReset,
-{
-    Ok(rsa::pss::SigningKey::<D>::new(key.clone())
-        .sign_with_rng(&mut rsa::rand_core::OsRng, message)
-        .to_vec())
-}
-
-fn rsa_pkcs1_sign<D>(key: &RsaPrivateKey, message: &[u8]) -> Result<Vec<u8>, SoftwareSigningError>
-where
-    D: rsa::sha2::Digest + rsa::pkcs8::AssociatedOid,
-{
-    Ok(rsa::pkcs1v15::SigningKey::<D>::new(key.clone())
-        .sign(message)
-        .to_vec())
+fn map_rsa_signing_error(error: RsaSignatureError) -> SoftwareSigningError {
+    match error {
+        RsaSignatureError::InvalidKey => SoftwareSigningError::InvalidPrivateKey,
+        RsaSignatureError::RandomnessUnavailable => SoftwareSigningError::RandomnessUnavailable,
+        RsaSignatureError::InputTooLong
+        | RsaSignatureError::InputOutOfRange
+        | RsaSignatureError::InvalidDigestLength
+        | RsaSignatureError::InvalidSignature
+        | RsaSignatureError::OperationFailed => SoftwareSigningError::SigningFailed,
+    }
 }
 
 fn random_p256_secret() -> Result<P256SecretKey, SoftwareSigningError> {

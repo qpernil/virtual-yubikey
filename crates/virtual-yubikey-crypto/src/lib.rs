@@ -4,4 +4,5 @@
 //! containers, signature encodings, policy, persistence, and error mapping.
 
 pub mod post_quantum;
+pub mod rsa_signing;
 pub mod software_signing;
