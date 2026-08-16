@@ -25,6 +25,8 @@ pub(crate) const FUNCTIONFS: &str = "/dev/ffs-virtual-yubikey";
 pub(crate) const HID_DEVICE: &str = "/dev/hidg0";
 const LOCK_FILE: &str = "/run/lock/virtual-yubikey.lock";
 const STATE_DIRECTORY: &str = "/var/lib/virtual-yubikey";
+const RUNTIME_DIRECTORY: &str = "/run/virtual-yubikey";
+const TOUCH_SOCKET: &str = "/run/virtual-yubikey/touch.sock";
 
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
@@ -119,6 +121,7 @@ impl Runtime {
         )?;
         runtime.mounted_functionfs = true;
         prepare_state_storage(serial, &identity)?;
+        prepare_touch_runtime(&identity)?;
         let (worker, mut control) = spawn_worker(serial, &identity, log_level)?;
         runtime.worker = Some(worker);
 
@@ -187,6 +190,14 @@ impl Runtime {
         record_error(
             &mut first_error,
             remove_dir_if_exists(Path::new(FUNCTIONFS)),
+        );
+        record_error(
+            &mut first_error,
+            remove_file_if_exists(Path::new(TOUCH_SOCKET)),
+        );
+        record_error(
+            &mut first_error,
+            remove_dir_if_exists(Path::new(RUNTIME_DIRECTORY)),
         );
 
         if self.configfs_mounted_by_us {
@@ -294,6 +305,20 @@ fn prepare_state_storage(serial: u32, identity: &WorkerIdentity) -> io::Result<(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn prepare_touch_runtime(identity: &WorkerIdentity) -> io::Result<()> {
+    let directory = Path::new(RUNTIME_DIRECTORY);
+    fs::create_dir_all(directory)?;
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{RUNTIME_DIRECTORY} is not a real directory"
+        )));
+    }
+    chown(directory, Some(identity.uid), Some(identity.gid))?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    remove_file_if_exists(Path::new(TOUCH_SOCKET))
 }
 
 impl Drop for Runtime {
