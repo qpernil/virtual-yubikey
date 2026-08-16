@@ -66,7 +66,6 @@ struct WorkerIdentity {
 
 pub(crate) struct Runtime {
     _lock: File,
-    serial: u32,
     configfs_mounted_by_us: bool,
     owns_gadget: bool,
     mounted_functionfs: bool,
@@ -94,7 +93,6 @@ impl Runtime {
         let configfs_mounted_by_us = ensure_configfs()?;
         let mut runtime = Self {
             _lock: lock,
-            serial,
             configfs_mounted_by_us,
             owns_gadget: false,
             mounted_functionfs: false,
@@ -214,6 +212,10 @@ impl Runtime {
     }
 
     fn populate_gadget(&self) -> io::Result<()> {
+        // A physical YubiKey enumerates as a USB full-speed device. Capping the
+        // composite gadget also keeps endpoint descriptors and host behavior on
+        // the same 12 Mbit/s path as the device being emulated.
+        write_attribute(&format!("{GADGET}/max_speed"), "full-speed")?;
         write_attribute(
             &format!("{GADGET}/idVendor"),
             &format!("0x{:04x}", UsbIdentity::VENDOR_ID),
@@ -232,10 +234,10 @@ impl Runtime {
         write_attribute(&format!("{GADGET}/bDeviceProtocol"), "0x00")?;
 
         fs::create_dir(format!("{GADGET}/strings/0x409"))?;
-        write_attribute(
-            &format!("{GADGET}/strings/0x409/serialnumber"),
-            &self.serial.to_string(),
-        )?;
+        // Do not populate the USB iSerialNumber string. Real YubiKeys expose
+        // their serial through Management commands rather than the USB device
+        // descriptor. The serial passed to the worker remains the logical
+        // Management serial.
         write_attribute(&format!("{GADGET}/strings/0x409/manufacturer"), "Yubico")?;
         write_attribute(
             &format!("{GADGET}/strings/0x409/product"),
