@@ -15,6 +15,7 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 minicbor = { version = "2.3.0", features = ["alloc"] }
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }

@@ -7,6 +7,8 @@
 
 use crate::post_quantum::{MlDsaParameterSet, MlDsaPrivateKey};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
+use k256::ecdsa::SigningKey as K256SigningKey;
+use k256::SecretKey as K256SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::SecretKey as P256SecretKey;
@@ -24,6 +26,7 @@ pub enum SoftwareSigningAlgorithm {
     Ed25519,
     EcdsaP384Sha384,
     EcdsaP521Sha512,
+    EcdsaSecp256k1Sha256,
     MlDsa(MlDsaParameterSet),
 }
 
@@ -39,6 +42,7 @@ pub enum EcCurve {
     P256,
     P384,
     P521,
+    Secp256k1,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +81,7 @@ pub enum SoftwareSigningKey {
     Ed25519(Ed25519SigningKey),
     P384(P384SecretKey),
     P521(P521SecretKey),
+    K256(K256SecretKey),
     MlDsa(MlDsaPrivateKey),
 }
 
@@ -101,6 +106,7 @@ impl SoftwareSigningKey {
             }
             SoftwareSigningAlgorithm::EcdsaP384Sha384 => random_p384_secret().map(Self::P384),
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => random_p521_secret().map(Self::P521),
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => random_k256_secret().map(Self::K256),
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::generate(parameter_set)
                     .map(Self::MlDsa)
@@ -129,6 +135,9 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => P521SecretKey::from_slice(serialized)
                 .map(Self::P521)
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => K256SecretKey::from_slice(serialized)
+                .map(Self::K256)
+                .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
             SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
                     .map(Self::MlDsa)
@@ -143,6 +152,7 @@ impl SoftwareSigningKey {
             Self::Ed25519(_) => SoftwareSigningAlgorithm::Ed25519,
             Self::P384(_) => SoftwareSigningAlgorithm::EcdsaP384Sha384,
             Self::P521(_) => SoftwareSigningAlgorithm::EcdsaP521Sha512,
+            Self::K256(_) => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
             Self::MlDsa(key) => SoftwareSigningAlgorithm::MlDsa(key.parameter_set()),
         }
     }
@@ -153,6 +163,7 @@ impl SoftwareSigningKey {
             Self::Ed25519(key) => Zeroizing::new(key.to_bytes().to_vec()),
             Self::P384(key) => Zeroizing::new(key.to_bytes().to_vec()),
             Self::P521(key) => Zeroizing::new(key.to_bytes().to_vec()),
+            Self::K256(key) => Zeroizing::new(key.to_bytes().to_vec()),
             Self::MlDsa(key) => Zeroizing::new(key.seed().to_vec()),
         }
     }
@@ -170,6 +181,10 @@ impl SoftwareSigningKey {
             },
             Self::P521(key) => SoftwarePublicKey::Ec {
                 curve: EcCurve::P521,
+                uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
+            Self::K256(key) => SoftwarePublicKey::Ec {
+                curve: EcCurve::Secp256k1,
                 uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
             },
             Self::MlDsa(key) => SoftwarePublicKey::MlDsa {
@@ -195,6 +210,11 @@ impl SoftwareSigningKey {
             Self::P521(key) => {
                 let signature: p521::ecdsa::Signature =
                     P521SigningKey::from(key.clone()).sign(message);
+                signature.to_bytes().to_vec()
+            }
+            Self::K256(key) => {
+                let signature: k256::ecdsa::Signature =
+                    K256SigningKey::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
             Self::MlDsa(key) => key
@@ -235,6 +255,16 @@ fn random_p521_secret() -> Result<P521SecretKey, SoftwareSigningError> {
     }
 }
 
+fn random_k256_secret() -> Result<K256SecretKey, SoftwareSigningError> {
+    loop {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        if let Ok(secret) = K256SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +276,7 @@ mod tests {
             SoftwareSigningAlgorithm::Ed25519,
             SoftwareSigningAlgorithm::EcdsaP384Sha384,
             SoftwareSigningAlgorithm::EcdsaP521Sha512,
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),

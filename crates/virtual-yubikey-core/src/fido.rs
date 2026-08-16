@@ -143,6 +143,7 @@ impl CredentialPrivateKey {
                     EcCurve::P256 => 1,
                     EcCurve::P384 => 2,
                     EcCurve::P521 => 3,
+                    EcCurve::Secp256k1 => 8,
                 },
                 &uncompressed,
             ),
@@ -173,6 +174,11 @@ impl CredentialPrivateKey {
             }
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => {
                 p521::ecdsa::Signature::from_slice(signature.as_bytes())
+                    .map(|signature| signature.to_der().as_bytes().to_vec())
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+            }
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => {
+                k256::ecdsa::Signature::from_slice(signature.as_bytes())
                     .map(|signature| signature.to_der().as_bytes().to_vec())
                     .map_err(|_| Error::from(CKR_DEVICE_ERROR))
             }
@@ -3224,6 +3230,47 @@ mod tests {
         signed.extend_from_slice(&client_data_hash);
         let signature =
             p521::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
+                .unwrap();
+        verifying_key.verify(&signed, &signature).unwrap();
+    }
+
+    #[test]
+    fn es256k_credentials_persist_and_complete_verified_assertions() {
+        let algorithm = FidoCredentialAlgorithm::Es256K;
+        let identifier = *b"virtual-test-id!";
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut state = FidoState::new(identifier, configuration);
+        let request =
+            make_credential_request("es256k.example", 0x47, &[algorithm.cose_identifier()]);
+        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 8, 32);
+
+        let encoded = state.encode_persistent().unwrap();
+        let configuration =
+            FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+        let mut restored =
+            FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
+        let CredentialPrivateKey {
+            algorithm: FidoCredentialAlgorithm::Es256K,
+            key: SoftwareSigningKey::K256(key),
+        } = &restored.credentials[0].private_key
+        else {
+            panic!("ES256K credential did not restore its secp256k1 key");
+        };
+        let verifying_key = k256::ecdsa::VerifyingKey::from(key.public_key());
+        let client_data_hash = [0x75; 32];
+        let assertion_request = get_assertion_request(
+            "es256k.example",
+            &restored.credentials[0].credential_id,
+            &client_data_hash,
+        );
+        let assertion = exchange(&mut restored, &assertion_request);
+        assert_eq!(assertion[0], CTAP2_OK);
+        let mut signed = assertion_authenticator_data(&assertion[1..]);
+        signed.extend_from_slice(&client_data_hash);
+        let signature =
+            k256::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
                 .unwrap();
         verifying_key.verify(&signed, &signature).unwrap();
     }
