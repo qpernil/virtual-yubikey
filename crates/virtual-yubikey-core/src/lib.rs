@@ -6,6 +6,7 @@
 
 mod crypto;
 mod fido;
+mod piv;
 mod preview_sign;
 use virtual_yubikey_crypto::{
     post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
@@ -13,6 +14,7 @@ use virtual_yubikey_crypto::{
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+pub use piv::PIV_AID;
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,10 +180,12 @@ const ISO7816_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
 const CAPABILITY_CCID: u16 = 0x0004;
 const CAPABILITY_FIDO2: u16 = 0x0200;
+const CAPABILITY_PIV: u16 = 0x0010;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
     Management,
+    Piv,
     Fido2,
 }
 
@@ -189,6 +193,7 @@ impl Applet {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Management => "management",
+            Self::Piv => "piv",
             Self::Fido2 => "fido2",
         }
     }
@@ -197,6 +202,7 @@ impl Applet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppletConfiguration {
     pub management: bool,
+    pub piv: bool,
     pub fido2: bool,
 }
 
@@ -204,6 +210,7 @@ impl AppletConfiguration {
     pub const fn yubikey_5_8_preview_sign() -> Self {
         Self {
             management: true,
+            piv: true,
             fido2: true,
         }
     }
@@ -211,18 +218,20 @@ impl AppletConfiguration {
     pub const fn contains(self, applet: Applet) -> bool {
         match applet {
             Applet::Management => self.management,
+            Applet::Piv => self.piv,
             Applet::Fido2 => self.fido2,
         }
     }
 
     pub const fn usb_capabilities(self) -> u16 {
-        let ccid = if self.management || self.fido2 {
+        let ccid = if self.management || self.piv || self.fido2 {
             CAPABILITY_CCID
         } else {
             0
         };
+        let piv = if self.piv { CAPABILITY_PIV } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | fido2
+        ccid | piv | fido2
     }
 }
 
@@ -434,6 +443,7 @@ pub struct VirtualYubiKey {
     selected: Option<Applet>,
     chained_command: Vec<u8>,
     pending_response: Vec<u8>,
+    piv: piv::PivApplet,
     fido: FidoAuthenticator,
 }
 
@@ -447,11 +457,13 @@ impl VirtualYubiKey {
         configuration: FidoConfiguration,
     ) -> Self {
         let fido = FidoAuthenticator::with_configuration(profile.serial, configuration);
+        let piv = piv::PivApplet::new(profile.serial, profile.firmware);
         Self {
             profile,
             selected: None,
             chained_command: Vec::new(),
             pending_response: Vec::new(),
+            piv,
             fido,
         }
     }
@@ -476,6 +488,7 @@ impl VirtualYubiKey {
         self.selected = None;
         self.chained_command.clear();
         self.pending_response.clear();
+        self.piv.reset_connection();
         self.fido.reset_connection();
     }
 
@@ -495,6 +508,7 @@ impl VirtualYubiKey {
 
         match self.selected {
             Some(Applet::Management) => self.management(&command).encode(),
+            Some(Applet::Piv) => self.piv.transmit(&command).encode(),
             Some(Applet::Fido2) => self.fido2(&command).encode(),
             None => ResponseApdu::status(0x6999).encode(),
         }
@@ -512,6 +526,9 @@ impl VirtualYubiKey {
         } else if aid == FIDO2_AID && self.profile.applets.contains(Applet::Fido2) {
             self.selected = Some(Applet::Fido2);
             ResponseApdu::success(b"U2F_V2".to_vec())
+        } else if piv::matches_aid(aid) && self.profile.applets.contains(Applet::Piv) {
+            self.selected = Some(Applet::Piv);
+            ResponseApdu::success(piv::select_response())
         } else {
             self.selected = None;
             ResponseApdu::status(0x6a82)
@@ -700,8 +717,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 2, 4]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 2, 4]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 2, 20]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 2, 20]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }
