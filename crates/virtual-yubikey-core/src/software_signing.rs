@@ -5,7 +5,7 @@
 //! protocol identifiers, public-key containers, signature formatting, policy,
 //! and error mapping.
 
-use crate::post_quantum::{MlDsaParameterSet, MlDsaPrivateKey};
+use crate::post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::SigningKey as K256SigningKey;
 use k256::SecretKey as K256SecretKey;
@@ -16,7 +16,7 @@ use p384::ecdsa::SigningKey as P384SigningKey;
 use p384::SecretKey as P384SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::SecretKey as P521SecretKey;
-use signature::Signer;
+use signature::{Signer, Verifier};
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -32,7 +32,10 @@ pub enum SoftwareSigningAlgorithm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftwareSigningError {
+    AlgorithmMismatch,
+    InvalidPublicKey,
     InvalidPrivateKey,
+    InvalidSignature,
     RandomnessUnavailable,
     SigningFailed,
 }
@@ -56,6 +59,81 @@ pub enum SoftwarePublicKey {
         parameter_set: MlDsaParameterSet,
         public_key: Vec<u8>,
     },
+}
+
+macro_rules! verify_ecdsa {
+    ($ec:ident, $public:expr, $message:expr, $signature:expr) => {{
+        let key = $ec::ecdsa::VerifyingKey::from_sec1_bytes($public)
+            .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+        let signature = $ec::ecdsa::Signature::from_slice($signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        key.verify($message, &signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)
+    }};
+}
+
+impl SoftwarePublicKey {
+    /// Verify a signature over an unhashed message.
+    ///
+    /// ECDSA signatures use fixed-width `r || s`; Ed25519 and ML-DSA use their
+    /// standard raw encodings. Protocol layers remain responsible for
+    /// converting formats such as WebAuthn's DER-encoded ECDSA signatures.
+    pub fn verify_message(
+        &self,
+        algorithm: SoftwareSigningAlgorithm,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), SoftwareSigningError> {
+        match (algorithm, self) {
+            (
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                Self::Ec {
+                    curve: EcCurve::P256,
+                    uncompressed,
+                },
+            ) => verify_ecdsa!(p256, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaP384Sha384,
+                Self::Ec {
+                    curve: EcCurve::P384,
+                    uncompressed,
+                },
+            ) => verify_ecdsa!(p384, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaP521Sha512,
+                Self::Ec {
+                    curve: EcCurve::P521,
+                    uncompressed,
+                },
+            ) => verify_ecdsa!(p521, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+                Self::Ec {
+                    curve: EcCurve::Secp256k1,
+                    uncompressed,
+                },
+            ) => verify_ecdsa!(k256, uncompressed, message, signature),
+            (SoftwareSigningAlgorithm::Ed25519, Self::Ed25519(public)) => {
+                let key = ed25519_dalek::VerifyingKey::from_bytes(public)
+                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                let signature = ed25519_dalek::Signature::try_from(signature)
+                    .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+                key.verify(message, &signature)
+                    .map_err(|_| SoftwareSigningError::InvalidSignature)
+            }
+            (
+                SoftwareSigningAlgorithm::MlDsa(expected),
+                Self::MlDsa {
+                    parameter_set,
+                    public_key,
+                },
+            ) if expected == *parameter_set => {
+                verify_ml_dsa(*parameter_set, public_key, message, &[], signature)
+                    .map_err(|_| SoftwareSigningError::InvalidSignature)
+            }
+            _ => Err(SoftwareSigningError::AlgorithmMismatch),
+        }
+    }
 }
 
 /// A signature in the algorithm's fixed-width native representation.
@@ -285,12 +363,16 @@ mod tests {
             let restored =
                 SoftwareSigningKey::from_serialized(algorithm, &key.serialized()).unwrap();
             assert_eq!(restored.algorithm(), algorithm);
-            assert_eq!(restored.public_key(), key.public_key());
-            assert!(!restored
-                .sign_message(b"shared signing test")
-                .unwrap()
-                .as_bytes()
-                .is_empty());
+            let public_key = key.public_key();
+            assert_eq!(restored.public_key(), public_key);
+            let signature = restored.sign_message(b"shared signing test").unwrap();
+            public_key
+                .verify_message(algorithm, b"shared signing test", signature.as_bytes())
+                .unwrap();
+            assert_eq!(
+                public_key.verify_message(algorithm, b"changed", signature.as_bytes()),
+                Err(SoftwareSigningError::InvalidSignature)
+            );
         }
     }
 }
