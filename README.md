@@ -20,7 +20,8 @@ credential management, resident credentials, and `previewSign`.
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, credential management, resident credentials and `previewSign` |
+| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, assertions and `previewSign` |
+| Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
 The program uses Yubico's USB VID/PID solely for controlled compatibility
@@ -116,6 +117,15 @@ worker to publish the FunctionFS descriptors, then binds the gadget. Once
 signals the worker to open it. The worker handles all host-controlled USB
 protocol data without regaining privileges. There is no standard Pi group
 equivalent to `dialout` for gadget administration.
+
+The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
+`12345678` device stores versioned CBOR state in
+`/var/lib/virtual-yubikey/fido-12345678.cbor`. A missing file means a new empty
+authenticator; an invalid existing file is a startup error and is never silently
+replaced. State replacement is atomic and synchronized before a successful
+mutating CTAP response is returned. The file is mode `0600`, but contains
+unencrypted test PIN and private-key material and must not be treated as secure
+hardware storage.
 
 Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
 instances, and a later start recovers stale state left by a crash. Options:
