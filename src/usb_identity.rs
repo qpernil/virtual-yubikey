@@ -67,6 +67,9 @@ pub(crate) const USB_IDENTITY: UsbIdentity = UsbIdentity::yubikey_5_8(UsbInterfa
 mod tests {
     use super::*;
 
+    const PROFILE: &str = include_str!("../profiles/virtual-yubikey.toml");
+    const FIDO_HID_REPORT: &str = include_str!("../profiles/fido-hid-report.hex");
+
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
         assert_eq!(UsbIdentity::VENDOR_ID, 0x1050);
@@ -81,5 +84,54 @@ mod tests {
         });
         assert_eq!(composite.product_id(), 0x0407);
         assert_eq!(composite.product(), "YubiKey OTP+FIDO+CCID");
+    }
+
+    #[test]
+    fn installed_profile_preserves_the_worker_usb_contract() {
+        let profile: toml::Value = toml::from_str(PROFILE).unwrap();
+        let usb = profile.get("usb").unwrap();
+        assert_eq!(usb.get("vendor_id").unwrap().as_integer(), Some(0x1050));
+        assert_eq!(usb.get("bcd_usb").unwrap().as_integer(), Some(0x0200));
+        assert_eq!(
+            usb.get("product_id").unwrap().as_integer(),
+            Some(USB_IDENTITY.product_id() as i64)
+        );
+        assert_eq!(
+            usb.get("bcd_device").unwrap().as_integer(),
+            Some(USB_IDENTITY.bcd_device() as i64)
+        );
+        assert_eq!(
+            usb.get("product").unwrap().as_str(),
+            Some(USB_IDENTITY.product())
+        );
+        assert_eq!(usb.get("max_speed").unwrap().as_str(), Some("full-speed"));
+        assert_eq!(usb.get("device_class").unwrap().as_integer(), Some(0));
+        assert_eq!(usb.get("device_subclass").unwrap().as_integer(), Some(0));
+        assert_eq!(usb.get("device_protocol").unwrap().as_integer(), Some(0));
+        assert_eq!(usb.get("max_power_ma").unwrap().as_integer(), Some(30));
+        assert!(usb.get("serial").is_none());
+
+        let functions = profile.get("functions").unwrap().as_array().unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].get("type").unwrap().as_str(), Some("hid"));
+        assert_eq!(functions[0].get("name").unwrap().as_str(), Some("fido"));
+        assert_eq!(
+            functions[1].get("type").unwrap().as_str(),
+            Some("functionfs")
+        );
+        assert_eq!(functions[1].get("name").unwrap().as_str(), Some("ccid"));
+
+        let descriptor = FIDO_HID_REPORT
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            descriptor,
+            vec![
+                0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0x00, 0x26, 0xff, 0x00,
+                0x75, 0x08, 0x95, 0x40, 0x81, 0x02, 0x09, 0x21, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75,
+                0x08, 0x95, 0x40, 0x91, 0x02, 0xc0,
+            ]
+        );
     }
 }

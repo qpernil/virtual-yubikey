@@ -1,11 +1,18 @@
 # Virtual YubiKey
 
-`virtual-yubikey` makes a Raspberry Pi enumerate as a composite FIDO HID and
+`virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
+enumerate as a composite FIDO HID and
 CCID YubiKey for compatibility testing. HID carries FIDO/CTAP; CCID exposes
 YubiKey Management and PIV. The USB CCID reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
+
+Privileged ConfigFS, FunctionFS mount, UDC, and process-lifecycle operations
+belong to the separate
+[`usb-gadget-supervisor`](https://github.com/qpernil/usb-gadget-supervisor)
+project. This repository owns only YubiKey protocol behavior, state, USB
+descriptor assets, and its declarative device profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
@@ -35,22 +42,27 @@ hardware.
 | --- | --- |
 | `crates/virtual-yubikey-crypto` | Protocol-neutral signing, verification, key serialization, RSA encodings, ECDH/X25519 agreement, and ML-DSA controls shared with clients such as `pkcs11rs` |
 | `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, and PIV applet state |
-| `main.rs` | Process orchestration and signal handling |
-| `cli.rs` | Command-line validation |
+| `main.rs` | Worker startup and signal handling |
+| `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
-| `gadget.rs` | Privileged ConfigFS lifecycle and worker supervision |
 | `functionfs.rs` | Unprivileged FunctionFS transport and CCID USB descriptors |
 | `ctaphid.rs` | CTAPHID channels, packet reassembly, command routing and response fragmentation |
 | `ccid.rs` | CCID framing, reader state, and smart-card activation |
 | `smartcard.rs` | Diagnostics adapter between CCID and `virtual-yubikey-core` |
+| `worker_protocol.rs` | Versioned lifecycle channel shared with the generic supervisor |
+| `profiles/` | Root-installed USB profile and FIDO HID report descriptor asset |
+
+The first extracted-worker deployment and remaining host-level acceptance work
+are recorded in [`docs/deployment-validation.md`](docs/deployment-validation.md).
 
 ## Developing virtual firmware
 
 The workspace deliberately separates the logical device from its physical
 transport. `virtual-yubikey-core` is the firmware layer: a profile supplies the
 firmware version, serial number, capabilities and form factor, while the core
-owns installed applets and their state. The outer binary acts as the board and
-USB controller by providing ConfigFS, FunctionFS and CCID.
+owns installed applets and their state. The worker acts as the endpoint-owning
+device firmware. The external supervisor provides the board's privileged USB
+controller setup.
 
 New firmware behavior should therefore be developed and tested as APDU vectors
 in the core first, then exercised through CCID and finally against real host
@@ -147,22 +159,32 @@ A Pi 4 normally reports `fe980000.usb`.
 
 ## Build and run
 
+Clone this repository beside the supervisor, then build both binaries:
+
 ```sh
 cd /home/per
 git clone https://github.com/qpernil/virtual-yubikey.git
-cd virtual-yubikey
-cargo build --release --locked --bin virtual-yubikey
-sudo ./target/release/virtual-yubikey --run-as per
+git clone https://github.com/qpernil/usb-gadget-supervisor.git
+cargo build --release --locked --manifest-path virtual-yubikey/Cargo.toml \
+  --bin virtual-yubikey-worker
+cargo build --release --locked --manifest-path usb-gadget-supervisor/Cargo.toml
 ```
 
-The process starts as a small root supervisor because ConfigFS gadget creation,
-mounting FunctionFS, creating the HID gadget, and binding the UDC require root.
-It launches a fresh copy as the selected unprivileged account, waits for that
-worker to publish the FunctionFS descriptors, then binds the gadget. Once
-`/dev/hidg0` appears, the supervisor assigns that node to the worker account and
-signals the worker to open it. The worker handles all host-controlled USB
-protocol data without regaining privileges. There is no standard Pi group
-equivalent to `dialout` for gadget administration.
+The worker is not launched directly. The generic supervisor reads the
+root-owned profile, mounts FunctionFS for the configured account, starts the
+worker with a private `SOCK_SEQPACKET` control descriptor, and waits for it to
+publish its CCID descriptors. Only then does the supervisor bind the UDC,
+prepare `/dev/hidg0`, and send `USB_ATTACHED`. USB payloads flow directly
+between kernel endpoint files and the unprivileged worker; the supervisor never
+proxies CTAP, CCID, APDU, PIN, or key data.
+
+Profiles can also declare root-opened local character devices. The supervisor
+passes their descriptors as `USB_GADGET_RESOURCE_<NAME>_FD` after dropping the
+worker to its configured account. Future SSD1306/GPIO support will use that
+mechanism, while every I2C transaction, framebuffer operation, button debounce,
+LED animation, and touch decision remains in this worker rather than the
+privileged supervisor. The current profile declares no display resources and
+continues to run headlessly.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
@@ -178,13 +200,12 @@ not decode the earlier test schema. Before deploying this version over an older
 development build, stop the service and remove that exact state file to start
 with an empty authenticator.
 
-Ctrl-C unbinds and removes the gadget. An exclusive lock prevents concurrent
-instances, and a later start recovers stale state left by a crash. Options:
+The supervisor unbinds and removes the gadget on shutdown or worker failure. A
+global exclusive lock prevents concurrent profiles from owning the Pi UDC. The
+profile supplies the worker serial and log level; its direct options are:
 
 ```text
 --serial DECIMAL       Management serial (default 12345678)
---udc NAME             select a controller instead of the first available one
---run-as USER          unprivileged protocol worker account
 --log-level LEVEL      off, info, debug, or trace
 ```
 
@@ -243,22 +264,39 @@ with YubiKey-specific extensions matched to the
 
 ## Install as a service
 
-After a manual test succeeds:
+Install both projects after building them. The example profile runs the worker
+as user `per`; edit `profiles/virtual-yubikey.toml` before installing it if the
+Pi uses another unprivileged account.
 
 ```sh
-cd /home/per/virtual-yubikey
 sudo install -o root -g root -m 0755 \
-  target/release/virtual-yubikey /usr/local/sbin/virtual-yubikey
+  /home/per/usb-gadget-supervisor/target/release/usb-gadget-supervisor \
+  /usr/local/sbin/usb-gadget-supervisor
+sudo install -d -o root -g root -m 0755 \
+  /usr/local/libexec/virtual-yubikey /usr/local/share/virtual-yubikey \
+  /etc/usb-gadget-supervisor/profiles
 sudo install -o root -g root -m 0755 \
-  target/release/virtual-yubikey-touch /usr/local/bin/virtual-yubikey-touch
+  /home/per/virtual-yubikey/target/release/virtual-yubikey-worker \
+  /usr/local/libexec/virtual-yubikey/virtual-yubikey-worker
+sudo install -o root -g root -m 0755 \
+  /home/per/virtual-yubikey/target/release/virtual-yubikey-touch \
+  /usr/local/bin/virtual-yubikey-touch
 sudo install -o root -g root -m 0644 \
-  systemd/virtual-yubikey.service /etc/systemd/system/virtual-yubikey.service
+  /home/per/virtual-yubikey/profiles/fido-hid-report.hex \
+  /usr/local/share/virtual-yubikey/fido-hid-report.hex
+sudo install -o root -g root -m 0644 \
+  /home/per/virtual-yubikey/profiles/virtual-yubikey.toml \
+  /etc/usb-gadget-supervisor/profiles/virtual-yubikey.toml
+sudo install -o root -g root -m 0644 \
+  /home/per/virtual-yubikey/systemd/virtual-yubikey.service \
+  /etc/systemd/system/virtual-yubikey.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now virtual-yubikey.service
 ```
 
-The supplied unit uses `--run-as per`; edit that argument if the Pi uses a
-different unprivileged account. Verify the service and physical link with:
+The supervisor rejects a profile, worker, or HID descriptor asset that is not a
+regular root-owned file or is writable by group/other. Verify the service and
+physical link with:
 
 ```sh
 systemctl --no-pager --full status virtual-yubikey.service
@@ -266,3 +304,20 @@ cat /sys/class/udc/fe980000.usb/state
 ```
 
 With a data-capable host connection, the UDC state should be `configured`.
+
+The extracted supervisor/worker installation was exercised on an aarch64
+Raspberry Pi on 2026-08-17. It preserved the existing FIDO and PIV files,
+enumerated on macOS, served automatic CCID/PIV traffic, recovered from a killed
+worker, and enforced the single-supervisor lock. See the
+[validation record](docs/deployment-validation.md) for exact results and the
+remaining FIDO/PIV application tests.
+
+During an in-place migration, retaining copies of the old executable and unit
+provides a simple rollback while leaving persistent state untouched:
+
+```sh
+sudo cp -p /usr/local/sbin/virtual-yubikey \
+  /usr/local/sbin/virtual-yubikey.pre-supervisor
+sudo cp -p /etc/systemd/system/virtual-yubikey.service \
+  /etc/systemd/system/virtual-yubikey.service.pre-supervisor
+```

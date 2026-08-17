@@ -17,5 +17,12 @@ resolver = "2"
 [dependencies]
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
+[[bin]]
+name = "virtual-yubikey-worker"
+path = "src/main.rs"
+
+[dev-dependencies]
+toml = "0.9.12"
+
 # The USB binary deliberately calls Linux interfaces directly. Protocol and
 # emulator dependencies live in the transport-neutral core crate.

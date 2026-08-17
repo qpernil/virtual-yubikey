@@ -1,13 +1,13 @@
 [Unit]
 Description=Virtual YubiKey USB gadget
-Documentation=https://github.com/qpernil/virtual-yubikey
+Documentation=https://github.com/qpernil/virtual-yubikey https://github.com/qpernil/usb-gadget-supervisor
 After=local-fs.target
 
 [Service]
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/sbin/virtual-yubikey --run-as per
+ExecStart=/usr/local/sbin/usb-gadget-supervisor --profile /etc/usb-gadget-supervisor/profiles/virtual-yubikey.toml
 Restart=on-failure
 RestartSec=2s
 KillMode=mixed

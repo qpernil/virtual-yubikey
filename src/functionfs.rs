@@ -3,19 +3,25 @@
 #[cfg(target_os = "linux")]
 use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
+use crate::worker_protocol::{
+    Channel, Message, FUNCTIONFS_CCID_ENV, HID_FIDO_ENV, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV,
+};
+#[cfg(target_os = "linux")]
 use crate::STOP_REQUESTED;
+#[cfg(target_os = "linux")]
+use std::env;
 #[cfg(target_os = "linux")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixDatagram;
 #[cfg(target_os = "linux")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
@@ -32,8 +38,6 @@ use virtual_yubikey_core::FidoAuthenticator;
 const MAX_TRANSFER: usize = 16 * 1024;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK_LINUX: i32 = 0x800;
-#[cfg(target_os = "linux")]
-const TOUCH_SOCKET: &str = "/run/virtual-yubikey/touch.sock";
 #[cfg(target_os = "linux")]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
@@ -76,12 +80,7 @@ unsafe extern "C" {
 const POLLIN: i16 = 0x0001;
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_worker(
-    serial: u32,
-    control_fd: i32,
-    functionfs: &Path,
-    hid_device: &Path,
-) -> io::Result<()> {
+pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -93,26 +92,33 @@ pub(crate) fn run_worker(
         ));
     }
 
-    // SAFETY: the supervisor passes ownership of this descriptor to the worker.
-    let mut control = unsafe { File::from_raw_fd(control_fd) };
-    let fido_state_path = crate::gadget::fido_state_path(serial);
-    let piv_state_path = crate::gadget::piv_state_path(serial);
-    let fido = load_fido_state(serial, &fido_state_path)?;
-    let ccid = load_piv_state(serial, &piv_state_path)?;
-    let endpoints = Endpoints::open(functionfs)?;
-    control.write_all(b"R")?;
-    let mut attached = [0_u8; 1];
-    control.read_exact(&mut attached)?;
-    if attached != *b"H" {
-        return Err(io::Error::other(
-            "supervisor sent an invalid HID-ready message",
+    let mut control = Channel::from_environment()?;
+    if control.receive()? != Message::ResourcesReady {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor did not send RESOURCES_READY",
         ));
     }
-    drop(control);
+    let functionfs = required_path(FUNCTIONFS_CCID_ENV)?;
+    let hid_device = required_path(HID_FIDO_ENV)?;
+    let state_directory = required_path(STATE_DIRECTORY_ENV)?;
+    let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
+    let storage = WorkerStorage {
+        fido_state: state_directory.join(format!("fido-{serial}.cbor")),
+        piv_state: state_directory.join(format!("piv-{serial}.cbor")),
+        touch_socket: runtime_directory.join("touch.sock"),
+    };
+    let fido = load_fido_state(serial, &storage.fido_state)?;
+    let ccid = load_piv_state(serial, &storage.piv_state)?;
+    let endpoints = Endpoints::open(&functionfs)?;
+    control.send(Message::FunctionFsReady)?;
+    if control.receive()? != Message::UsbAttached {
+        return Err(io::Error::other("supervisor did not send USB_ATTACHED"));
+    }
     let hid = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(hid_device)
+        .open(&hid_device)
         .map_err(|error| with_context(error, "open FIDO HID gadget"))?;
     diagnostics::log(
         Level::Info,
@@ -124,7 +130,40 @@ pub(crate) fn run_worker(
             hid_device.display()
         ),
     );
-    endpoints.serve(serial, hid, fido, ccid, &fido_state_path, &piv_state_path)
+    let mut lifecycle = control.try_clone()?;
+    thread::Builder::new()
+        .name("worker-control".to_owned())
+        .spawn(move || {
+            let _ = lifecycle.receive();
+            STOP_REQUESTED.store(true, Ordering::Relaxed);
+        })?;
+
+    let result = endpoints.serve(serial, hid, fido, ccid, &storage);
+    let terminal = if result.is_ok() {
+        Message::Stopped
+    } else {
+        Message::Fatal
+    };
+    let _ = control.send(terminal);
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn required_path(name: &str) -> io::Result<PathBuf> {
+    let value = env::var_os(name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("missing inherited resource path {name}"),
+        )
+    })?;
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("inherited resource path {name} must be absolute"),
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -134,6 +173,13 @@ struct Endpoints {
     ccid_in: File,
     ccid_interrupt: File,
     ccid_notification_pending: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct WorkerStorage {
+    fido_state: PathBuf,
+    piv_state: PathBuf,
+    touch_socket: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -164,8 +210,7 @@ impl Endpoints {
         hid: File,
         fido: FidoAuthenticator,
         ccid: crate::ccid::Device,
-        fido_state_path: &Path,
-        piv_state_path: &Path,
+        storage: &WorkerStorage,
     ) -> io::Result<()> {
         let Self {
             mut ep0,
@@ -181,7 +226,7 @@ impl Endpoints {
         // opened O_NONBLOCK, so keep the bulk OUT endpoint in its own thread.
         let ccid_completion = completion_tx.clone();
         thread::Builder::new().name("ccid-usb".to_owned()).spawn({
-            let state_path = piv_state_path.to_owned();
+            let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
             move || {
                 let _ = ccid_completion.send((
@@ -192,11 +237,14 @@ impl Endpoints {
         })?;
 
         thread::Builder::new().name("fido-hid".to_owned()).spawn({
-            let state_path = fido_state_path.to_owned();
+            let state_path = storage.fido_state.clone();
+            let touch_socket = storage.touch_socket.clone();
             let clock = keepalive.handle();
             move || {
-                let _ = completion_tx
-                    .send(("FIDO HID", serve_hid(hid, fido, serial, &state_path, clock)));
+                let _ = completion_tx.send((
+                    "FIDO HID",
+                    serve_hid(hid, fido, serial, &state_path, &touch_socket, clock),
+                ));
             }
         })?;
 
@@ -287,6 +335,7 @@ fn serve_hid(
     mut fido: FidoAuthenticator,
     serial: u32,
     state_path: &Path,
+    touch_socket: &Path,
     clock: crate::keepalive::Handle,
 ) -> io::Result<()> {
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
@@ -356,7 +405,7 @@ fn serve_hid(
                         );
                     }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                        match wait_for_touch(&mut hid, channel, &clock) {
+                        match wait_for_touch(&mut hid, channel, touch_socket, &clock) {
                             Ok(true) => match exchange_fido_with_keepalives(
                                 &mut hid, &mut fido, request, channel, true, &clock,
                             ) {
@@ -535,28 +584,32 @@ fn exchange_fido_with_keepalives(
 #[cfg(target_os = "linux")]
 struct TouchSocket {
     socket: UnixDatagram,
+    path: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
 impl TouchSocket {
-    fn bind() -> io::Result<Self> {
-        match fs::remove_file(TOUCH_SOCKET) {
+    fn bind(path: &Path) -> io::Result<Self> {
+        match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(with_context(error, "remove stale touch socket")),
         }
-        let socket = UnixDatagram::bind(TOUCH_SOCKET)
-            .map_err(|error| with_context(error, "bind touch socket"))?;
-        fs::set_permissions(TOUCH_SOCKET, fs::Permissions::from_mode(0o600))?;
+        let socket =
+            UnixDatagram::bind(path).map_err(|error| with_context(error, "bind touch socket"))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         socket.set_nonblocking(true)?;
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            path: path.to_owned(),
+        })
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for TouchSocket {
     fn drop(&mut self) {
-        let _ = fs::remove_file(TOUCH_SOCKET);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -564,14 +617,15 @@ impl Drop for TouchSocket {
 fn wait_for_touch(
     hid: &mut File,
     channel: u32,
+    touch_socket: &Path,
     clock: &crate::keepalive::Handle,
 ) -> io::Result<bool> {
-    let touch = TouchSocket::bind()?;
+    let touch = TouchSocket::bind(touch_socket)?;
     diagnostics::log(
         Level::Info,
         "fido",
         "user_presence_wait",
-        format_args!("channel={channel:08x} socket={TOUCH_SOCKET}"),
+        format_args!("channel={channel:08x} socket={}", touch_socket.display()),
     );
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
     let mut signal = [0_u8; 1];

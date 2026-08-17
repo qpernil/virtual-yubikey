@@ -1,0 +1,38 @@
+schema = 1
+name = "virtual-yubikey"
+
+[usb]
+vendor_id = 0x1050
+product_id = 0x0406
+bcd_usb = 0x0200
+bcd_device = 0x0580
+max_speed = "full-speed"
+device_class = 0
+device_subclass = 0
+device_protocol = 0
+manufacturer = "Yubico"
+product = "YubiKey FIDO+CCID"
+max_power_ma = 30
+
+[worker]
+command = "/usr/local/libexec/virtual-yubikey/virtual-yubikey-worker"
+arguments = ["--serial", "12345678", "--log-level", "info"]
+run_as = "per"
+readiness_timeout_ms = 10000
+state_directory = "/var/lib/virtual-yubikey"
+runtime_directory = "/run/virtual-yubikey"
+
+# Function order is USB interface order: FIDO HID is interface 0 and CCID is 1.
+[[functions]]
+type = "hid"
+name = "fido"
+protocol = 0
+subclass = 0
+report_length = 64
+report_descriptor = "/usr/local/share/virtual-yubikey/fido-hid-report.hex"
+device = "/dev/hidg0"
+
+[[functions]]
+type = "functionfs"
+name = "ccid"
+mount = "/dev/ffs-virtual-yubikey"

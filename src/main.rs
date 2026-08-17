@@ -1,7 +1,4 @@
-//! A virtual YubiKey exposed through Linux USB gadget mode.
-//!
-//! In normal operation a root supervisor owns the Linux USB gadget lifecycle
-//! and execs an unprivileged copy to own FunctionFS and handle protocol data.
+//! Unprivileged YubiKey protocol worker for `usb-gadget-supervisor`.
 
 #[cfg(any(target_os = "linux", test))]
 mod ccid;
@@ -10,19 +7,18 @@ mod cli;
 mod ctaphid;
 mod diagnostics;
 mod functionfs;
-#[cfg(target_os = "linux")]
-mod gadget;
 #[cfg(any(target_os = "linux", test))]
 mod keepalive;
 #[cfg(any(target_os = "linux", test))]
 mod smartcard;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 mod usb_identity;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
+mod worker_protocol;
 
 use std::env;
 use std::io;
-#[cfg(target_os = "linux")]
-use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,44 +36,18 @@ fn run() -> io::Result<()> {
     let options = cli::parse(env::args().skip(1))?;
     diagnostics::set_level(options.log_level);
 
-    if let Some(_ready_fd) = options.worker_fd {
-        #[cfg(target_os = "linux")]
-        {
-            install_signal_handlers()?;
-            return functionfs::run_worker(
-                options.serial,
-                _ready_fd,
-                Path::new(gadget::FUNCTIONFS),
-                Path::new(gadget::HID_DEVICE),
-            );
-        }
-        #[cfg(not(target_os = "linux"))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the FunctionFS worker is Linux-only",
-        ));
-    }
-
     #[cfg(target_os = "linux")]
     {
         install_signal_handlers()?;
-        let mut runtime = gadget::Runtime::setup(
-            options.serial,
-            options.udc.as_deref(),
-            options.run_as.as_deref(),
-            options.log_level,
-        )?;
-        let serve_result = runtime.serve();
-        let cleanup_result = runtime.cleanup();
-        serve_result.and(cleanup_result)
+        functionfs::run_worker(options.serial)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (options.udc, options.run_as);
+        let _ = options;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "USB gadget mode is Linux-only",
+            "the virtual YubiKey worker is Linux-only",
         ))
     }
 }
