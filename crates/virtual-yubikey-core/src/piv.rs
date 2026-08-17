@@ -99,30 +99,63 @@ impl ManagementAlgorithm {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum PivAlgorithm {
+    Rsa3072 = 0x05,
+    Rsa1024 = 0x06,
+    Rsa2048 = 0x07,
     EccP256 = 0x11,
     EccP384 = 0x14,
+    Rsa4096 = 0x16,
 }
 
 impl PivAlgorithm {
     fn from_id(id: u8) -> Option<Self> {
         match id {
+            0x05 => Some(Self::Rsa3072),
+            0x06 => Some(Self::Rsa1024),
+            0x07 => Some(Self::Rsa2048),
             0x11 => Some(Self::EccP256),
             0x14 => Some(Self::EccP384),
+            0x16 => Some(Self::Rsa4096),
             _ => None,
         }
     }
 
-    const fn signing_algorithm(self) -> SoftwareSigningAlgorithm {
+    const fn serialization_algorithm(self) -> SoftwareSigningAlgorithm {
         match self {
+            Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => {
+                SoftwareSigningAlgorithm::RsaPkcs1Sha256
+            }
             Self::EccP256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
             Self::EccP384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
         }
     }
 
-    const fn curve(self) -> EcCurve {
+    const fn curve(self) -> Option<EcCurve> {
         match self {
-            Self::EccP256 => EcCurve::P256,
-            Self::EccP384 => EcCurve::P384,
+            Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => None,
+            Self::EccP256 => Some(EcCurve::P256),
+            Self::EccP384 => Some(EcCurve::P384),
+        }
+    }
+
+    const fn rsa_bits(self) -> Option<usize> {
+        match self {
+            Self::Rsa1024 => Some(1_024),
+            Self::Rsa2048 => Some(2_048),
+            Self::Rsa3072 => Some(3_072),
+            Self::Rsa4096 => Some(4_096),
+            Self::EccP256 | Self::EccP384 => None,
+        }
+    }
+
+    const fn input_length(self) -> usize {
+        match self {
+            Self::Rsa1024 => 128,
+            Self::Rsa2048 => 256,
+            Self::Rsa3072 => 384,
+            Self::Rsa4096 => 512,
+            Self::EccP256 => 32,
+            Self::EccP384 => 48,
         }
     }
 }
@@ -154,7 +187,12 @@ impl PivKey {
             SoftwarePublicKey::Ec {
                 curve,
                 uncompressed,
-            } if curve == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
+            } if Some(curve) == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
+            SoftwarePublicKey::Rsa { modulus, exponent }
+                if self.algorithm.rsa_bits() == Some(modulus.len() * 8) =>
+            {
+                Ok([encode_tlv(0x81, &modulus), encode_tlv(0x82, &exponent)].concat())
+            }
             _ => Err(()),
         }
     }
@@ -657,7 +695,12 @@ impl PivApplet {
         let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let Ok(private_key) = SoftwareSigningKey::generate(algorithm.signing_algorithm()) else {
+        let private_key = if let Some(bits) = algorithm.rsa_bits() {
+            SoftwareSigningKey::generate_rsa(bits)
+        } else {
+            SoftwareSigningKey::generate(algorithm.serialization_algorithm())
+        };
+        let Ok(private_key) = private_key else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
         };
         let key = PivKey {
@@ -688,17 +731,6 @@ impl PivApplet {
         let Some(fields) = decode_tlvs(command.data) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        if fields.is_empty()
-            || fields.len() > 3
-            || fields
-                .iter()
-                .any(|(tag, _)| !matches!(*tag, 0x06 | 0xaa | 0xab))
-        {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
-        }
-        let Some(serialized) = unique_field(&fields, 0x06) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
-        };
         let Some(pin_policy) = optional_policy(&fields, 0xaa, default_pin_policy(command.p2))
         else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
@@ -706,21 +738,67 @@ impl PivApplet {
         let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let Ok(private_key) =
-            SoftwareSigningKey::from_serialized(algorithm.signing_algorithm(), serialized)
-        else {
+        let private_key = if algorithm.rsa_bits().is_some() {
+            if fields.len() < 5
+                || fields.len() > 7
+                || fields
+                    .iter()
+                    .any(|(tag, _)| !matches!(*tag, 0x01..=0x05 | 0xaa | 0xab))
+            {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            }
+            let component_length = algorithm.input_length() / 2;
+            let mut components = Vec::with_capacity(5);
+            for tag in 0x01..=0x05 {
+                let Some(component) = unique_field(&fields, tag) else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                };
+                if component.is_empty() || component.len() > component_length {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                }
+                components.push(component);
+            }
+            SoftwareSigningKey::from_rsa_primes(components[0], components[1], &[1, 0, 1])
+                .and_then(|key| {
+                    let computed = key.rsa_crt_components()?;
+                    if components
+                        .iter()
+                        .zip(computed.iter())
+                        .all(|(supplied, expected)| unsigned_integer_equal(supplied, expected))
+                    {
+                        Ok(key)
+                    } else {
+                        Err(virtual_yubikey_crypto::software_signing::SoftwareSigningError::InvalidPrivateKey)
+                    }
+                })
+        } else {
+            if fields.is_empty()
+                || fields.len() > 3
+                || fields
+                    .iter()
+                    .any(|(tag, _)| !matches!(*tag, 0x06 | 0xaa | 0xab))
+            {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            }
+            let Some(serialized) = unique_field(&fields, 0x06) else {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            };
+            SoftwareSigningKey::from_serialized(algorithm.serialization_algorithm(), serialized)
+        };
+        let Ok(private_key) = private_key else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        self.keys.insert(
-            command.p2,
-            PivKey {
-                algorithm,
-                pin_policy,
-                touch_policy,
-                origin: ORIGIN_IMPORTED,
-                private_key,
-            },
-        );
+        let key = PivKey {
+            algorithm,
+            pin_policy,
+            touch_policy,
+            origin: ORIGIN_IMPORTED,
+            private_key,
+        };
+        if key.public_template().is_err() {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        self.keys.insert(command.p2, key);
         self.persistent_change = true;
         ResponseApdu::success(Vec::new())
     }
@@ -893,21 +971,33 @@ impl PivApplet {
         let Some(digest) = unique_field(&fields, 0x81) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let maximum_digest = match key.algorithm {
-            PivAlgorithm::EccP256 => 32,
-            PivAlgorithm::EccP384 => 48,
+        let invalid_length = if key.algorithm.rsa_bits().is_some() {
+            digest.len() != key.algorithm.input_length()
+        } else {
+            digest.is_empty() || digest.len() > key.algorithm.input_length()
         };
-        if digest.is_empty() || digest.len() > maximum_digest {
+        if invalid_length {
             return ResponseApdu::status(STATUS_WRONG_LENGTH);
         }
-        let Ok(signature) = key
-            .private_key
-            .sign_prehash(key.algorithm.signing_algorithm(), digest)
-        else {
+        let signature = if key.algorithm.rsa_bits().is_some() {
+            key.private_key
+                .sign_rsa_raw(digest)
+                .map(|signature| signature.into_bytes())
+        } else {
+            key.private_key
+                .sign_prehash(key.algorithm.serialization_algorithm(), digest)
+                .map(|signature| signature.into_bytes())
+        };
+        let Ok(signature) = signature else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
         };
-        let Some(signature) = encode_ecdsa_der(&signature.into_bytes()) else {
-            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        let signature = if key.algorithm.rsa_bits().is_some() {
+            signature
+        } else {
+            let Some(signature) = encode_ecdsa_der(&signature) else {
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+            };
+            signature
         };
         if key.pin_policy == PIN_POLICY_ALWAYS {
             self.pin_verified = false;
@@ -1063,7 +1153,7 @@ fn decode_persistent_keys(
             .bytes()
             .map_err(|_| "persistent PIV key has invalid private material")?;
         let private_key =
-            SoftwareSigningKey::from_serialized(algorithm.signing_algorithm(), serialized)
+            SoftwareSigningKey::from_serialized(algorithm.serialization_algorithm(), serialized)
                 .map_err(|_| "persistent PIV key has invalid private material")?;
         let key = PivKey {
             algorithm,
@@ -1072,6 +1162,9 @@ fn decode_persistent_keys(
             origin,
             private_key,
         };
+        if key.public_template().is_err() {
+            return Err("persistent PIV key does not match its algorithm");
+        }
         if keys.insert(slot, key).is_some() {
             return Err("persistent PIV state contains duplicate keys");
         }
@@ -1158,6 +1251,18 @@ fn encode_der_integer(integer: &[u8]) -> Vec<u8> {
 
 fn writable_object_id(object_id: u32) -> bool {
     object_id <= 0x00ff_ffff && object_id != 0x7e
+}
+
+fn unsigned_integer_equal(left: &[u8], right: &[u8]) -> bool {
+    let left = left
+        .iter()
+        .position(|byte| *byte != 0)
+        .map_or(&[][..], |first| &left[first..]);
+    let right = right
+        .iter()
+        .position(|byte| *byte != 0)
+        .map_or(&[][..], |first| &right[first..]);
+    left == right
 }
 
 fn decode_object_id(request: &[u8]) -> Option<u32> {
@@ -1529,7 +1634,7 @@ mod tests {
                 INS_GENERATE_ASYMMETRIC,
                 0,
                 0x9a,
-                &encode_tlv(0xac, &encode_tlv(0x80, &[0x07])),
+                &encode_tlv(0xac, &encode_tlv(0x80, &[0x08])),
             ))
             .status,
             STATUS_INCORRECT_DATA
@@ -1698,6 +1803,105 @@ mod tests {
                 .transmit(&command(INS_GET_METADATA, 0, 0x82, &[]))
                 .status,
             STATUS_REFERENCE_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn generates_persists_and_uses_a_raw_rsa_key() {
+        let mut piv = PivApplet::new(15, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::Rsa1024 as u8]));
+        let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9e, &generate));
+        assert_eq!(response.status, 0x9000);
+        let public = decode_exact_tlv(&response.data, 0x7f49).unwrap();
+        let fields = decode_tlvs(public).unwrap();
+        assert_eq!(unique_field(&fields, 0x81).unwrap().len(), 128);
+        assert_eq!(unique_field(&fields, 0x82), Some(&[1, 0, 1][..]));
+        let public_key = piv.keys.get(&0x9e).unwrap().private_key.public_key();
+
+        let mut encoded_input = vec![0; 128];
+        encoded_input[1] = 1;
+        encoded_input[127] = 0x55;
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x81, &encoded_input)].concat(),
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::Rsa1024 as u8,
+            0x9e,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        let signature =
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+        assert_eq!(signature.len(), 128);
+        public_key
+            .verify_rsa_raw(&encoded_input, signature)
+            .unwrap();
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(15, [5, 8, 1], &encoded).unwrap();
+        let response = restored.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::Rsa1024 as u8,
+            0x9e,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+    }
+
+    #[test]
+    fn imports_and_validates_rsa_crt_components() {
+        let imported = SoftwareSigningKey::generate_rsa(1_024).unwrap();
+        let components = imported.rsa_crt_components().unwrap();
+        let mut request = Vec::new();
+        for (index, component) in components.iter().enumerate() {
+            push_tlv(&mut request, index as u32 + 1, component);
+        }
+        push_tlv(&mut request, 0xaa, &[PIN_POLICY_NEVER]);
+        let mut piv = PivApplet::new(16, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::Rsa1024 as u8,
+                0x9a,
+                &request,
+            ))
+            .status,
+            0x9000
+        );
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]));
+        let fields = decode_tlvs(&metadata.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x01), Some(&[0x06][..]));
+        assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+
+        let mut corrupted = Vec::new();
+        for (tag, value) in decode_tlvs(&request).unwrap() {
+            let mut value = value.to_vec();
+            if tag == 0x05 {
+                *value.last_mut().unwrap() ^= 1;
+            }
+            push_tlv(&mut corrupted, tag, &value);
+        }
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::Rsa1024 as u8,
+                0x82,
+                &corrupted,
+            ))
+            .status,
+            STATUS_INCORRECT_DATA
         );
     }
 

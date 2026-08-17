@@ -25,7 +25,7 @@ use p384::SecretKey as P384SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::SecretKey as P521SecretKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
-use rsa::traits::PublicKeyParts;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
 use signature::{Signer, Verifier};
@@ -653,6 +653,30 @@ impl SoftwareSigningKey {
             .map(SoftwareSignature)
             .map_err(map_rsa_signing_error)
     }
+
+    /// Export the two primes and precomputed CRT values as unsigned big-endian
+    /// integers in P, Q, dP, dQ, QInv order.
+    pub fn rsa_crt_components(&self) -> Result<[Zeroizing<Vec<u8>>; 5], SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        let [p, q] = key.primes() else {
+            return Err(SoftwareSigningError::InvalidPrivateKey);
+        };
+        let dp = key.dp().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        let dq = key.dq().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        let qinv = key
+            .qinv()
+            .and_then(|value| value.to_biguint())
+            .ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        Ok([
+            Zeroizing::new(p.to_bytes_be()),
+            Zeroizing::new(q.to_bytes_be()),
+            Zeroizing::new(dp.to_bytes_be()),
+            Zeroizing::new(dq.to_bytes_be()),
+            Zeroizing::new(qinv.to_bytes_be()),
+        ])
+    }
 }
 
 fn rsa_sign_message(
@@ -742,7 +766,6 @@ fn random_k256_secret() -> Result<K256SecretKey, SoftwareSigningError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::traits::PrivateKeyParts;
     use sha2::{Digest, Sha256, Sha384, Sha512};
 
     #[test]
