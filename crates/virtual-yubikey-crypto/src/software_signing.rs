@@ -677,6 +677,27 @@ impl SoftwareSigningKey {
             Zeroizing::new(qinv.to_bytes_be()),
         ])
     }
+
+    /// Complete the ECDH private-key operation with an uncompressed SEC1 peer
+    /// point and return the raw shared secret.
+    pub fn derive_ecdh(
+        &self,
+        peer_public_key: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
+        macro_rules! derive {
+            ($ec:ident, $key:expr) => {{
+                let peer = $ec::PublicKey::from_sec1_bytes(peer_public_key)
+                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                let shared = $ec::ecdh::diffie_hellman($key.to_nonzero_scalar(), peer.as_affine());
+                Ok(Zeroizing::new(shared.raw_secret_bytes().to_vec()))
+            }};
+        }
+        match self {
+            Self::P256(key) => derive!(p256, key),
+            Self::P384(key) => derive!(p384, key),
+            _ => Err(SoftwareSigningError::AlgorithmMismatch),
+        }
+    }
 }
 
 fn rsa_sign_message(
@@ -900,5 +921,34 @@ mod tests {
         public_key
             .verify_rsa_raw(&input, signature.as_bytes())
             .unwrap();
+    }
+
+    #[test]
+    fn p256_and_p384_keys_derive_matching_ecdh_secrets() {
+        for algorithm in [
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningAlgorithm::EcdsaP384Sha384,
+        ] {
+            let first = SoftwareSigningKey::generate(algorithm).unwrap();
+            let second = SoftwareSigningKey::generate(algorithm).unwrap();
+            let SoftwarePublicKey::Ec {
+                uncompressed: first_public,
+                ..
+            } = first.public_key()
+            else {
+                unreachable!();
+            };
+            let SoftwarePublicKey::Ec {
+                uncompressed: second_public,
+                ..
+            } = second.public_key()
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                first.derive_ecdh(&second_public).unwrap(),
+                second.derive_ecdh(&first_public).unwrap()
+            );
+        }
     }
 }
