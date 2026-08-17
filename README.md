@@ -32,8 +32,8 @@ hardware.
 
 | Module | Responsibility |
 | --- | --- |
-| `crates/virtual-yubikey-crypto` | Protocol-neutral software signing, verification, key serialization, and ML-DSA controls shared with clients such as `pkcs11rs` |
-| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, Management and FIDO applet state |
+| `crates/virtual-yubikey-crypto` | Protocol-neutral signing, verification, key serialization, RSA encodings, ECDH, and ML-DSA controls shared with clients such as `pkcs11rs` |
+| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, and PIV applet state |
 | `main.rs` | Process orchestration and signal handling |
 | `cli.rs` | Command-line validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
