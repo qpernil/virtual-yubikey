@@ -10,11 +10,11 @@ publish = false
 [dependencies]
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
-k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "precomputed-tables", "std"] }
-p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+p521 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "std", "u64_digit"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"

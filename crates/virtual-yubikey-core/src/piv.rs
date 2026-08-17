@@ -5,9 +5,7 @@ use crate::{
 use std::{collections::BTreeMap, fmt};
 use subtle::ConstantTimeEq;
 use virtual_yubikey_crypto::{
-    software_key_agreement::{
-        SoftwareKeyAgreementAlgorithm, SoftwareKeyAgreementKey, SoftwareKeyAgreementPublicKey,
-    },
+    software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
     software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -185,7 +183,7 @@ impl PivAlgorithm {
 #[derive(Clone)]
 enum PivPrivateKey {
     Signing(SoftwareSigningKey),
-    KeyAgreement(SoftwareKeyAgreementKey),
+    KeyAgreement(SoftwareX25519Key),
 }
 
 impl PivPrivateKey {
@@ -199,7 +197,7 @@ impl PivPrivateKey {
                 .map(Self::Signing)
                 .map_err(|_| ())
         } else if algorithm == PivAlgorithm::X25519 {
-            SoftwareKeyAgreementKey::generate(SoftwareKeyAgreementAlgorithm::X25519)
+            SoftwareX25519Key::generate()
                 .map(Self::KeyAgreement)
                 .map_err(|_| ())
         } else {
@@ -213,12 +211,9 @@ impl PivPrivateKey {
                 .map(Self::Signing)
                 .map_err(|_| ())
         } else if algorithm == PivAlgorithm::X25519 {
-            SoftwareKeyAgreementKey::from_serialized(
-                SoftwareKeyAgreementAlgorithm::X25519,
-                serialized,
-            )
-            .map(Self::KeyAgreement)
-            .map_err(|_| ())
+            SoftwareX25519Key::from_serialized(serialized)
+                .map(Self::KeyAgreement)
+                .map_err(|_| ())
         } else {
             Err(())
         }
@@ -271,14 +266,10 @@ impl PivKey {
                 }
                 _ => Err(()),
             },
-            PivPrivateKey::KeyAgreement(key) => match key.public_key() {
-                SoftwareKeyAgreementPublicKey::X25519(public)
-                    if self.algorithm == PivAlgorithm::X25519 =>
-                {
-                    Ok(encode_tlv(0x86, &public))
-                }
-                _ => Err(()),
-            },
+            PivPrivateKey::KeyAgreement(key) if self.algorithm == PivAlgorithm::X25519 => {
+                Ok(encode_tlv(0x86, &key.public_key()))
+            }
+            PivPrivateKey::KeyAgreement(_) => Err(()),
         }
     }
 }
@@ -1154,11 +1145,11 @@ impl PivApplet {
             }
             let shared_secret = match &key.private_key {
                 PivPrivateKey::Signing(private_key) => {
-                    private_key.derive_ecdh(peer_public_key).map_err(|_| ())
+                    derive_with_signing_key(private_key, peer_public_key).map_err(|_| ())
                 }
-                PivPrivateKey::KeyAgreement(private_key) => private_key
-                    .derive(SoftwareKeyAgreementAlgorithm::X25519, peer_public_key)
-                    .map_err(|_| ()),
+                PivPrivateKey::KeyAgreement(private_key) => {
+                    private_key.derive(peer_public_key).map_err(|_| ())
+                }
             };
             let Ok(shared_secret) = shared_secret else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
@@ -2124,7 +2115,7 @@ mod tests {
         let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x82).unwrap().private_key else {
             unreachable!();
         };
-        let expected = private_key.derive_ecdh(&first_public).unwrap();
+        let expected = derive_with_signing_key(private_key, &first_public).unwrap();
         let request = encode_tlv(
             0x7c,
             &[encode_tlv(0x82, &[]), encode_tlv(0x85, &second_public)].concat(),
@@ -2255,12 +2246,9 @@ mod tests {
             .to_vec();
         assert_eq!(public.len(), 32);
 
-        let peer =
-            SoftwareKeyAgreementKey::generate(SoftwareKeyAgreementAlgorithm::X25519).unwrap();
-        let SoftwareKeyAgreementPublicKey::X25519(peer_public) = peer.public_key();
-        let expected = peer
-            .derive(SoftwareKeyAgreementAlgorithm::X25519, &public)
-            .unwrap();
+        let peer = SoftwareX25519Key::generate().unwrap();
+        let peer_public = peer.public_key();
+        let expected = peer.derive(&public).unwrap();
         let request = encode_tlv(
             0x7c,
             &[encode_tlv(0x82, &[]), encode_tlv(0x85, &peer_public)].concat(),
@@ -2312,10 +2300,8 @@ mod tests {
                 .status,
             0x9000
         );
-        let imported =
-            SoftwareKeyAgreementKey::from_serialized(SoftwareKeyAgreementAlgorithm::X25519, &seed)
-                .unwrap();
-        let SoftwareKeyAgreementPublicKey::X25519(expected_public) = imported.public_key();
+        let imported = SoftwareX25519Key::from_serialized(&seed).unwrap();
+        let expected_public = imported.public_key();
         let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x82, &[]));
         let fields = decode_tlvs(&metadata.data).unwrap();
         assert_eq!(unique_field(&fields, 0x01), Some(&[0xe1][..]));
