@@ -215,8 +215,15 @@ the protocol without replacing the socket transport.
 Other currently implemented CTAP operations complete synchronously. Any future
 operation that waits for user presence or other slow work must use the same
 keepalive/cancellation path. CCID operations that wait must instead emit command
-time-extension responses. HID and CCID already have independent transport
-threads and connection state.
+time-extension responses. One worker-wide clock schedules both transports, but
+never writes a USB endpoint itself. A transport subscribes only for the lifetime
+of a pending operation, with its first deadline measured from that operation's
+start, and its endpoint-owning thread encodes and writes each scheduled frame.
+HID touch waits subscribe immediately and emit `UP_NEEDED` every 100 ms. A CCID
+APDU runs on a scoped command thread; if it is still calculating after 500 ms,
+the CCID endpoint thread emits time-extension data blocks every 500 ms with the
+original slot and sequence number until it can send the final response. HID and
+CCID retain independent transport threads and connection state.
 
 ## Install as a service
 

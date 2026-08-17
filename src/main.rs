@@ -13,6 +13,8 @@ mod functionfs;
 #[cfg(target_os = "linux")]
 mod gadget;
 #[cfg(any(target_os = "linux", test))]
+mod keepalive;
+#[cfg(any(target_os = "linux", test))]
 mod smartcard;
 #[cfg(any(target_os = "linux", test))]
 mod usb_identity;
