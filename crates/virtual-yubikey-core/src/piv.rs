@@ -998,45 +998,58 @@ impl PivApplet {
         };
         if fields.len() != 2
             || unique_field(&fields, 0x82) != Some(&[][..])
-            || fields.iter().any(|(tag, _)| !matches!(*tag, 0x81 | 0x82))
+            || fields
+                .iter()
+                .any(|(tag, _)| !matches!(*tag, 0x81 | 0x82 | 0x85))
         {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
-        let Some(digest) = unique_field(&fields, 0x81) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
-        };
-        let invalid_length = if key.algorithm.rsa_bits().is_some() {
-            digest.len() != key.algorithm.input_length()
-        } else {
-            digest.is_empty() || digest.len() > key.algorithm.input_length()
-        };
-        if invalid_length {
-            return ResponseApdu::status(STATUS_WRONG_LENGTH);
-        }
-        let signature = if key.algorithm.rsa_bits().is_some() {
-            key.private_key
-                .sign_rsa_raw(digest)
-                .map(|signature| signature.into_bytes())
-        } else {
-            key.private_key
-                .sign_prehash(key.algorithm.serialization_algorithm(), digest)
-                .map(|signature| signature.into_bytes())
-        };
-        let Ok(signature) = signature else {
-            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
-        };
-        let signature = if key.algorithm.rsa_bits().is_some() {
-            signature
-        } else {
-            let Some(signature) = encode_ecdsa_der(&signature) else {
+        let result = if let Some(digest) = unique_field(&fields, 0x81) {
+            let invalid_length = if key.algorithm.rsa_bits().is_some() {
+                digest.len() != key.algorithm.input_length()
+            } else {
+                digest.is_empty() || digest.len() > key.algorithm.input_length()
+            };
+            if invalid_length {
+                return ResponseApdu::status(STATUS_WRONG_LENGTH);
+            }
+            let signature = if key.algorithm.rsa_bits().is_some() {
+                key.private_key
+                    .sign_rsa_raw(digest)
+                    .map(|signature| signature.into_bytes())
+            } else {
+                key.private_key
+                    .sign_prehash(key.algorithm.serialization_algorithm(), digest)
+                    .map(|signature| signature.into_bytes())
+            };
+            let Ok(signature) = signature else {
                 return ResponseApdu::status(STATUS_INTERNAL_ERROR);
             };
-            signature
+            if key.algorithm.rsa_bits().is_some() {
+                signature
+            } else {
+                let Some(signature) = encode_ecdsa_der(&signature) else {
+                    return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                };
+                signature
+            }
+        } else if let Some(peer_public_key) = unique_field(&fields, 0x85) {
+            if key.algorithm.rsa_bits().is_some()
+                || peer_public_key.len() != key.algorithm.input_length() * 2 + 1
+            {
+                return ResponseApdu::status(STATUS_WRONG_LENGTH);
+            }
+            let Ok(shared_secret) = key.private_key.derive_ecdh(peer_public_key) else {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            };
+            shared_secret.to_vec()
+        } else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
         if key.pin_policy == PIN_POLICY_ALWAYS {
             self.pin_verified = false;
         }
-        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &signature)))
+        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &result)))
     }
 
     fn set_management_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
@@ -1936,6 +1949,67 @@ mod tests {
             ))
             .status,
             STATUS_INCORRECT_DATA
+        );
+    }
+
+    #[test]
+    fn derives_matching_piv_ecdh_shared_secrets() {
+        let mut piv = PivApplet::new(19, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(
+            0xac,
+            &[
+                encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat(),
+        );
+        for slot in [0x9d, 0x82] {
+            assert_eq!(
+                piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, slot, &generate))
+                    .status,
+                0x9000
+            );
+        }
+        let SoftwarePublicKey::Ec {
+            uncompressed: first_public,
+            ..
+        } = piv.keys.get(&0x9d).unwrap().private_key.public_key()
+        else {
+            unreachable!();
+        };
+        let SoftwarePublicKey::Ec {
+            uncompressed: second_public,
+            ..
+        } = piv.keys.get(&0x82).unwrap().private_key.public_key()
+        else {
+            unreachable!();
+        };
+        let expected = piv
+            .keys
+            .get(&0x82)
+            .unwrap()
+            .private_key
+            .derive_ecdh(&first_public)
+            .unwrap();
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x85, &second_public)].concat(),
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9d,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        assert_eq!(
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82,).unwrap(),
+            expected.as_slice()
         );
     }
 
