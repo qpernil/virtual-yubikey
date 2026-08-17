@@ -36,10 +36,12 @@ For each applet:
 
 ## Cryptographic boundary
 
-Do not create a generic project-specific crypto crate merely to wrap AES, RSA,
-ECC, hashes, signatures, or key agreement. RustCrypto and other established
-upstream crates already provide that common layer. Each project may depend on
-those crates directly and keep small context-specific adapters.
+Keep `virtual-yubikey-crypto` protocol-neutral and limited to behavior both
+repositories actually share: key serialization, public projection, raw and
+profiled signing/verification, RSA encodings, ML-DSA policy, and ECDH. It should
+compose RustCrypto and other established upstream crates rather than duplicate
+their primitives. PIV, FIDO, USB, and PKCS #11 identifiers and policy stay in
+their respective protocol layers.
 
 Share code when it implements substantial protocol behavior that must agree
 byte-for-byte between host and card. Likely candidates are:
@@ -100,9 +102,16 @@ randomness, trust policy, persistence, transport, and error mapping.
 
 ### PIV
 
-- Implement the required PIV object, PIN, key-generation/import, certificate,
-  signing, decryption, and management APDUs in the core.
-- Pass representative `yubico-piv-tool` workflows over USB CCID.
+- The core now implements discovery and metadata, persistent objects and
+  certificates, PIN/PUK and management-key authentication, retry configuration
+  and reset, RSA and P-256/P-384 key generation/import, move/delete, signing,
+  raw RSA private operations, and ECDH.
+- Next, pass representative `yubico-piv-tool` workflows over USB CCID and turn
+  the observed transcripts into transport-level regression tests.
+- Add PIV attestation, CCID touch/cancel integration, biometric policy events,
+  and any newer Edwards/Montgomery algorithms required by a real compatibility
+  client. Until touch is connected, a key configured with a non-`Never` touch
+  policy fails closed.
 - Move `pkcs11rs` tests to the shared core only after standalone compatibility
   is established.
 

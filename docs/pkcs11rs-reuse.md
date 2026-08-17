@@ -22,10 +22,10 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 
 | Component | Responsibility |
 | --- | --- |
-| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management behavior, FIDO routing and logical device state |
+| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO and PIV behavior, and persistent logical device state |
 | `virtual-yubikey-crypto::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
 | `virtual-yubikey-crypto::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
-| `virtual-yubikey-crypto::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, and compact private-key serialization |
+| `virtual-yubikey-crypto::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, ECDH, RSA CRT reconstruction, and compact private-key serialization |
 | `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
 | `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
