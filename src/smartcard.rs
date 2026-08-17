@@ -20,6 +20,29 @@ impl Card {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_piv_persistent_state(
+        serial: u32,
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            device: VirtualYubiKey::from_piv_persistent_state(
+                DeviceProfile::yubikey_5_8_ccid(serial),
+                encoded,
+            )?,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.device.piv_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
+        self.device.take_piv_persistent_change()
+    }
+
     pub(crate) fn reset(&mut self) {
         self.device.reset();
         diagnostics::log(
