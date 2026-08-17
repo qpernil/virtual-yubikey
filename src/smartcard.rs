@@ -1,9 +1,9 @@
 //! Diagnostic adapter from CCID to the transport-neutral logical device.
 
 use crate::diagnostics::{self, Level};
-use virtual_yubikey_core::{
-    Applet, CommandApdu, DeviceProfile, VirtualYubiKey, FIDO2_AID, PIV_AID,
-};
+use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey};
+#[cfg(test)]
+use virtual_yubikey_core::{FIDO2_AID, PIV_AID};
 
 pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
@@ -65,7 +65,9 @@ impl Card {
         }
 
         let response = if command.as_ref().is_ok_and(|command| {
-            command.ins == 0xa4 && command.p1 == 0x04 && command.data == FIDO2_AID
+            command.ins == 0xa4
+                && command.p1 == 0x04
+                && self.device.applet_for_aid(command.data) == Some(Applet::Fido2)
         }) {
             self.device.reset();
             diagnostics::log(
@@ -198,6 +200,10 @@ mod tests {
     fn directs_usb_fido_clients_to_hid() {
         let mut card = Card::new(1);
         assert_eq!(card.transmit(&select(&FIDO2_AID)), [0x6a, 0x82]);
+        assert_eq!(
+            card.transmit(&select(&[0xa0, 0x00, 0x00, 0x06])),
+            [0x6a, 0x82]
+        );
         assert_eq!(card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04, 0]), [0x69, 0x99]);
     }
 
