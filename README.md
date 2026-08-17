@@ -285,8 +285,8 @@ the profile only when it changes.
 
 The supervisor rejects a profile that is not a regular root-owned file. It
 accepts a worker owned by root or its configured unprivileged user, but rejects
-set-ID or group/world-writable executables. Verify the service and physical
-link with:
+set-ID, world-writable, or unrelated-group-writable executables. Verify the
+service and physical link with:
 
 ```sh
 systemctl --no-pager --full status \
