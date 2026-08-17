@@ -2,8 +2,11 @@ use crate::{
     crypto::{aes_ecb_block, Direction, AES_BLOCK_SIZE},
     CommandApdu, ResponseApdu,
 };
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 use subtle::ConstantTimeEq;
+use virtual_yubikey_crypto::software_signing::{
+    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const PIV_AID: [u8; 11] = [
@@ -22,8 +25,10 @@ const DISCOVERY_OBJECT: [u8; 20] = [
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE: u8 = 0x24;
 const INS_RESET_RETRY: u8 = 0x2c;
+const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_AUTHENTICATE: u8 = 0x87;
 const INS_GET_DATA: u8 = 0xcb;
+const INS_PUT_DATA: u8 = 0xdb;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
@@ -51,6 +56,11 @@ const STATUS_REFERENCE_NOT_FOUND: u16 = 0x6a88;
 const STATUS_INSTRUCTION_NOT_SUPPORTED: u16 = 0x6d00;
 const STATUS_CLASS_NOT_SUPPORTED: u16 = 0x6e00;
 const STATUS_INTERNAL_ERROR: u16 = 0x6f00;
+const ORIGIN_GENERATED: u8 = 1;
+const PIN_POLICY_NEVER: u8 = 1;
+const PIN_POLICY_ONCE: u8 = 2;
+const PIN_POLICY_ALWAYS: u8 = 3;
+const TOUCH_POLICY_NEVER: u8 = 1;
 
 pub(crate) fn select_response() -> Vec<u8> {
     PIV_SELECT_RESPONSE.to_vec()
@@ -79,6 +89,70 @@ impl ManagementAlgorithm {
             Self::Aes128 => 16,
             Self::Aes192 => 24,
             Self::Aes256 => 32,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum PivAlgorithm {
+    EccP256 = 0x11,
+    EccP384 = 0x14,
+}
+
+impl PivAlgorithm {
+    fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0x11 => Some(Self::EccP256),
+            0x14 => Some(Self::EccP384),
+            _ => None,
+        }
+    }
+
+    const fn signing_algorithm(self) -> SoftwareSigningAlgorithm {
+        match self {
+            Self::EccP256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            Self::EccP384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
+        }
+    }
+
+    const fn curve(self) -> EcCurve {
+        match self {
+            Self::EccP256 => EcCurve::P256,
+            Self::EccP384 => EcCurve::P384,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PivKey {
+    algorithm: PivAlgorithm,
+    pin_policy: u8,
+    touch_policy: u8,
+    origin: u8,
+    private_key: SoftwareSigningKey,
+}
+
+impl fmt::Debug for PivKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PivKey")
+            .field("algorithm", &self.algorithm)
+            .field("pin_policy", &self.pin_policy)
+            .field("touch_policy", &self.touch_policy)
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PivKey {
+    fn public_template(&self) -> Result<Vec<u8>, ()> {
+        match self.private_key.public_key() {
+            SoftwarePublicKey::Ec {
+                curve,
+                uncompressed,
+            } if curve == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
+            _ => Err(()),
         }
     }
 }
@@ -139,6 +213,8 @@ pub(crate) struct PivApplet {
     management_key: Zeroizing<Vec<u8>>,
     management_challenge: Option<Zeroizing<Vec<u8>>>,
     management_authenticated: bool,
+    objects: BTreeMap<u32, Vec<u8>>,
+    keys: BTreeMap<u8, PivKey>,
     persistent_change: bool,
 }
 
@@ -153,6 +229,8 @@ impl fmt::Debug for PivApplet {
             .field("pin_verified", &self.pin_verified)
             .field("management_algorithm", &self.management_algorithm)
             .field("management_authenticated", &self.management_authenticated)
+            .field("object_count", &self.objects.len())
+            .field("key_count", &self.keys.len())
             .field("persistent_change", &self.persistent_change)
             .finish_non_exhaustive()
     }
@@ -170,6 +248,8 @@ impl PivApplet {
             management_key: Zeroizing::new(FACTORY_MANAGEMENT_KEY.to_vec()),
             management_challenge: None,
             management_authenticated: false,
+            objects: BTreeMap::new(),
+            keys: BTreeMap::new(),
             persistent_change: false,
         }
     }
@@ -200,6 +280,8 @@ impl PivApplet {
         let mut puk_maximum = None;
         let mut management_algorithm = None;
         let mut management_key = None;
+        let mut objects = None;
+        let mut keys = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -267,6 +349,12 @@ impl PivApplet {
                             .to_vec(),
                     ));
                 }
+                11 if objects.is_none() => {
+                    objects = Some(decode_persistent_objects(&mut decoder)?);
+                }
+                12 if keys.is_none() => {
+                    keys = Some(decode_persistent_keys(&mut decoder)?);
+                }
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent PIV state contains invalid data")?,
@@ -275,7 +363,7 @@ impl PivApplet {
         if decoder.position() != encoded.len() {
             return Err("persistent PIV state has trailing data");
         }
-        if version != Some(1) {
+        if version != Some(3) {
             return Err("unsupported persistent PIV state version");
         }
         if stored_serial != Some(serial) {
@@ -320,6 +408,8 @@ impl PivApplet {
             management_key,
             management_challenge: None,
             management_authenticated: false,
+            objects: objects.ok_or("persistent PIV state has no object store")?,
+            keys: keys.ok_or("persistent PIV state has no key store")?,
             persistent_change: false,
         })
     }
@@ -327,11 +417,11 @@ impl PivApplet {
     pub(crate) fn persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
-            .map(10)
+            .map(12)
             .map_err(|_| "cannot encode persistent PIV state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent PIV state")?
-            .u8(1)
+            .u8(3)
             .map_err(|_| "cannot encode persistent PIV state")?
             .u8(2)
             .map_err(|_| "cannot encode persistent PIV state")?
@@ -368,7 +458,48 @@ impl PivApplet {
             .u8(10)
             .map_err(|_| "cannot encode persistent PIV state")?
             .bytes(&self.management_key)
+            .map_err(|_| "cannot encode persistent PIV state")?
+            .u8(11)
+            .map_err(|_| "cannot encode persistent PIV state")?
+            .array(
+                u64::try_from(self.objects.len()).map_err(|_| "too many PIV objects to persist")?,
+            )
             .map_err(|_| "cannot encode persistent PIV state")?;
+        for (object_id, value) in &self.objects {
+            encoder
+                .array(2)
+                .map_err(|_| "cannot encode persistent PIV object")?
+                .u32(*object_id)
+                .map_err(|_| "cannot encode persistent PIV object")?
+                .bytes(value)
+                .map_err(|_| "cannot encode persistent PIV object")?;
+        }
+        encoder
+            .u8(12)
+            .map_err(|_| "cannot encode persistent PIV state")?
+            .array(u64::try_from(self.keys.len()).map_err(|_| "too many PIV keys to persist")?)
+            .map_err(|_| "cannot encode persistent PIV state")?;
+        for (slot, key) in &self.keys {
+            let private_key = key
+                .private_key
+                .serialized()
+                .map_err(|_| "cannot serialize persistent PIV key")?;
+            encoder
+                .array(6)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .u8(*slot)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .u8(key.algorithm as u8)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .u8(key.pin_policy)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .u8(key.touch_policy)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .u8(key.origin)
+                .map_err(|_| "cannot encode persistent PIV key")?
+                .bytes(&private_key)
+                .map_err(|_| "cannot encode persistent PIV key")?;
+        }
         Ok(encoder.into_writer())
     }
 
@@ -390,7 +521,11 @@ impl PivApplet {
             INS_GET_METADATA if command.p1 == 0 && command.data.is_empty() => {
                 self.get_metadata(command.p2)
             }
+            INS_GENERATE_ASYMMETRIC if command.p1 == 0 => {
+                self.generate_asymmetric(command.p2, command.data)
+            }
             INS_GET_DATA if command.p1 == 0x3f && command.p2 == 0xff => self.get_data(command.data),
+            INS_PUT_DATA if command.p1 == 0x3f && command.p2 == 0xff => self.put_data(command.data),
             INS_VERIFY if command.p1 == 0 && command.p2 == REFERENCE_PIN => {
                 self.verify_pin(command.data)
             }
@@ -402,10 +537,15 @@ impl PivApplet {
             }
             INS_AUTHENTICATE => self.authenticate_management(command),
             INS_SET_MANAGEMENT_KEY => self.set_management_key(command),
-            INS_GET_VERSION | INS_GET_SERIAL | INS_GET_METADATA | INS_GET_DATA | INS_VERIFY
-            | INS_CHANGE_REFERENCE | INS_RESET_RETRY => {
-                ResponseApdu::status(STATUS_INCORRECT_PARAMETERS)
-            }
+            INS_GET_VERSION
+            | INS_GET_SERIAL
+            | INS_GET_METADATA
+            | INS_GENERATE_ASYMMETRIC
+            | INS_GET_DATA
+            | INS_PUT_DATA
+            | INS_VERIFY
+            | INS_CHANGE_REFERENCE
+            | INS_RESET_RETRY => ResponseApdu::status(STATUS_INCORRECT_PARAMETERS),
             _ => ResponseApdu::status(STATUS_INSTRUCTION_NOT_SUPPORTED),
         }
     }
@@ -419,6 +559,18 @@ impl PivApplet {
                 push_tlv(&mut data, 0x01, &[self.management_algorithm as u8]);
                 push_tlv(&mut data, 0x02, &[0, 1]);
                 push_tlv(&mut data, 0x05, &[1]);
+            }
+            slot if valid_key_slot(slot) => {
+                let Some(key) = self.keys.get(&slot) else {
+                    return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+                };
+                push_tlv(&mut data, 0x01, &[key.algorithm as u8]);
+                push_tlv(&mut data, 0x02, &[key.pin_policy, key.touch_policy]);
+                push_tlv(&mut data, 0x03, &[key.origin]);
+                let Ok(public) = key.public_template() else {
+                    return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                };
+                push_tlv(&mut data, 0x04, &public);
             }
             _ => return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND),
         }
@@ -435,12 +587,83 @@ impl PivApplet {
         let Some(object_id) = decode_object_id(request) else {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         };
-        if object_id != 0x7e {
+        let mut response = Vec::new();
+        if object_id == 0x7e {
+            push_tlv(&mut response, 0x53, &DISCOVERY_OBJECT);
+        } else if let Some(value) = self.objects.get(&object_id) {
+            push_tlv(&mut response, 0x53, value);
+        } else {
             return ResponseApdu::status(STATUS_NOT_FOUND);
         }
-        let mut response = Vec::new();
-        push_tlv(&mut response, 0x53, &DISCOVERY_OBJECT);
         ResponseApdu::success(response)
+    }
+
+    fn put_data(&mut self, request: &[u8]) -> ResponseApdu {
+        if !self.management_authenticated {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        let Some((object_id, value)) = decode_data_object_request(request) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        if !writable_object_id(object_id) {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        if value.is_empty() {
+            self.objects.remove(&object_id);
+        } else {
+            self.objects.insert(object_id, value.to_vec());
+        }
+        self.persistent_change = true;
+        ResponseApdu::success(Vec::new())
+    }
+
+    fn generate_asymmetric(&mut self, slot: u8, request: &[u8]) -> ResponseApdu {
+        if !self.management_authenticated {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        if !valid_key_slot(slot) {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        let Some(template) = decode_exact_tlv(request, 0xac) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(fields) = decode_tlvs(template) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        if fields.is_empty()
+            || fields.len() > 3
+            || fields
+                .iter()
+                .any(|(tag, _)| !matches!(*tag, 0x80 | 0xaa | 0xab))
+        {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        let Some(algorithm) = unique_byte_field(&fields, 0x80).and_then(PivAlgorithm::from_id)
+        else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(pin_policy) = optional_policy(&fields, 0xaa, default_pin_policy(slot)) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Ok(private_key) = SoftwareSigningKey::generate(algorithm.signing_algorithm()) else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        let key = PivKey {
+            algorithm,
+            pin_policy,
+            touch_policy,
+            origin: ORIGIN_GENERATED,
+            private_key,
+        };
+        let Ok(public) = key.public_template() else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        self.keys.insert(slot, key);
+        self.persistent_change = true;
+        ResponseApdu::success(encode_tlv(0x7f49, &public))
     }
 
     fn verify_pin(&mut self, supplied: &[u8]) -> ResponseApdu {
@@ -631,8 +854,144 @@ fn decode_persistent_pin(
     })
 }
 
+fn decode_persistent_objects(
+    decoder: &mut minicbor::Decoder<'_>,
+) -> Result<BTreeMap<u32, Vec<u8>>, &'static str> {
+    let count = decoder
+        .array()
+        .map_err(|_| "persistent PIV object store is not an array")?
+        .ok_or("indefinite persistent PIV object store is unsupported")?;
+    let mut objects = BTreeMap::new();
+    for _ in 0..count {
+        if decoder
+            .array()
+            .map_err(|_| "persistent PIV object is not an array")?
+            != Some(2)
+        {
+            return Err("persistent PIV object has an invalid shape");
+        }
+        let object_id = decoder
+            .u32()
+            .map_err(|_| "persistent PIV object has an invalid identifier")?;
+        if !writable_object_id(object_id) {
+            return Err("persistent PIV object identifier is unsupported");
+        }
+        let value = decoder
+            .bytes()
+            .map_err(|_| "persistent PIV object has an invalid value")?
+            .to_vec();
+        if objects.insert(object_id, value).is_some() {
+            return Err("persistent PIV state contains duplicate objects");
+        }
+    }
+    Ok(objects)
+}
+
+fn decode_persistent_keys(
+    decoder: &mut minicbor::Decoder<'_>,
+) -> Result<BTreeMap<u8, PivKey>, &'static str> {
+    let count = decoder
+        .array()
+        .map_err(|_| "persistent PIV key store is not an array")?
+        .ok_or("indefinite persistent PIV key store is unsupported")?;
+    let mut keys = BTreeMap::new();
+    for _ in 0..count {
+        if decoder
+            .array()
+            .map_err(|_| "persistent PIV key is not an array")?
+            != Some(6)
+        {
+            return Err("persistent PIV key has an invalid shape");
+        }
+        let slot = decoder
+            .u8()
+            .map_err(|_| "persistent PIV key has an invalid slot")?;
+        if !valid_key_slot(slot) {
+            return Err("persistent PIV key slot is unsupported");
+        }
+        let algorithm = PivAlgorithm::from_id(
+            decoder
+                .u8()
+                .map_err(|_| "persistent PIV key has an invalid algorithm")?,
+        )
+        .ok_or("persistent PIV key algorithm is unsupported")?;
+        let pin_policy = decoder
+            .u8()
+            .map_err(|_| "persistent PIV key has an invalid PIN policy")?;
+        let touch_policy = decoder
+            .u8()
+            .map_err(|_| "persistent PIV key has an invalid touch policy")?;
+        let origin = decoder
+            .u8()
+            .map_err(|_| "persistent PIV key has an invalid origin")?;
+        if !valid_policy(pin_policy) || !valid_policy(touch_policy) || origin != ORIGIN_GENERATED {
+            return Err("persistent PIV key has unsupported metadata");
+        }
+        let serialized = decoder
+            .bytes()
+            .map_err(|_| "persistent PIV key has invalid private material")?;
+        let private_key =
+            SoftwareSigningKey::from_serialized(algorithm.signing_algorithm(), serialized)
+                .map_err(|_| "persistent PIV key has invalid private material")?;
+        let key = PivKey {
+            algorithm,
+            pin_policy,
+            touch_policy,
+            origin,
+            private_key,
+        };
+        if keys.insert(slot, key).is_some() {
+            return Err("persistent PIV state contains duplicate keys");
+        }
+    }
+    Ok(keys)
+}
+
+fn valid_key_slot(slot: u8) -> bool {
+    matches!(slot, 0x9a | 0x9c | 0x9d | 0x9e | 0x82..=0x95)
+}
+
+fn default_pin_policy(slot: u8) -> u8 {
+    match slot {
+        0x9e => PIN_POLICY_NEVER,
+        0x9c => PIN_POLICY_ALWAYS,
+        _ => PIN_POLICY_ONCE,
+    }
+}
+
+fn valid_policy(policy: u8) -> bool {
+    matches!(policy, 1..=3)
+}
+
+fn unique_byte_field(fields: &[(u32, &[u8])], tag: u32) -> Option<u8> {
+    let [value] = unique_field(fields, tag)? else {
+        return None;
+    };
+    Some(*value)
+}
+
+fn optional_policy(fields: &[(u32, &[u8])], tag: u32, default: u8) -> Option<u8> {
+    match fields.iter().filter(|(field, _)| *field == tag).count() {
+        0 => Some(default),
+        1 => match unique_byte_field(fields, tag)? {
+            0 => Some(default),
+            policy if valid_policy(policy) => Some(policy),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn writable_object_id(object_id: u32) -> bool {
+    object_id <= 0x00ff_ffff && object_id != 0x7e
+}
+
 fn decode_object_id(request: &[u8]) -> Option<u32> {
     let value = decode_exact_tlv(request, 0x5c)?;
+    decode_object_id_value(value)
+}
+
+fn decode_object_id_value(value: &[u8]) -> Option<u32> {
     if !(1..=3).contains(&value.len()) {
         return None;
     }
@@ -643,12 +1002,20 @@ fn decode_object_id(request: &[u8]) -> Option<u32> {
     )
 }
 
-fn decode_exact_tlv(input: &[u8], expected_tag: u8) -> Option<&[u8]> {
+fn decode_data_object_request(request: &[u8]) -> Option<(u32, &[u8])> {
+    let fields = decode_tlvs(request)?;
+    if fields.len() != 2 || fields[0].0 != 0x5c || fields[1].0 != 0x53 {
+        return None;
+    }
+    Some((decode_object_id_value(fields[0].1)?, fields[1].1))
+}
+
+fn decode_exact_tlv(input: &[u8], expected_tag: u32) -> Option<&[u8]> {
     let (tag, value, remaining) = decode_tlv(input)?;
     (tag == expected_tag && remaining.is_empty()).then_some(value)
 }
 
-fn decode_tlvs(mut input: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+fn decode_tlvs(mut input: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     let mut fields = Vec::new();
     while !input.is_empty() {
         let (tag, value, remaining) = decode_tlv(input)?;
@@ -658,8 +1025,19 @@ fn decode_tlvs(mut input: &[u8]) -> Option<Vec<(u8, &[u8])>> {
     Some(fields)
 }
 
-fn decode_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
-    let (&tag, input) = input.split_first()?;
+fn decode_tlv(input: &[u8]) -> Option<(u32, &[u8], &[u8])> {
+    let (&first_tag, mut input) = input.split_first()?;
+    let mut tag = u32::from(first_tag);
+    if first_tag & 0x1f == 0x1f {
+        loop {
+            let (&next, remaining) = input.split_first()?;
+            tag = tag.checked_shl(8)? | u32::from(next);
+            input = remaining;
+            if next & 0x80 == 0 {
+                break;
+            }
+        }
+    }
     let (&first_length, input) = input.split_first()?;
     let (length, input) = match first_length {
         value @ 0..=0x7f => (usize::from(value), input),
@@ -678,7 +1056,7 @@ fn decode_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, value, remaining))
 }
 
-fn unique_field<'a>(fields: &[(u8, &'a [u8])], wanted: u8) -> Option<&'a [u8]> {
+fn unique_field<'a>(fields: &[(u32, &'a [u8])], wanted: u32) -> Option<&'a [u8]> {
     let mut matching = fields
         .iter()
         .filter(|(tag, _)| *tag == wanted)
@@ -687,9 +1065,13 @@ fn unique_field<'a>(fields: &[(u8, &'a [u8])], wanted: u8) -> Option<&'a [u8]> {
     matching.next().is_none().then_some(value)
 }
 
-fn encode_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+fn encode_tlv(tag: u32, value: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
-    output.push(tag);
+    match tag {
+        0..=0xff => output.push(tag as u8),
+        0x100..=0xffff => output.extend_from_slice(&(tag as u16).to_be_bytes()),
+        _ => output.extend_from_slice(&tag.to_be_bytes()[1..]),
+    }
     match value.len() {
         length @ 0..=0x7f => output.push(length as u8),
         length @ 0x80..=0xff => output.extend_from_slice(&[0x81, length as u8]),
@@ -702,7 +1084,7 @@ fn encode_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     output
 }
 
-fn push_tlv(output: &mut Vec<u8>, tag: u8, value: &[u8]) {
+fn push_tlv(output: &mut Vec<u8>, tag: u32, value: &[u8]) {
     output.extend_from_slice(&encode_tlv(tag, value));
 }
 
@@ -798,6 +1180,174 @@ mod tests {
             ))
             .status,
             STATUS_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn stores_deletes_and_persists_management_authorized_data_objects() {
+        let mut piv = PivApplet::new(9, [5, 8, 0]);
+        let object_id = [0x5f, 0xc1, 0x05];
+        let value = [0x70, 0x02, 0x30, 0x00];
+        let request = [encode_tlv(0x5c, &object_id), encode_tlv(0x53, &value)].concat();
+        assert_eq!(
+            piv.transmit(&command(INS_PUT_DATA, 0x3f, 0xff, &request))
+                .status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_PUT_DATA, 0x3f, 0xff, &request))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GET_DATA,
+                0x3f,
+                0xff,
+                &encode_tlv(0x5c, &object_id),
+            )),
+            ResponseApdu::success(encode_tlv(0x53, &value))
+        );
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(9, [5, 8, 0], &encoded).unwrap();
+        assert_eq!(
+            restored.transmit(&command(
+                INS_GET_DATA,
+                0x3f,
+                0xff,
+                &encode_tlv(0x5c, &object_id),
+            )),
+            ResponseApdu::success(encode_tlv(0x53, &value))
+        );
+
+        authenticate_management(
+            &mut restored,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let delete = [encode_tlv(0x5c, &object_id), encode_tlv(0x53, &[])].concat();
+        assert_eq!(
+            restored
+                .transmit(&command(INS_PUT_DATA, 0x3f, 0xff, &delete))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            restored
+                .transmit(&command(
+                    INS_GET_DATA,
+                    0x3f,
+                    0xff,
+                    &encode_tlv(0x5c, &object_id),
+                ))
+                .status,
+            STATUS_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn generates_reports_and_persists_ecc_keys() {
+        let mut piv = PivApplet::new(11, [5, 8, 0]);
+        let p256_request = encode_tlv(
+            0xac,
+            &[
+                encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_ALWAYS]),
+                encode_tlv(0xab, &[2]),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9c, &p256_request,))
+                .status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+
+        let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9c, &p256_request));
+        assert_eq!(response.status, 0x9000);
+        let p256_public = decode_exact_tlv(&response.data, 0x7f49).unwrap();
+        let p256_point = decode_exact_tlv(p256_public, 0x86).unwrap();
+        assert_eq!(p256_point.len(), 65);
+        assert_eq!(p256_point[0], 4);
+
+        let p384_request = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::EccP384 as u8]));
+        let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9a, &p384_request));
+        assert_eq!(response.status, 0x9000);
+        let p384_public = decode_exact_tlv(&response.data, 0x7f49).unwrap();
+        let p384_point = decode_exact_tlv(p384_public, 0x86).unwrap();
+        assert_eq!(p384_point.len(), 97);
+        assert_eq!(p384_point[0], 4);
+
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9c, &[])).data;
+        let fields = decode_tlvs(&metadata).unwrap();
+        assert_eq!(unique_field(&fields, 0x01), Some(&[0x11][..]));
+        assert_eq!(unique_field(&fields, 0x02), Some(&[3, 2][..]));
+        assert_eq!(unique_field(&fields, 0x03), Some(&[1][..]));
+        assert_eq!(
+            decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
+            Some(p256_point)
+        );
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(11, [5, 8, 1], &encoded).unwrap();
+        assert_eq!(
+            restored.transmit(&command(INS_GET_METADATA, 0, 0x9c, &[])),
+            ResponseApdu::success(metadata)
+        );
+        let restored_p384 = restored.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]));
+        assert_eq!(restored_p384.status, 0x9000);
+        let fields = decode_tlvs(&restored_p384.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x01), Some(&[0x14][..]));
+        assert_eq!(unique_field(&fields, 0x02), Some(&[2, 1][..]));
+        assert_eq!(
+            decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
+            Some(p384_point)
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_key_generation_parameters() {
+        let mut piv = PivApplet::new(12, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GENERATE_ASYMMETRIC,
+                0,
+                0xf9,
+                &encode_tlv(0xac, &encode_tlv(0x80, &[0x11])),
+            ))
+            .status,
+            STATUS_INCORRECT_PARAMETERS
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GENERATE_ASYMMETRIC,
+                0,
+                0x9a,
+                &encode_tlv(0xac, &encode_tlv(0x80, &[0x07])),
+            ))
+            .status,
+            STATUS_INCORRECT_DATA
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]))
+                .status,
+            STATUS_REFERENCE_NOT_FOUND
         );
     }
 
