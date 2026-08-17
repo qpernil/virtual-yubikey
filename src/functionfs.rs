@@ -21,8 +21,6 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, TryRecvError};
 #[cfg(target_os = "linux")]
-use std::time::Instant;
-#[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
@@ -34,7 +32,7 @@ const O_NONBLOCK_LINUX: i32 = 0x800;
 #[cfg(target_os = "linux")]
 const TOUCH_SOCKET: &str = "/run/virtual-yubikey/touch.sock";
 #[cfg(target_os = "linux")]
-const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
+const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,22 +168,28 @@ impl Endpoints {
             mut ccid_notification_pending,
         } = self;
         let (completion_tx, completion_rx) = mpsc::channel();
+        let keepalive = crate::keepalive::Scheduler::start()?;
 
         // FunctionFS endpoint reads remain synchronous after enable even when
         // opened O_NONBLOCK, so keep the bulk OUT endpoint in its own thread.
         let ccid_completion = completion_tx.clone();
         thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let state_path = piv_state_path.to_owned();
+            let clock = keepalive.handle();
             move || {
-                let _ = ccid_completion
-                    .send(("CCID", serve_ccid(ccid_out, ccid_in, ccid, &state_path)));
+                let _ = ccid_completion.send((
+                    "CCID",
+                    serve_ccid(ccid_out, ccid_in, ccid, &state_path, clock),
+                ));
             }
         })?;
 
         thread::Builder::new().name("fido-hid".to_owned()).spawn({
             let state_path = fido_state_path.to_owned();
+            let clock = keepalive.handle();
             move || {
-                let _ = completion_tx.send(("FIDO HID", serve_hid(hid, fido, serial, &state_path)));
+                let _ = completion_tx
+                    .send(("FIDO HID", serve_hid(hid, fido, serial, &state_path, clock)));
             }
         })?;
 
@@ -243,13 +247,17 @@ fn serve_ccid(
     mut input: File,
     mut ccid: crate::ccid::Device,
     state_path: &Path,
+    clock: crate::keepalive::Handle,
 ) -> io::Result<()> {
     let mut request = [0_u8; MAX_TRANSFER];
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
             Ok(0) => {}
             Ok(length) => {
-                let replies = ccid.receive(&request[..length]);
+                let replies =
+                    ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
+                        write_nonblocking(&mut input, keepalive)
+                    })?;
                 if ccid.take_piv_persistent_change() {
                     persist_piv_state(&ccid, state_path)?;
                 }
@@ -272,6 +280,7 @@ fn serve_hid(
     mut fido: FidoAuthenticator,
     serial: u32,
     state_path: &Path,
+    clock: crate::keepalive::Handle,
 ) -> io::Result<()> {
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
     let mut ctaphid = crate::ctaphid::Device::new(
@@ -340,7 +349,7 @@ fn serve_hid(
                         );
                     }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                        match wait_for_touch(&mut hid, channel) {
+                        match wait_for_touch(&mut hid, channel, &clock) {
                             Ok(true) => fido.exchange(request),
                             Ok(false) => vec![0x2d],
                             Err(error) => {
@@ -420,7 +429,11 @@ impl Drop for TouchSocket {
 }
 
 #[cfg(target_os = "linux")]
-fn wait_for_touch(hid: &mut File, channel: u32) -> io::Result<bool> {
+fn wait_for_touch(
+    hid: &mut File,
+    channel: u32,
+    clock: &crate::keepalive::Handle,
+) -> io::Result<bool> {
     let touch = TouchSocket::bind()?;
     diagnostics::log(
         Level::Info,
@@ -428,7 +441,7 @@ fn wait_for_touch(hid: &mut File, channel: u32) -> io::Result<bool> {
         "user_presence_wait",
         format_args!("channel={channel:08x} socket={TOUCH_SOCKET}"),
     );
-    let mut last_keepalive = Instant::now() - KEEPALIVE_INTERVAL;
+    let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
     let mut signal = [0_u8; 1];
     let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
 
@@ -485,9 +498,8 @@ fn wait_for_touch(hid: &mut File, channel: u32) -> io::Result<bool> {
             }
         }
 
-        if last_keepalive.elapsed() >= KEEPALIVE_INTERVAL {
+        if keepalives.tick_due() {
             hid.write_all(&crate::ctaphid::keepalive(channel))?;
-            last_keepalive = Instant::now();
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -546,14 +558,13 @@ fn persist_fido_state(fido: &FidoAuthenticator, path: &Path) -> io::Result<()> {
 fn load_piv_state(serial: u32, path: &Path) -> io::Result<crate::ccid::Device> {
     match fs::read(path) {
         Ok(encoded) => crate::ccid::Device::from_piv_persistent_state(serial, &encoded)
-            .map(|device| {
+            .inspect(|_| {
                 diagnostics::log(
                     Level::Info,
                     "piv",
                     "state_loaded",
                     format_args!("source=persistent bytes={}", encoded.len()),
                 );
-                device
             })
             .map_err(|error| {
                 io::Error::new(
