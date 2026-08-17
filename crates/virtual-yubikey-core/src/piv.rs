@@ -4,8 +4,11 @@ use crate::{
 };
 use std::{collections::BTreeMap, fmt};
 use subtle::ConstantTimeEq;
-use virtual_yubikey_crypto::software_signing::{
-    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+use virtual_yubikey_crypto::{
+    software_key_agreement::{
+        SoftwareKeyAgreementAlgorithm, SoftwareKeyAgreementKey, SoftwareKeyAgreementPublicKey,
+    },
+    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -107,6 +110,8 @@ enum PivAlgorithm {
     EccP256 = 0x11,
     EccP384 = 0x14,
     Rsa4096 = 0x16,
+    Ed25519 = 0xe0,
+    X25519 = 0xe1,
 }
 
 impl PivAlgorithm {
@@ -118,17 +123,21 @@ impl PivAlgorithm {
             0x11 => Some(Self::EccP256),
             0x14 => Some(Self::EccP384),
             0x16 => Some(Self::Rsa4096),
+            0xe0 => Some(Self::Ed25519),
+            0xe1 => Some(Self::X25519),
             _ => None,
         }
     }
 
-    const fn serialization_algorithm(self) -> SoftwareSigningAlgorithm {
+    const fn signing_algorithm(self) -> Option<SoftwareSigningAlgorithm> {
         match self {
             Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => {
-                SoftwareSigningAlgorithm::RsaPkcs1Sha256
+                Some(SoftwareSigningAlgorithm::RsaPkcs1Sha256)
             }
-            Self::EccP256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            Self::EccP384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
+            Self::EccP256 => Some(SoftwareSigningAlgorithm::EcdsaP256Sha256),
+            Self::EccP384 => Some(SoftwareSigningAlgorithm::EcdsaP384Sha384),
+            Self::Ed25519 => Some(SoftwareSigningAlgorithm::Ed25519),
+            Self::X25519 => None,
         }
     }
 
@@ -137,6 +146,7 @@ impl PivAlgorithm {
             Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => None,
             Self::EccP256 => Some(EcCurve::P256),
             Self::EccP384 => Some(EcCurve::P384),
+            Self::Ed25519 | Self::X25519 => None,
         }
     }
 
@@ -146,7 +156,7 @@ impl PivAlgorithm {
             Self::Rsa2048 => Some(2_048),
             Self::Rsa3072 => Some(3_072),
             Self::Rsa4096 => Some(4_096),
-            Self::EccP256 | Self::EccP384 => None,
+            Self::EccP256 | Self::EccP384 | Self::Ed25519 | Self::X25519 => None,
         }
     }
 
@@ -158,6 +168,66 @@ impl PivAlgorithm {
             Self::Rsa4096 => 512,
             Self::EccP256 => 32,
             Self::EccP384 => 48,
+            Self::Ed25519 | Self::X25519 => 32,
+        }
+    }
+
+    const fn import_tag(self) -> Option<u32> {
+        match self {
+            Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => None,
+            Self::EccP256 | Self::EccP384 => Some(0x06),
+            Self::Ed25519 => Some(0x07),
+            Self::X25519 => Some(0x08),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PivPrivateKey {
+    Signing(SoftwareSigningKey),
+    KeyAgreement(SoftwareKeyAgreementKey),
+}
+
+impl PivPrivateKey {
+    fn generate(algorithm: PivAlgorithm) -> Result<Self, ()> {
+        if let Some(bits) = algorithm.rsa_bits() {
+            SoftwareSigningKey::generate_rsa(bits)
+                .map(Self::Signing)
+                .map_err(|_| ())
+        } else if let Some(signing_algorithm) = algorithm.signing_algorithm() {
+            SoftwareSigningKey::generate(signing_algorithm)
+                .map(Self::Signing)
+                .map_err(|_| ())
+        } else if algorithm == PivAlgorithm::X25519 {
+            SoftwareKeyAgreementKey::generate(SoftwareKeyAgreementAlgorithm::X25519)
+                .map(Self::KeyAgreement)
+                .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    }
+
+    fn from_serialized(algorithm: PivAlgorithm, serialized: &[u8]) -> Result<Self, ()> {
+        if let Some(signing_algorithm) = algorithm.signing_algorithm() {
+            SoftwareSigningKey::from_serialized(signing_algorithm, serialized)
+                .map(Self::Signing)
+                .map_err(|_| ())
+        } else if algorithm == PivAlgorithm::X25519 {
+            SoftwareKeyAgreementKey::from_serialized(
+                SoftwareKeyAgreementAlgorithm::X25519,
+                serialized,
+            )
+            .map(Self::KeyAgreement)
+            .map_err(|_| ())
+        } else {
+            Err(())
+        }
+    }
+
+    fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, ()> {
+        match self {
+            Self::Signing(key) => key.serialized().map_err(|_| ()),
+            Self::KeyAgreement(key) => Ok(key.serialized()),
         }
     }
 }
@@ -168,7 +238,7 @@ struct PivKey {
     pin_policy: u8,
     touch_policy: u8,
     origin: u8,
-    private_key: SoftwareSigningKey,
+    private_key: PivPrivateKey,
 }
 
 impl fmt::Debug for PivKey {
@@ -185,17 +255,30 @@ impl fmt::Debug for PivKey {
 
 impl PivKey {
     fn public_template(&self) -> Result<Vec<u8>, ()> {
-        match self.private_key.public_key() {
-            SoftwarePublicKey::Ec {
-                curve,
-                uncompressed,
-            } if Some(curve) == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
-            SoftwarePublicKey::Rsa { modulus, exponent }
-                if self.algorithm.rsa_bits() == Some(modulus.len() * 8) =>
-            {
-                Ok([encode_tlv(0x81, &modulus), encode_tlv(0x82, &exponent)].concat())
-            }
-            _ => Err(()),
+        match &self.private_key {
+            PivPrivateKey::Signing(key) => match key.public_key() {
+                SoftwarePublicKey::Ec {
+                    curve,
+                    uncompressed,
+                } if Some(curve) == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
+                SoftwarePublicKey::Ed25519(public) if self.algorithm == PivAlgorithm::Ed25519 => {
+                    Ok(encode_tlv(0x86, &public))
+                }
+                SoftwarePublicKey::Rsa { modulus, exponent }
+                    if self.algorithm.rsa_bits() == Some(modulus.len() * 8) =>
+                {
+                    Ok([encode_tlv(0x81, &modulus), encode_tlv(0x82, &exponent)].concat())
+                }
+                _ => Err(()),
+            },
+            PivPrivateKey::KeyAgreement(key) => match key.public_key() {
+                SoftwareKeyAgreementPublicKey::X25519(public)
+                    if self.algorithm == PivAlgorithm::X25519 =>
+                {
+                    Ok(encode_tlv(0x86, &public))
+                }
+                _ => Err(()),
+            },
         }
     }
 }
@@ -701,12 +784,7 @@ impl PivApplet {
         let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let private_key = if let Some(bits) = algorithm.rsa_bits() {
-            SoftwareSigningKey::generate_rsa(bits)
-        } else {
-            SoftwareSigningKey::generate(algorithm.serialization_algorithm())
-        };
-        let Ok(private_key) = private_key else {
+        let Ok(private_key) = PivPrivateKey::generate(algorithm) else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
         };
         let key = PivKey {
@@ -777,19 +855,30 @@ impl PivApplet {
                         Err(virtual_yubikey_crypto::software_signing::SoftwareSigningError::InvalidPrivateKey)
                     }
                 })
+                .map(PivPrivateKey::Signing)
+                .map_err(|_| ())
         } else {
+            let Some(import_tag) = algorithm.import_tag() else {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            };
             if fields.is_empty()
                 || fields.len() > 3
                 || fields
                     .iter()
-                    .any(|(tag, _)| !matches!(*tag, 0x06 | 0xaa | 0xab))
+                    .any(|(tag, _)| !matches!(*tag, 0x06..=0x08 | 0xaa | 0xab))
             {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             }
-            let Some(serialized) = unique_field(&fields, 0x06) else {
+            let Some(serialized) = unique_field(&fields, import_tag) else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             };
-            SoftwareSigningKey::from_serialized(algorithm.serialization_algorithm(), serialized)
+            if fields
+                .iter()
+                .any(|(tag, _)| matches!(*tag, 0x06..=0x08) && *tag != import_tag)
+            {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            }
+            PivPrivateKey::from_serialized(algorithm, serialized)
         };
         let Ok(private_key) = private_key else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
@@ -1005,27 +1094,45 @@ impl PivApplet {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
         let result = if let Some(digest) = unique_field(&fields, 0x81) {
-            let invalid_length = if key.algorithm.rsa_bits().is_some() {
-                digest.len() != key.algorithm.input_length()
-            } else {
-                digest.is_empty() || digest.len() > key.algorithm.input_length()
+            let invalid_length = match key.algorithm {
+                PivAlgorithm::Rsa1024
+                | PivAlgorithm::Rsa2048
+                | PivAlgorithm::Rsa3072
+                | PivAlgorithm::Rsa4096 => digest.len() != key.algorithm.input_length(),
+                PivAlgorithm::EccP256 | PivAlgorithm::EccP384 => {
+                    digest.is_empty() || digest.len() > key.algorithm.input_length()
+                }
+                PivAlgorithm::Ed25519 => false,
+                PivAlgorithm::X25519 => {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                }
             };
             if invalid_length {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH);
             }
+            let PivPrivateKey::Signing(private_key) = &key.private_key else {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            };
             let signature = if key.algorithm.rsa_bits().is_some() {
-                key.private_key
+                private_key
                     .sign_rsa_raw(digest)
                     .map(|signature| signature.into_bytes())
+            } else if key.algorithm == PivAlgorithm::Ed25519 {
+                private_key
+                    .sign_message(SoftwareSigningAlgorithm::Ed25519, digest)
+                    .map(|signature| signature.into_bytes())
             } else {
-                key.private_key
-                    .sign_prehash(key.algorithm.serialization_algorithm(), digest)
+                let Some(algorithm) = key.algorithm.signing_algorithm() else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                };
+                private_key
+                    .sign_prehash(algorithm, digest)
                     .map(|signature| signature.into_bytes())
             };
             let Ok(signature) = signature else {
                 return ResponseApdu::status(STATUS_INTERNAL_ERROR);
             };
-            if key.algorithm.rsa_bits().is_some() {
+            if key.algorithm.rsa_bits().is_some() || key.algorithm == PivAlgorithm::Ed25519 {
                 signature
             } else {
                 let Some(signature) = encode_ecdsa_der(&signature) else {
@@ -1034,12 +1141,26 @@ impl PivApplet {
                 signature
             }
         } else if let Some(peer_public_key) = unique_field(&fields, 0x85) {
+            let expected_length = if key.algorithm == PivAlgorithm::X25519 {
+                32
+            } else {
+                key.algorithm.input_length() * 2 + 1
+            };
             if key.algorithm.rsa_bits().is_some()
-                || peer_public_key.len() != key.algorithm.input_length() * 2 + 1
+                || key.algorithm == PivAlgorithm::Ed25519
+                || peer_public_key.len() != expected_length
             {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH);
             }
-            let Ok(shared_secret) = key.private_key.derive_ecdh(peer_public_key) else {
+            let shared_secret = match &key.private_key {
+                PivPrivateKey::Signing(private_key) => {
+                    private_key.derive_ecdh(peer_public_key).map_err(|_| ())
+                }
+                PivPrivateKey::KeyAgreement(private_key) => private_key
+                    .derive(SoftwareKeyAgreementAlgorithm::X25519, peer_public_key)
+                    .map_err(|_| ()),
+            };
+            let Ok(shared_secret) = shared_secret else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             };
             shared_secret.to_vec()
@@ -1199,9 +1320,8 @@ fn decode_persistent_keys(
         let serialized = decoder
             .bytes()
             .map_err(|_| "persistent PIV key has invalid private material")?;
-        let private_key =
-            SoftwareSigningKey::from_serialized(algorithm.serialization_algorithm(), serialized)
-                .map_err(|_| "persistent PIV key has invalid private material")?;
+        let private_key = PivPrivateKey::from_serialized(algorithm, serialized)
+            .map_err(|_| "persistent PIV key has invalid private material")?;
         let key = PivKey {
             algorithm,
             pin_policy,
@@ -1707,7 +1827,10 @@ mod tests {
                 .status,
             0x9000
         );
-        let public_key = piv.keys.get(&0x9c).unwrap().private_key.public_key();
+        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x9c).unwrap().private_key else {
+            unreachable!();
+        };
+        let public_key = private_key.public_key();
         let digest = [0x42; 32];
         let request = encode_tlv(
             0x7c,
@@ -1868,7 +1991,10 @@ mod tests {
         let fields = decode_tlvs(public).unwrap();
         assert_eq!(unique_field(&fields, 0x81).unwrap().len(), 128);
         assert_eq!(unique_field(&fields, 0x82), Some(&[1, 0, 1][..]));
-        let public_key = piv.keys.get(&0x9e).unwrap().private_key.public_key();
+        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x9e).unwrap().private_key else {
+            unreachable!();
+        };
+        let public_key = private_key.public_key();
 
         let mut encoded_input = vec![0; 128];
         encoded_input[1] = 1;
@@ -1978,24 +2104,27 @@ mod tests {
         let SoftwarePublicKey::Ec {
             uncompressed: first_public,
             ..
-        } = piv.keys.get(&0x9d).unwrap().private_key.public_key()
+        } = (match &piv.keys.get(&0x9d).unwrap().private_key {
+            PivPrivateKey::Signing(key) => key.public_key(),
+            PivPrivateKey::KeyAgreement(_) => unreachable!(),
+        })
         else {
             unreachable!();
         };
         let SoftwarePublicKey::Ec {
             uncompressed: second_public,
             ..
-        } = piv.keys.get(&0x82).unwrap().private_key.public_key()
+        } = (match &piv.keys.get(&0x82).unwrap().private_key {
+            PivPrivateKey::Signing(key) => key.public_key(),
+            PivPrivateKey::KeyAgreement(_) => unreachable!(),
+        })
         else {
             unreachable!();
         };
-        let expected = piv
-            .keys
-            .get(&0x82)
-            .unwrap()
-            .private_key
-            .derive_ecdh(&first_public)
-            .unwrap();
+        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x82).unwrap().private_key else {
+            unreachable!();
+        };
+        let expected = private_key.derive_ecdh(&first_public).unwrap();
         let request = encode_tlv(
             0x7c,
             &[encode_tlv(0x82, &[]), encode_tlv(0x85, &second_public)].concat(),
@@ -2010,6 +2139,206 @@ mod tests {
         assert_eq!(
             decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82,).unwrap(),
             expected.as_slice()
+        );
+    }
+
+    #[test]
+    fn generates_imports_persists_and_signs_with_ed25519() {
+        let mut piv = PivApplet::new(20, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(
+            0xac,
+            &[
+                encode_tlv(0x80, &[PivAlgorithm::Ed25519 as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat(),
+        );
+        let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9e, &generate));
+        assert_eq!(response.status, 0x9000);
+        let public = decode_exact_tlv(decode_exact_tlv(&response.data, 0x7f49).unwrap(), 0x86)
+            .unwrap()
+            .to_vec();
+        assert_eq!(public.len(), 32);
+
+        let message = b"Ed25519 signs the complete PIV message rather than a caller-sized digest";
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x81, message)].concat(),
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::Ed25519 as u8,
+            0x9e,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        let signature =
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(public.as_slice().try_into().unwrap()).unwrap();
+        let signature = ed25519_dalek::Signature::from_slice(signature).unwrap();
+        verifying_key.verify_strict(message, &signature).unwrap();
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(20, [5, 8, 1], &encoded).unwrap();
+        let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x9e, &[]));
+        assert_eq!(metadata.status, 0x9000);
+        let fields = decode_tlvs(&metadata.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x01), Some(&[0xe0][..]));
+        assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_GENERATED][..]));
+        assert_eq!(
+            decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
+            Some(public.as_slice())
+        );
+
+        authenticate_management(
+            &mut restored,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let seed = [0x5a; 32];
+        let import = [
+            encode_tlv(0x07, &seed),
+            encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+        ]
+        .concat();
+        assert_eq!(
+            restored
+                .transmit(&command(
+                    INS_IMPORT_KEY,
+                    PivAlgorithm::Ed25519 as u8,
+                    0x82,
+                    &import,
+                ))
+                .status,
+            0x9000
+        );
+        let imported =
+            SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &seed).unwrap();
+        let SoftwarePublicKey::Ed25519(expected_public) = imported.public_key() else {
+            unreachable!();
+        };
+        let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x82, &[]));
+        let fields = decode_tlvs(&metadata.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+        assert_eq!(
+            decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
+            Some(expected_public.as_slice())
+        );
+    }
+
+    #[test]
+    fn generates_imports_persists_and_agrees_with_x25519() {
+        let mut piv = PivApplet::new(21, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(
+            0xac,
+            &[
+                encode_tlv(0x80, &[PivAlgorithm::X25519 as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat(),
+        );
+        let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9d, &generate));
+        assert_eq!(response.status, 0x9000);
+        let public = decode_exact_tlv(decode_exact_tlv(&response.data, 0x7f49).unwrap(), 0x86)
+            .unwrap()
+            .to_vec();
+        assert_eq!(public.len(), 32);
+
+        let peer =
+            SoftwareKeyAgreementKey::generate(SoftwareKeyAgreementAlgorithm::X25519).unwrap();
+        let SoftwareKeyAgreementPublicKey::X25519(peer_public) = peer.public_key();
+        let expected = peer
+            .derive(SoftwareKeyAgreementAlgorithm::X25519, &public)
+            .unwrap();
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x85, &peer_public)].concat(),
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::X25519 as u8,
+            0x9d,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        let actual =
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+        assert_eq!(actual, expected.as_slice());
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(21, [5, 8, 1], &encoded).unwrap();
+        let response = restored.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::X25519 as u8,
+            0x9d,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        assert_eq!(
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82,),
+            Some(expected.as_slice())
+        );
+
+        authenticate_management(
+            &mut restored,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let seed = [0xa5; 32];
+        let import = [
+            encode_tlv(0x08, &seed),
+            encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+        ]
+        .concat();
+        assert_eq!(
+            restored
+                .transmit(&command(
+                    INS_IMPORT_KEY,
+                    PivAlgorithm::X25519 as u8,
+                    0x82,
+                    &import,
+                ))
+                .status,
+            0x9000
+        );
+        let imported =
+            SoftwareKeyAgreementKey::from_serialized(SoftwareKeyAgreementAlgorithm::X25519, &seed)
+                .unwrap();
+        let SoftwareKeyAgreementPublicKey::X25519(expected_public) = imported.public_key();
+        let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x82, &[]));
+        let fields = decode_tlvs(&metadata.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x01), Some(&[0xe1][..]));
+        assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+        assert_eq!(
+            decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
+            Some(expected_public.as_slice())
+        );
+
+        let noncontributory = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x85, &[0; 32])].concat(),
+        );
+        assert_eq!(
+            restored
+                .transmit(&command(
+                    INS_AUTHENTICATE,
+                    PivAlgorithm::X25519 as u8,
+                    0x82,
+                    &noncontributory,
+                ))
+                .status,
+            STATUS_INCORRECT_DATA
         );
     }
 
