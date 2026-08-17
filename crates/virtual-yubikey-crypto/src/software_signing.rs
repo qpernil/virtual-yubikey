@@ -9,8 +9,9 @@
 use crate::{
     post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
     rsa_signing::{
-        rsa_sign_pkcs1v15_digest, rsa_sign_pss_digest, rsa_verify_pkcs1v15_digest,
-        rsa_verify_pss_digest, RsaHashAlgorithm, RsaPssParameters, RsaSignatureError,
+        rsa_sign_pkcs1v15_digest, rsa_sign_pss_digest, rsa_sign_raw, rsa_verify_pkcs1v15_digest,
+        rsa_verify_pss_digest, rsa_verify_raw, RsaHashAlgorithm, RsaPssParameters,
+        RsaSignatureError,
     },
 };
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -119,6 +120,20 @@ macro_rules! verify_ecdsa_prehash {
 }
 
 impl SoftwarePublicKey {
+    /// Verify a raw RSA private-key operation against the caller-supplied
+    /// modulus-width encoded input.
+    pub fn verify_rsa_raw(
+        &self,
+        input: &[u8],
+        signature: &[u8],
+    ) -> Result<(), SoftwareSigningError> {
+        let Self::Rsa { modulus, exponent } = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        let key = rsa_public_key(modulus, exponent)?;
+        rsa_verify_raw(&key, input, signature).map_err(map_rsa_verification_error)
+    }
+
     /// Verify a signature over an unhashed message.
     ///
     /// ECDSA signatures use fixed-width `r || s`; Ed25519 and ML-DSA use their
@@ -405,6 +420,32 @@ impl SoftwareSigningKey {
         }
     }
 
+    /// Generate an RSA key with an explicit modulus size.
+    pub fn generate_rsa(modulus_bits: usize) -> Result<Self, SoftwareSigningError> {
+        let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, modulus_bits)
+            .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        key.precompute()
+            .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+        Ok(Self::Rsa(Box::new(key)))
+    }
+
+    /// Reconstruct an RSA private key from its two primes and public exponent.
+    pub fn from_rsa_primes(
+        p: &[u8],
+        q: &[u8],
+        public_exponent: &[u8],
+    ) -> Result<Self, SoftwareSigningError> {
+        let mut key = RsaPrivateKey::from_p_q(
+            rsa::BigUint::from_bytes_be(p),
+            rsa::BigUint::from_bytes_be(q),
+            rsa::BigUint::from_bytes_be(public_exponent),
+        )
+        .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+        key.precompute()
+            .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+        Ok(Self::Rsa(Box::new(key)))
+    }
+
     pub fn from_serialized(
         algorithm: SoftwareSigningAlgorithm,
         serialized: &[u8],
@@ -601,6 +642,17 @@ impl SoftwareSigningKey {
         };
         rsa_sign_prehash(algorithm, key, prehash, Some(salt_length)).map(SoftwareSignature)
     }
+
+    /// Perform the raw RSA private-key operation used by protocols that supply
+    /// their own modulus-width encoding.
+    pub fn sign_rsa_raw(&self, input: &[u8]) -> Result<SoftwareSignature, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_sign_raw(key, input)
+            .map(SoftwareSignature)
+            .map_err(map_rsa_signing_error)
+    }
 }
 
 fn rsa_sign_message(
@@ -690,6 +742,7 @@ fn random_k256_secret() -> Result<K256SecretKey, SoftwareSigningError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::traits::PrivateKeyParts;
     use sha2::{Digest, Sha256, Sha384, Sha512};
 
     #[test]
@@ -796,5 +849,33 @@ mod tests {
             public_key.verify_rsa_pss_prehash(algorithm, &prehash, 16, signature.as_bytes()),
             Err(SoftwareSigningError::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn explicit_rsa_sizes_and_prime_import_support_raw_operations() {
+        let key = SoftwareSigningKey::generate_rsa(1_024).unwrap();
+        let public_key = key.public_key();
+        let mut input = vec![0; 128];
+        input[1] = 1;
+        input[127] = 0x42;
+        let signature = key.sign_rsa_raw(&input).unwrap();
+        public_key
+            .verify_rsa_raw(&input, signature.as_bytes())
+            .unwrap();
+
+        let SoftwareSigningKey::Rsa(key) = &key else {
+            unreachable!();
+        };
+        let rebuilt = SoftwareSigningKey::from_rsa_primes(
+            &key.primes()[0].to_bytes_be(),
+            &key.primes()[1].to_bytes_be(),
+            &[1, 0, 1],
+        )
+        .unwrap();
+        assert_eq!(rebuilt.public_key(), public_key);
+        let signature = rebuilt.sign_rsa_raw(&input).unwrap();
+        public_key
+            .verify_rsa_raw(&input, signature.as_bytes())
+            .unwrap();
     }
 }
