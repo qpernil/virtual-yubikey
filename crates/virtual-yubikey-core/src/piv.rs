@@ -535,7 +535,10 @@ impl PivApplet {
             INS_RESET_RETRY if command.p1 == 0 && command.p2 == REFERENCE_PIN => {
                 self.reset_retry(command.data)
             }
-            INS_AUTHENTICATE => self.authenticate_management(command),
+            INS_AUTHENTICATE if command.p2 == REFERENCE_MANAGEMENT_KEY => {
+                self.authenticate_management(command)
+            }
+            INS_AUTHENTICATE => self.general_authenticate(command),
             INS_SET_MANAGEMENT_KEY => self.set_management_key(command),
             INS_GET_VERSION
             | INS_GET_SERIAL
@@ -786,6 +789,56 @@ impl PivApplet {
         ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &cryptogram)))
     }
 
+    fn general_authenticate(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+        let Some(key) = self.keys.get(&command.p2) else {
+            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+        };
+        if command.p1 != key.algorithm as u8 {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        if key.pin_policy >= 4 || key.touch_policy != TOUCH_POLICY_NEVER {
+            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
+        }
+        if key.pin_policy != PIN_POLICY_NEVER && !self.pin_verified {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        let Some(dynamic) = decode_exact_tlv(command.data, 0x7c) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(fields) = decode_tlvs(dynamic) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        if fields.len() != 2
+            || unique_field(&fields, 0x82) != Some(&[][..])
+            || fields.iter().any(|(tag, _)| !matches!(*tag, 0x81 | 0x82))
+        {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        let Some(digest) = unique_field(&fields, 0x81) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let maximum_digest = match key.algorithm {
+            PivAlgorithm::EccP256 => 32,
+            PivAlgorithm::EccP384 => 48,
+        };
+        if digest.is_empty() || digest.len() > maximum_digest {
+            return ResponseApdu::status(STATUS_WRONG_LENGTH);
+        }
+        let Ok(signature) = key
+            .private_key
+            .sign_prehash(key.algorithm.signing_algorithm(), digest)
+        else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        let Some(signature) = encode_ecdsa_der(&signature.into_bytes()) else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        if key.pin_policy == PIN_POLICY_ALWAYS {
+            self.pin_verified = false;
+        }
+        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &signature)))
+    }
+
     fn set_management_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
         if command.p1 != 0xff || !matches!(command.p2, 0xfe | 0xff) {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
@@ -924,7 +977,10 @@ fn decode_persistent_keys(
         let origin = decoder
             .u8()
             .map_err(|_| "persistent PIV key has an invalid origin")?;
-        if !valid_policy(pin_policy) || !valid_policy(touch_policy) || origin != ORIGIN_GENERATED {
+        if !valid_pin_policy(pin_policy)
+            || !valid_touch_policy(touch_policy)
+            || origin != ORIGIN_GENERATED
+        {
             return Err("persistent PIV key has unsupported metadata");
         }
         let serialized = decoder
@@ -959,7 +1015,11 @@ fn default_pin_policy(slot: u8) -> u8 {
     }
 }
 
-fn valid_policy(policy: u8) -> bool {
+fn valid_pin_policy(policy: u8) -> bool {
+    matches!(policy, 1..=5)
+}
+
+fn valid_touch_policy(policy: u8) -> bool {
     matches!(policy, 1..=3)
 }
 
@@ -975,11 +1035,49 @@ fn optional_policy(fields: &[(u32, &[u8])], tag: u32, default: u8) -> Option<u8>
         0 => Some(default),
         1 => match unique_byte_field(fields, tag)? {
             0 => Some(default),
-            policy if valid_policy(policy) => Some(policy),
+            policy
+                if (tag == 0xaa && valid_pin_policy(policy))
+                    || (tag == 0xab && valid_touch_policy(policy)) =>
+            {
+                Some(policy)
+            }
             _ => None,
         },
         _ => None,
     }
+}
+
+fn encode_ecdsa_der(signature: &[u8]) -> Option<Vec<u8>> {
+    if signature.is_empty() || signature.len() % 2 != 0 {
+        return None;
+    }
+    let (r, s) = signature.split_at(signature.len() / 2);
+    let r = encode_der_integer(r);
+    let s = encode_der_integer(s);
+    let content_length = r.len().checked_add(s.len())?;
+    let length = u8::try_from(content_length).ok()?;
+    let mut output = Vec::with_capacity(content_length + 2);
+    output.extend_from_slice(&[0x30, length]);
+    output.extend_from_slice(&r);
+    output.extend_from_slice(&s);
+    Some(output)
+}
+
+fn encode_der_integer(integer: &[u8]) -> Vec<u8> {
+    let integer = integer
+        .iter()
+        .position(|byte| *byte != 0)
+        .map_or(&integer[integer.len().saturating_sub(1)..], |first| {
+            &integer[first..]
+        });
+    let needs_zero = integer.first().is_some_and(|byte| byte & 0x80 != 0);
+    let mut encoded = Vec::with_capacity(integer.len() + 3);
+    encoded.extend_from_slice(&[0x02, (integer.len() + usize::from(needs_zero)) as u8]);
+    if needs_zero {
+        encoded.push(0);
+    }
+    encoded.extend_from_slice(integer);
+    encoded
 }
 
 fn writable_object_id(object_id: u32) -> bool {
@@ -1132,6 +1230,22 @@ mod tests {
             aes_ecb_block(key, cryptogram, Direction::Decrypt).unwrap(),
             host_challenge
         );
+    }
+
+    fn decode_ecdsa_der(signature: &[u8], coordinate_length: usize) -> Vec<u8> {
+        let sequence = decode_exact_tlv(signature, 0x30).unwrap();
+        let fields = decode_tlvs(sequence).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, 0x02);
+        assert_eq!(fields[1].0, 0x02);
+        let mut raw = Vec::with_capacity(coordinate_length * 2);
+        for (_, integer) in fields {
+            let integer = integer.strip_prefix(&[0]).unwrap_or(integer);
+            assert!(integer.len() <= coordinate_length);
+            raw.resize(raw.len() + coordinate_length - integer.len(), 0);
+            raw.extend_from_slice(integer);
+        }
+        raw
     }
 
     #[test]
@@ -1348,6 +1462,69 @@ mod tests {
             piv.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]))
                 .status,
             STATUS_REFERENCE_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn signs_ecc_digests_and_enforces_the_always_pin_policy() {
+        let mut piv = PivApplet::new(13, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]));
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9c, &generate))
+                .status,
+            0x9000
+        );
+        let public_key = piv.keys.get(&0x9c).unwrap().private_key.public_key();
+        let digest = [0x42; 32];
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x81, &digest)].concat(),
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                PivAlgorithm::EccP256 as u8,
+                0x9c,
+                &request,
+            ))
+            .status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9c,
+            &request,
+        ));
+        assert_eq!(response.status, 0x9000);
+        let dynamic = decode_exact_tlv(&response.data, 0x7c).unwrap();
+        let signature = decode_exact_tlv(dynamic, 0x82).unwrap();
+        public_key
+            .verify_prehash(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &digest,
+                &decode_ecdsa_der(signature, 32),
+            )
+            .unwrap();
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                PivAlgorithm::EccP256 as u8,
+                0x9c,
+                &request,
+            ))
+            .status,
+            STATUS_SECURITY_NOT_SATISFIED
         );
     }
 
