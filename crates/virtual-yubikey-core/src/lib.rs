@@ -360,7 +360,7 @@ impl DeviceProfile {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FidoAuthenticator {
     state: fido::FidoState,
 }

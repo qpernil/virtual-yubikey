@@ -60,7 +60,7 @@ impl From<()> for Error {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FidoState {
     device_identifier: [u8; 16],
     pin: Option<Zeroizing<Vec<u8>>>,

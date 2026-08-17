@@ -98,8 +98,8 @@ randomness, trust policy, persistence, transport, and error mapping.
 - Keep registration, credential management, multiple resident signing keys,
   PPUAT, and `previewSign` working through core tests, USB HID, Yubico
   Authenticator, and ignored PKCS #11 hardware tests.
-- Add cancellation/keepalive behavior before introducing operations that wait
-  for touch or other slow work.
+- Keep CTAPHID cancellation and `UP_NEEDED`/`PROCESSING` keepalives covered as
+  new touch-gated or computationally expensive operations are introduced.
 - Keep the atomic on-disk FIDO store explicitly versioned as credential fields
   evolve. A missing file creates an empty 100-slot authenticator; unsupported or
   corrupt state fails closed instead of silently discarding credentials. Test
