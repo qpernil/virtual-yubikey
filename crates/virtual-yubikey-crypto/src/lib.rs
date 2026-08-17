@@ -5,4 +5,5 @@
 
 pub mod post_quantum;
 pub mod rsa_signing;
+pub mod software_key_agreement;
 pub mod software_signing;
