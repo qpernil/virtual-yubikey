@@ -61,6 +61,21 @@ See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the planned FIDO,
 PIV, YubiHSM Auth, secure-channel/Issuer SD, and OpenPGP work, including the
 code-sharing boundary with `pkcs11rs`.
 
+## PIV development status
+
+The logical PIV applet starts empty and persists its state separately from
+FIDO. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
+AES-192 management authentication, retry configuration/reset, data and
+certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
+EC/RSA private-key import, metadata, signing, raw RSA private operations, ECDH,
+and key move/delete. PIV state is written atomically as `piv-<serial>.cbor` in
+the configured state directory.
+
+The remaining PIV compatibility work is hardware transcript validation,
+attestation, and transport integration for touch, cancellation, and simulated
+fingerprint policy. Keys configured to require touch or biometric matching
+currently fail closed instead of bypassing the policy.
+
 ## Credential algorithms
 
 The FIDO applet can create, persist, restore, assert with, and independently
