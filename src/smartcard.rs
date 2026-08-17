@@ -7,7 +7,7 @@ use virtual_yubikey_core::{FIDO2_AID, PIV_AID};
 
 pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
-pub(crate) use virtual_yubikey_core::MANAGEMENT_AID;
+pub(crate) use virtual_yubikey_core::{MANAGEMENT_AID, OPENPGP_AID};
 
 pub(crate) struct Card {
     device: VirtualYubiKey,

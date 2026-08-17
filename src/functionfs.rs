@@ -1023,7 +1023,7 @@ fn ccid_functional_descriptor() -> Vec<u8> {
     descriptor.extend_from_slice(&0_u32.to_le_bytes());
     descriptor.extend_from_slice(&0_u32.to_le_bytes());
     descriptor.extend_from_slice(&0x0004_00fe_u32.to_le_bytes());
-    descriptor.extend_from_slice(&3072_u32.to_le_bytes());
+    descriptor.extend_from_slice(&(crate::ccid::MAX_CCID_MESSAGE_LENGTH as u32).to_le_bytes());
     descriptor.extend_from_slice(&[0xff, 0xff, 0, 0, 0, 1]);
     debug_assert_eq!(descriptor.len(), 0x36);
     descriptor

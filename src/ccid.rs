@@ -31,8 +31,12 @@ const STATUS_ICC_INACTIVE: u8 = 0x01;
 const ERROR_COMMAND_NOT_SUPPORTED: u8 = 0x00;
 const ERROR_BAD_LENGTH: u8 = 0x01;
 const ERROR_SLOT_NOT_EXIST: u8 = 0x05;
+const ERROR_BAD_LEVEL_PARAMETER: u8 = 0x08;
 
-const MAX_CCID_PAYLOAD: usize = 4096;
+const CCID_HEADER_LENGTH: usize = 10;
+pub(crate) const MAX_CCID_MESSAGE_LENGTH: usize = 3072;
+const MAX_CCID_PAYLOAD: usize = MAX_CCID_MESSAGE_LENGTH - CCID_HEADER_LENGTH;
+const MAX_EXTENDED_APDU_LENGTH: usize = 65_544;
 const T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x4d, 0x00, 0xfe, 0x00];
 const TIME_EXTENSION_DELAY: Duration = Duration::from_millis(500);
 const TIME_EXTENSION_INTERVAL: Duration = Duration::from_millis(500);
@@ -42,6 +46,8 @@ pub(crate) struct Device {
     active: bool,
     card: Card,
     buffered: Vec<u8>,
+    chained_command: Vec<u8>,
+    pending_response: Vec<u8>,
 }
 
 impl Device {
@@ -64,6 +70,8 @@ impl Device {
             active: false,
             card,
             buffered: Vec::new(),
+            chained_command: Vec::new(),
+            pending_response: Vec::new(),
         }
     }
 
@@ -107,6 +115,7 @@ impl Device {
             }
             let length = u32::from_le_bytes(self.buffered[1..5].try_into().unwrap()) as usize;
             if length > MAX_CCID_PAYLOAD {
+                let message_type = self.buffered[0];
                 let slot = self.buffered[5];
                 let sequence = self.buffered[6];
                 diagnostics::log(
@@ -119,7 +128,7 @@ impl Device {
                 );
                 self.buffered.clear();
                 responses.push(response(
-                    RDR_TO_PC_SLOT_STATUS,
+                    response_type(message_type),
                     slot,
                     sequence,
                     STATUS_COMMAND_FAILED | self.icc_status(),
@@ -174,6 +183,8 @@ impl Device {
             PC_TO_RDR_ICC_POWER_ON => {
                 self.active = true;
                 self.card.reset();
+                self.chained_command.clear();
+                self.pending_response.clear();
                 diagnostics::log(
                     Level::Info,
                     "ccid",
@@ -193,6 +204,8 @@ impl Device {
             PC_TO_RDR_ICC_POWER_OFF => {
                 self.active = false;
                 self.card.reset();
+                self.chained_command.clear();
+                self.pending_response.clear();
                 diagnostics::log(
                     Level::Info,
                     "ccid",
@@ -266,20 +279,73 @@ impl Device {
                         &[],
                     ));
                 }
-                let apdu_response = if let Some(clock) = clock {
-                    transmit_with_keepalives(&mut self.card, data, slot, sequence, clock, send)?
-                } else {
-                    self.card.transmit(data)
+                let level_parameter = u16::from_le_bytes([message[8], message[9]]);
+                if level_parameter == 0x0010 {
+                    return Ok(self.next_response_block(slot, sequence, data));
+                }
+
+                let command = match level_parameter {
+                    0x0000 => {
+                        self.chained_command.clear();
+                        self.pending_response.clear();
+                        data.to_vec()
+                    }
+                    0x0001 => {
+                        self.pending_response.clear();
+                        self.chained_command.clear();
+                        self.chained_command.extend_from_slice(data);
+                        return Ok(response(
+                            RDR_TO_PC_DATA_BLOCK,
+                            slot,
+                            sequence,
+                            STATUS_ICC_ACTIVE,
+                            0,
+                            0x10,
+                            &[],
+                        ));
+                    }
+                    0x0002 | 0x0003 if !self.chained_command.is_empty() => {
+                        if self.chained_command.len() + data.len() > MAX_EXTENDED_APDU_LENGTH {
+                            self.chained_command.clear();
+                            return Ok(self.failed(
+                                RDR_TO_PC_DATA_BLOCK,
+                                slot,
+                                sequence,
+                                ERROR_BAD_LENGTH,
+                                "chained_apdu_too_large",
+                            ));
+                        }
+                        self.chained_command.extend_from_slice(data);
+                        if level_parameter == 0x0003 {
+                            return Ok(response(
+                                RDR_TO_PC_DATA_BLOCK,
+                                slot,
+                                sequence,
+                                STATUS_ICC_ACTIVE,
+                                0,
+                                0x10,
+                                &[],
+                            ));
+                        }
+                        std::mem::take(&mut self.chained_command)
+                    }
+                    _ => {
+                        self.chained_command.clear();
+                        return Ok(self.failed(
+                            RDR_TO_PC_DATA_BLOCK,
+                            slot,
+                            sequence,
+                            ERROR_BAD_LEVEL_PARAMETER,
+                            "invalid_level_parameter",
+                        ));
+                    }
                 };
-                response(
-                    RDR_TO_PC_DATA_BLOCK,
-                    slot,
-                    sequence,
-                    STATUS_ICC_ACTIVE,
-                    0,
-                    0,
-                    &apdu_response,
-                )
+                let apdu_response = if let Some(clock) = clock {
+                    transmit_with_keepalives(&mut self.card, &command, slot, sequence, clock, send)?
+                } else {
+                    self.card.transmit(&command)
+                };
+                self.first_response_block(slot, sequence, apdu_response)
             }
             PC_TO_RDR_SET_DATA_RATE_AND_CLOCK => {
                 if data.len() != 8 {
@@ -342,6 +408,56 @@ impl Device {
             error,
             0,
             &[],
+        )
+    }
+
+    fn first_response_block(&mut self, slot: u8, sequence: u8, mut data: Vec<u8>) -> Vec<u8> {
+        self.pending_response.clear();
+        let chain_parameter = if data.len() > MAX_CCID_PAYLOAD {
+            self.pending_response = data.split_off(MAX_CCID_PAYLOAD);
+            0x01
+        } else {
+            0x00
+        };
+        response(
+            RDR_TO_PC_DATA_BLOCK,
+            slot,
+            sequence,
+            STATUS_ICC_ACTIVE,
+            0,
+            chain_parameter,
+            &data,
+        )
+    }
+
+    fn next_response_block(&mut self, slot: u8, sequence: u8, data: &[u8]) -> Vec<u8> {
+        if !data.is_empty() || self.pending_response.is_empty() || !self.chained_command.is_empty()
+        {
+            return self.failed(
+                RDR_TO_PC_DATA_BLOCK,
+                slot,
+                sequence,
+                ERROR_BAD_LEVEL_PARAMETER,
+                "unexpected_response_continuation",
+            );
+        }
+
+        let count = self.pending_response.len().min(MAX_CCID_PAYLOAD);
+        let remaining = self.pending_response.split_off(count);
+        let block = std::mem::replace(&mut self.pending_response, remaining);
+        let chain_parameter = if self.pending_response.is_empty() {
+            0x02
+        } else {
+            0x03
+        };
+        response(
+            RDR_TO_PC_DATA_BLOCK,
+            slot,
+            sequence,
+            STATUS_ICC_ACTIVE,
+            0,
+            chain_parameter,
+            &block,
         )
     }
 
@@ -498,7 +614,7 @@ fn request_name(message_type: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smartcard::MANAGEMENT_AID;
+    use crate::smartcard::{MANAGEMENT_AID, OPENPGP_AID};
 
     fn request(message_type: u8, sequence: u8, specific: [u8; 3], data: &[u8]) -> Vec<u8> {
         let mut output = vec![message_type];
@@ -539,6 +655,100 @@ mod tests {
     }
 
     #[test]
+    fn openpgp_large_extended_le_uses_descriptor_bounded_response_chaining() {
+        let mut device = Device::new(1);
+        device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+
+        let select = [
+            vec![0, 0xa4, 4, 0, OPENPGP_AID.len() as u8],
+            OPENPGP_AID.to_vec(),
+            vec![0],
+        ]
+        .concat();
+        let selected = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select));
+        assert_eq!(&selected[0][10..], &[0x90, 0x00]);
+
+        // Extended Le=0000 requests 65,536 bytes. The modeled firmware buffer
+        // caps this to 4,096 bytes, while CCID splits the APDU response into
+        // messages no larger than the descriptor's 3,072-byte maximum.
+        let get_challenge = [0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let first = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &get_challenge));
+        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(
+            u32::from_le_bytes(first[0][1..5].try_into().unwrap()),
+            MAX_CCID_PAYLOAD as u32
+        );
+        assert_eq!(first[0][9], 0x01);
+
+        let last = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 3, [0, 0x10, 0], &[]));
+        assert_eq!(last[0].len(), CCID_HEADER_LENGTH + 1_036);
+        assert_eq!(last[0][9], 0x02);
+        assert_eq!(&last[0][last[0].len() - 2..], &[0x90, 0x00]);
+
+        let mut apdu_response = first[0][CCID_HEADER_LENGTH..].to_vec();
+        apdu_response.extend_from_slice(&last[0][CCID_HEADER_LENGTH..]);
+        assert_eq!(apdu_response.len(), 4_096 + 2);
+        assert_eq!(&apdu_response[apdu_response.len() - 2..], &[0x90, 0x00]);
+        assert!(first[0].len() <= MAX_CCID_MESSAGE_LENGTH);
+        assert!(last[0].len() <= MAX_CCID_MESSAGE_LENGTH);
+    }
+
+    #[test]
+    fn ccid_response_boundary_accounts_for_header_and_status_word() {
+        let mut device = Device::new(1);
+        device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+        let select = [
+            vec![0, 0xa4, 4, 0, OPENPGP_AID.len() as u8],
+            OPENPGP_AID.to_vec(),
+            vec![0],
+        ]
+        .concat();
+        device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select));
+
+        let fits = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf4];
+        let response = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &fits));
+        assert_eq!(response[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(response[0][9], 0x00);
+        assert_eq!(&response[0][response[0].len() - 2..], &[0x90, 0x00]);
+
+        let needs_chain = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf5];
+        let first = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 3, [0, 0, 0], &needs_chain));
+        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(first[0][9], 0x01);
+        let last = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 4, [0, 0x10, 0], &[]));
+        assert_eq!(last[0].len(), CCID_HEADER_LENGTH + 1);
+        assert_eq!(last[0][9], 0x02);
+
+        let mut complete = first[0][CCID_HEADER_LENGTH..].to_vec();
+        complete.extend_from_slice(&last[0][CCID_HEADER_LENGTH..]);
+        assert_eq!(complete.len(), 3_061 + 2);
+        assert_eq!(&complete[complete.len() - 2..], &[0x90, 0x00]);
+    }
+
+    #[test]
+    fn reassembles_descriptor_bounded_command_blocks() {
+        let mut device = Device::new(1);
+        device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+        let select = [
+            vec![0, 0xa4, 4, 0, OPENPGP_AID.len() as u8],
+            OPENPGP_AID.to_vec(),
+            vec![0],
+        ]
+        .concat();
+
+        let first = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 1, 0], &select[..6]));
+        assert!(first[0][CCID_HEADER_LENGTH..].is_empty());
+        assert_eq!(first[0][9], 0x10);
+        let last = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 2, [0, 2, 0], &select[6..]));
+        assert_eq!(&last[0][CCID_HEADER_LENGTH..], &[0x90, 0x00]);
+
+        let challenge = [0x00, 0x84, 0x00, 0x00, 0x20];
+        let response = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 3, [0, 0, 0], &challenge));
+        assert_eq!(response[0].len(), CCID_HEADER_LENGTH + 32 + 2);
+        assert_eq!(&response[0][response[0].len() - 2..], &[0x90, 0x00]);
+    }
+
+    #[test]
     fn rejects_unknown_commands_with_diagnostics_response() {
         let mut device = Device::new(1);
         let response = device.receive(&request(0x72, 9, [0, 0, 0], &[]));
@@ -547,6 +757,26 @@ mod tests {
             response[0][7] & STATUS_COMMAND_FAILED,
             STATUS_COMMAND_FAILED
         );
+    }
+
+    #[test]
+    fn rejects_incoming_messages_larger_than_the_descriptor_limit() {
+        let mut device = Device::new(1);
+        let oversized = request(
+            PC_TO_RDR_XFR_BLOCK,
+            9,
+            [0, 0, 0],
+            &vec![0; MAX_CCID_PAYLOAD + 1],
+        );
+        let response = device.receive(&oversized);
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0][0], RDR_TO_PC_DATA_BLOCK);
+        assert_eq!(
+            response[0][7] & STATUS_COMMAND_FAILED,
+            STATUS_COMMAND_FAILED
+        );
+        assert_eq!(response[0][8], ERROR_BAD_LENGTH);
+        assert!(response[0].len() <= MAX_CCID_MESSAGE_LENGTH);
     }
 
     #[test]
