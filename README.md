@@ -2,7 +2,7 @@
 
 `virtual-yubikey` makes a Raspberry Pi enumerate as a composite FIDO HID and
 CCID YubiKey for compatibility testing. HID carries FIDO/CTAP; CCID exposes
-YubiKey Management. The USB CCID reader deliberately rejects the FIDO AID.
+YubiKey Management and PIV. The USB CCID reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -20,6 +20,7 @@ credential management, resident credentials, and `previewSign`.
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
+| PIV | Persistent objects, PIN/PUK and management authentication, and RSA, NIST EC, Ed25519, and X25519 key operations |
 | FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
 | Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
@@ -32,7 +33,7 @@ hardware.
 
 | Module | Responsibility |
 | --- | --- |
-| `crates/virtual-yubikey-crypto` | Protocol-neutral signing, verification, key serialization, RSA encodings, ECDH, and ML-DSA controls shared with clients such as `pkcs11rs` |
+| `crates/virtual-yubikey-crypto` | Protocol-neutral signing, verification, key serialization, RSA encodings, ECDH/X25519 agreement, and ML-DSA controls shared with clients such as `pkcs11rs` |
 | `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, and PIV applet state |
 | `main.rs` | Process orchestration and signal handling |
 | `cli.rs` | Command-line validation |
@@ -60,6 +61,10 @@ firmware does not implement.
 See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the planned FIDO,
 PIV, YubiHSM Auth, secure-channel/Issuer SD, and OpenPGP work, including the
 code-sharing boundary with `pkcs11rs`.
+The planned content-addressed persistence and cross-token PKCS #11 key identity
+model is recorded separately in
+[`docs/future-storage-model.md`](docs/future-storage-model.md); it is not the
+active on-disk format yet.
 
 ## PIV development status
 
@@ -67,9 +72,10 @@ The logical PIV applet starts empty and persists its state separately from
 FIDO. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
 AES-192 management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
-EC/RSA private-key import, metadata, signing, raw RSA private operations, ECDH,
-and key move/delete. PIV state is written atomically as `piv-<serial>.cbor` in
-the configured state directory.
+Ed25519/X25519 key generation, matching algorithm-specific private-key import,
+metadata, signing, raw RSA private operations, ECDH/X25519 key agreement, and
+key move/delete. PIV state is written atomically as `piv-<serial>.cbor` in the
+configured state directory.
 
 The remaining PIV compatibility work is hardware transcript validation,
 attestation, and transport integration for touch, cancellation, and simulated

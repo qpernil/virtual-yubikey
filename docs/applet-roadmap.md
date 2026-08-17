@@ -43,6 +43,11 @@ compose RustCrypto and other established upstream crates rather than duplicate
 their primitives. PIV, FIDO, USB, and PKCS #11 identifiers and policy stay in
 their respective protocol layers.
 
+The future immutable, content-addressed token generations and cross-token key
+fingerprints are specified in [`future-storage-model.md`](future-storage-model.md).
+That design is deliberately deferred while the current applet behavior is
+finished and remains separate from the active atomic state files.
+
 Share code when it implements substantial protocol behavior that must agree
 byte-for-byte between host and card. Likely candidates are:
 
@@ -105,12 +110,13 @@ randomness, trust policy, persistence, transport, and error mapping.
 - The core now implements discovery and metadata, persistent objects and
   certificates, PIN/PUK and management-key authentication, retry configuration
   and reset, RSA and P-256/P-384 key generation/import, move/delete, signing,
-  raw RSA private operations, and ECDH.
+  raw RSA private operations, ECDH, Ed25519 message signing, and X25519 key
+  agreement. Ed25519 and X25519 support their YubiKey 5.7 generation, import,
+  metadata, public-key, operation, and persistence encodings.
 - Next, pass representative `yubico-piv-tool` workflows over USB CCID and turn
   the observed transcripts into transport-level regression tests.
-- Add PIV attestation, CCID touch/cancel integration, biometric policy events,
-  and any newer Edwards/Montgomery algorithms required by a real compatibility
-  client. Until touch is connected, a key configured with a non-`Never` touch
+- Add PIV attestation, CCID touch/cancel integration, and biometric policy
+  events. Until touch is connected, a key configured with a non-`Never` touch
   policy fails closed.
 - Move `pkcs11rs` tests to the shared core only after standalone compatibility
   is established.
