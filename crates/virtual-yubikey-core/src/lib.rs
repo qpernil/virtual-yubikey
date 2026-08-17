@@ -6,6 +6,7 @@
 
 mod crypto;
 mod fido;
+mod openpgp;
 mod piv;
 mod preview_sign;
 use virtual_yubikey_crypto::{
@@ -14,6 +15,7 @@ use virtual_yubikey_crypto::{
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+pub use openpgp::OPENPGP_AID;
 pub use piv::PIV_AID;
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
 
@@ -180,11 +182,13 @@ const ISO7816_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
 const CAPABILITY_CCID: u16 = 0x0004;
 const CAPABILITY_FIDO2: u16 = 0x0200;
+const CAPABILITY_OPENPGP: u16 = 0x0008;
 const CAPABILITY_PIV: u16 = 0x0010;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
     Management,
+    OpenPgp,
     Piv,
     Fido2,
 }
@@ -193,6 +197,7 @@ impl Applet {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Management => "management",
+            Self::OpenPgp => "openpgp",
             Self::Piv => "piv",
             Self::Fido2 => "fido2",
         }
@@ -202,6 +207,7 @@ impl Applet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppletConfiguration {
     pub management: bool,
+    pub openpgp: bool,
     pub piv: bool,
     pub fido2: bool,
 }
@@ -210,6 +216,7 @@ impl AppletConfiguration {
     pub const fn yubikey_5_8_preview_sign() -> Self {
         Self {
             management: true,
+            openpgp: true,
             piv: true,
             fido2: true,
         }
@@ -218,20 +225,22 @@ impl AppletConfiguration {
     pub const fn contains(self, applet: Applet) -> bool {
         match applet {
             Applet::Management => self.management,
+            Applet::OpenPgp => self.openpgp,
             Applet::Piv => self.piv,
             Applet::Fido2 => self.fido2,
         }
     }
 
     pub const fn usb_capabilities(self) -> u16 {
-        let ccid = if self.management || self.piv || self.fido2 {
+        let ccid = if self.management || self.openpgp || self.piv || self.fido2 {
             CAPABILITY_CCID
         } else {
             0
         };
+        let openpgp = if self.openpgp { CAPABILITY_OPENPGP } else { 0 };
         let piv = if self.piv { CAPABILITY_PIV } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | piv | fido2
+        ccid | openpgp | piv | fido2
     }
 }
 
@@ -501,8 +510,9 @@ impl VirtualYubiKey {
         if aid.is_empty() {
             return None;
         }
-        let candidates: [(Applet, &[u8]); 3] = [
+        let candidates: [(Applet, &[u8]); 4] = [
             (Applet::Management, &MANAGEMENT_AID),
+            (Applet::OpenPgp, &OPENPGP_AID),
             (Applet::Piv, &PIV_AID),
             (Applet::Fido2, &FIDO2_AID),
         ];
@@ -545,6 +555,7 @@ impl VirtualYubiKey {
 
         match self.selected {
             Some(Applet::Management) => self.management(&command).encode(),
+            Some(Applet::OpenPgp) => openpgp::transmit(&command).encode(),
             Some(Applet::Piv) => self.piv.transmit(&command).encode(),
             Some(Applet::Fido2) => self.fido2(&command).encode(),
             None => ResponseApdu::status(0x6999).encode(),
@@ -566,6 +577,7 @@ impl VirtualYubiKey {
                 data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
                 ResponseApdu::success(data)
             }
+            Applet::OpenPgp => ResponseApdu::success(Vec::new()),
             Applet::Piv => ResponseApdu::success(piv::select_response()),
             Applet::Fido2 => ResponseApdu::success(b"U2F_V2".to_vec()),
         }
@@ -753,8 +765,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 2, 20]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 2, 20]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 2, 28]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 2, 28]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }
@@ -774,6 +786,7 @@ mod tests {
             device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x06]),
             Some(Applet::Fido2)
         );
+        assert_eq!(device.applet_for_aid(&OPENPGP_AID), Some(Applet::OpenPgp));
         assert_eq!(device.applet_for_aid(&[0xa0, 0x00, 0x00]), None);
         assert_eq!(device.applet_for_aid(&[]), None);
         assert_eq!(
@@ -796,6 +809,21 @@ mod tests {
             device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 4]),
             [0x69, 0x99]
         );
+    }
+
+    #[test]
+    fn openpgp_get_challenge_honors_extended_le_up_to_its_buffer() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        assert_eq!(device.transmit(&select(&OPENPGP_AID)), [0x90, 0x00]);
+        assert_eq!(device.selected_applet(), Some(Applet::OpenPgp));
+
+        let response = device.transmit(&[0x00, 0x84, 0x00, 0x00, 0x00, 0x0c, 0x00]);
+        assert_eq!(response.len(), 3_072 + 2);
+        assert_eq!(&response[response.len() - 2..], &[0x90, 0x00]);
+
+        let capped = device.transmit(&[0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(capped.len(), openpgp::MAX_RANDOM_RESPONSE_LENGTH + 2);
+        assert_eq!(&capped[capped.len() - 2..], &[0x90, 0x00]);
     }
 
     #[test]
