@@ -264,42 +264,33 @@ with YubiKey-specific extensions matched to the
 
 ## Install as a service
 
-Install both projects after building them. The example profile runs the worker
-as user `per`; edit `profiles/virtual-yubikey.toml` before installing it if the
-Pi uses another unprivileged account.
+Install the generic supervisor once as described in its README. After cloning
+this repository at `/home/per/virtual-yubikey`, build it in place. The example
+profile runs the worker as user `per`; edit its command and `run_as` fields if
+the clone or account is elsewhere.
 
 ```sh
-sudo install -o root -g root -m 0755 \
-  /home/per/usb-gadget-supervisor/target/release/usb-gadget-supervisor \
-  /usr/local/sbin/usb-gadget-supervisor
-sudo install -d -o root -g root -m 0755 \
-  /usr/local/libexec/virtual-yubikey /usr/local/share/virtual-yubikey \
-  /etc/usb-gadget-supervisor/profiles
-sudo install -o root -g root -m 0755 \
-  /home/per/virtual-yubikey/target/release/virtual-yubikey-worker \
-  /usr/local/libexec/virtual-yubikey/virtual-yubikey-worker
-sudo install -o root -g root -m 0755 \
-  /home/per/virtual-yubikey/target/release/virtual-yubikey-touch \
-  /usr/local/bin/virtual-yubikey-touch
-sudo install -o root -g root -m 0644 \
-  /home/per/virtual-yubikey/profiles/fido-hid-report.hex \
-  /usr/local/share/virtual-yubikey/fido-hid-report.hex
+cargo build --release --locked
 sudo install -o root -g root -m 0644 \
   /home/per/virtual-yubikey/profiles/virtual-yubikey.toml \
-  /etc/usb-gadget-supervisor/profiles/virtual-yubikey.toml
-sudo install -o root -g root -m 0644 \
-  /home/per/virtual-yubikey/systemd/virtual-yubikey.service \
-  /etc/systemd/system/virtual-yubikey.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now virtual-yubikey.service
+  /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
+sudo systemctl enable --now \
+  usb-gadget-supervisor@virtual-yubikey.service
 ```
 
-The supervisor rejects a profile, worker, or HID descriptor asset that is not a
-regular root-owned file or is writable by group/other. Verify the service and
-physical link with:
+That is the entire device-specific installation: one profile containing its
+HID descriptor. The worker and touch helper run directly from
+`target/release`. A normal update is `git pull`, rebuild, and restart; reinstall
+the profile only when it changes.
+
+The supervisor rejects a profile that is not a regular root-owned file. It
+accepts a worker owned by root or its configured unprivileged user, but rejects
+set-ID or group/world-writable executables. Verify the service and physical
+link with:
 
 ```sh
-systemctl --no-pager --full status virtual-yubikey.service
+systemctl --no-pager --full status \
+  usb-gadget-supervisor@virtual-yubikey.service
 cat /sys/class/udc/fe980000.usb/state
 ```
 
@@ -310,14 +301,11 @@ Raspberry Pi on 2026-08-17. It preserved the existing FIDO and PIV files,
 enumerated on macOS, served automatic CCID/PIV traffic, recovered from a killed
 worker, and enforced the single-supervisor lock. See the
 [validation record](docs/deployment-validation.md) for exact results and the
-remaining FIDO/PIV application tests.
-
-During an in-place migration, retaining copies of the old executable and unit
-provides a simple rollback while leaving persistent state untouched:
+remaining FIDO/PIV application tests. To run the same installation manually,
+first stop the service and invoke the supervisor with the installed profile:
 
 ```sh
-sudo cp -p /usr/local/sbin/virtual-yubikey \
-  /usr/local/sbin/virtual-yubikey.pre-supervisor
-sudo cp -p /etc/systemd/system/virtual-yubikey.service \
-  /etc/systemd/system/virtual-yubikey.service.pre-supervisor
+sudo systemctl stop usb-gadget-supervisor@virtual-yubikey.service
+sudo /opt/usb-gadget-supervisor/usb-gadget-supervisor \
+  --profile /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
 ```
