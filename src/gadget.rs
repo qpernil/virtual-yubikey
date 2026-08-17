@@ -276,8 +276,12 @@ impl Runtime {
     }
 }
 
-pub(crate) fn state_path(serial: u32) -> PathBuf {
+pub(crate) fn fido_state_path(serial: u32) -> PathBuf {
     Path::new(STATE_DIRECTORY).join(format!("fido-{serial}.cbor"))
+}
+
+pub(crate) fn piv_state_path(serial: u32) -> PathBuf {
+    Path::new(STATE_DIRECTORY).join(format!("piv-{serial}.cbor"))
 }
 
 fn prepare_state_storage(serial: u32, identity: &WorkerIdentity) -> io::Result<()> {
@@ -292,11 +296,15 @@ fn prepare_state_storage(serial: u32, identity: &WorkerIdentity) -> io::Result<(
     chown(directory, Some(identity.uid), Some(identity.gid))?;
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
 
-    let path = state_path(serial);
-    match fs::symlink_metadata(&path) {
+    prepare_state_file(&fido_state_path(serial), identity)?;
+    prepare_state_file(&piv_state_path(serial), identity)
+}
+
+fn prepare_state_file(path: &Path, identity: &WorkerIdentity) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            chown(&path, Some(identity.uid), Some(identity.gid))?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            chown(path, Some(identity.uid), Some(identity.gid))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         }
         Ok(_) => Err(io::Error::other(format!(
             "{} is not a regular state file",

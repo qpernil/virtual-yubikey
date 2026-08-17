@@ -37,11 +37,35 @@ pub(crate) struct Device {
 
 impl Device {
     pub(crate) fn new(serial: u32) -> Self {
+        Self::with_card(Card::new(serial))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_piv_persistent_state(
+        serial: u32,
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        Ok(Self::with_card(Card::from_piv_persistent_state(
+            serial, encoded,
+        )?))
+    }
+
+    fn with_card(card: Card) -> Self {
         Self {
             active: false,
-            card: Card::new(serial),
+            card,
             buffered: Vec::new(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.card.piv_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
+        self.card.take_piv_persistent_change()
     }
 
     pub(crate) fn receive(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
