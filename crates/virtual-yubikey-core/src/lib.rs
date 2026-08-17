@@ -476,6 +476,22 @@ impl VirtualYubiKey {
         self.selected
     }
 
+    pub fn applet_for_aid(&self, aid: &[u8]) -> Option<Applet> {
+        if aid.is_empty() {
+            return None;
+        }
+        let candidates: [(Applet, &[u8]); 3] = [
+            (Applet::Management, &MANAGEMENT_AID),
+            (Applet::Piv, &PIV_AID),
+            (Applet::Fido2, &FIDO2_AID),
+        ];
+        let mut matching = candidates.into_iter().filter(|(applet, candidate)| {
+            self.profile.applets.contains(*applet) && candidate.starts_with(aid)
+        });
+        let (applet, _) = matching.next()?;
+        matching.next().is_none().then_some(applet)
+    }
+
     pub fn power_on(&mut self) {
         self.reset();
     }
@@ -517,21 +533,20 @@ impl VirtualYubiKey {
     fn select(&mut self, aid: &[u8]) -> ResponseApdu {
         self.chained_command.clear();
         self.pending_response.clear();
-        if aid == MANAGEMENT_AID && self.profile.applets.contains(Applet::Management) {
-            self.selected = Some(Applet::Management);
-            let mut data = MANAGEMENT_SELECT_PREFIX.to_vec();
-            let [major, minor, patch] = self.profile.firmware;
-            data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
-            ResponseApdu::success(data)
-        } else if aid == FIDO2_AID && self.profile.applets.contains(Applet::Fido2) {
-            self.selected = Some(Applet::Fido2);
-            ResponseApdu::success(b"U2F_V2".to_vec())
-        } else if piv::matches_aid(aid) && self.profile.applets.contains(Applet::Piv) {
-            self.selected = Some(Applet::Piv);
-            ResponseApdu::success(piv::select_response())
-        } else {
+        let Some(applet) = self.applet_for_aid(aid) else {
             self.selected = None;
-            ResponseApdu::status(0x6a82)
+            return ResponseApdu::status(0x6a82);
+        };
+        self.selected = Some(applet);
+        match applet {
+            Applet::Management => {
+                let mut data = MANAGEMENT_SELECT_PREFIX.to_vec();
+                let [major, minor, patch] = self.profile.firmware;
+                data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
+                ResponseApdu::success(data)
+            }
+            Applet::Piv => ResponseApdu::success(piv::select_response()),
+            Applet::Fido2 => ResponseApdu::success(b"U2F_V2".to_vec()),
         }
     }
 
@@ -721,6 +736,32 @@ mod tests {
         assert!(response.windows(4).any(|value| value == [3, 2, 2, 20]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn selects_any_nonempty_unique_aid_prefix() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        assert_eq!(
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x03]),
+            Some(Applet::Piv)
+        );
+        assert_eq!(
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05]),
+            Some(Applet::Management)
+        );
+        assert_eq!(
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x06]),
+            Some(Applet::Fido2)
+        );
+        assert_eq!(device.applet_for_aid(&[0xa0, 0x00, 0x00]), None);
+        assert_eq!(device.applet_for_aid(&[]), None);
+        assert_eq!(
+            &device.transmit(&select(&[0xa0, 0x00, 0x00, 0x03]))[..2],
+            &[0x61, 0x11]
+        );
+        assert_eq!(device.selected_applet(), Some(Applet::Piv));
+        assert_eq!(device.transmit(&select(&[0xa0, 0x00, 0x00])), [0x6a, 0x82]);
+        assert_eq!(device.selected_applet(), None);
     }
 
     #[test]
