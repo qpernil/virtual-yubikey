@@ -545,15 +545,29 @@ fn persist_fido_state(fido: &FidoAuthenticator, path: &Path) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn load_piv_state(serial: u32, path: &Path) -> io::Result<crate::ccid::Device> {
     match fs::read(path) {
-        Ok(encoded) => {
-            crate::ccid::Device::from_piv_persistent_state(serial, &encoded).map_err(|error| {
+        Ok(encoded) => crate::ccid::Device::from_piv_persistent_state(serial, &encoded)
+            .map(|device| {
+                diagnostics::log(
+                    Level::Info,
+                    "piv",
+                    "state_loaded",
+                    format_args!("source=persistent bytes={}", encoded.len()),
+                );
+                device
+            })
+            .map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("load persistent PIV state {}: {error}", path.display()),
                 )
-            })
-        }
+            }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            diagnostics::log(
+                Level::Info,
+                "piv",
+                "state_loaded",
+                format_args!("source=factory"),
+            );
             Ok(crate::ccid::Device::new(serial))
         }
         Err(error) => Err(with_context(error, "read persistent PIV state")),
@@ -565,7 +579,14 @@ fn persist_piv_state(ccid: &crate::ccid::Device, path: &Path) -> io::Result<()> 
     let encoded = ccid
         .piv_persistent_state()
         .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))?;
-    persist_state(&encoded, path, "PIV")
+    persist_state(&encoded, path, "PIV")?;
+    diagnostics::log(
+        Level::Info,
+        "piv",
+        "state_persisted",
+        format_args!("bytes={}", encoded.len()),
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

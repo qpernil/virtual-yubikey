@@ -146,6 +146,26 @@ impl Card {
                     ),
                 );
             }
+            Some(Applet::Piv) => {
+                let state_changing =
+                    matches!(command.ins, 0x20 | 0x24 | 0x2c | 0xff) && !command.data.is_empty();
+                diagnostics::log(
+                    if state_changing || status != 0x9000 {
+                        Level::Info
+                    } else {
+                        Level::Debug
+                    },
+                    "piv",
+                    piv_instruction_name(command.ins),
+                    format_args!(
+                        "ins={:02x} p1={:02x} p2={:02x} data_length={} sw={status:04x}",
+                        command.ins,
+                        command.p1,
+                        command.p2,
+                        command.data.len()
+                    ),
+                );
+            }
             _ => {}
         }
     }
@@ -169,6 +189,26 @@ impl Card {
                 format_args!("hex={}", diagnostics::hex(response)),
             );
         }
+    }
+}
+
+fn piv_instruction_name(instruction: u8) -> &'static str {
+    match instruction {
+        0x20 => "verify_pin",
+        0x24 => "change_reference",
+        0x2c => "reset_retry",
+        0x47 => "generate_key",
+        0x87 => "authenticate",
+        0xcb => "get_data",
+        0xdb => "put_data",
+        0xf6 => "move_key",
+        0xf7 => "get_metadata",
+        0xf8 => "get_serial",
+        0xf9 => "attest",
+        0xfd => "get_version",
+        0xfe => "import_key",
+        0xff => "set_management_key",
+        _ => "unknown_instruction",
     }
 }
 
