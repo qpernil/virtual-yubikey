@@ -29,9 +29,11 @@ const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_AUTHENTICATE: u8 = 0x87;
 const INS_GET_DATA: u8 = 0xcb;
 const INS_PUT_DATA: u8 = 0xdb;
+const INS_MOVE_KEY: u8 = 0xf6;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
+const INS_IMPORT_KEY: u8 = 0xfe;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 
 const REFERENCE_PIN: u8 = 0x80;
@@ -57,6 +59,7 @@ const STATUS_INSTRUCTION_NOT_SUPPORTED: u16 = 0x6d00;
 const STATUS_CLASS_NOT_SUPPORTED: u16 = 0x6e00;
 const STATUS_INTERNAL_ERROR: u16 = 0x6f00;
 const ORIGIN_GENERATED: u8 = 1;
+const ORIGIN_IMPORTED: u8 = 2;
 const PIN_POLICY_NEVER: u8 = 1;
 const PIN_POLICY_ONCE: u8 = 2;
 const PIN_POLICY_ALWAYS: u8 = 3;
@@ -526,6 +529,7 @@ impl PivApplet {
             }
             INS_GET_DATA if command.p1 == 0x3f && command.p2 == 0xff => self.get_data(command.data),
             INS_PUT_DATA if command.p1 == 0x3f && command.p2 == 0xff => self.put_data(command.data),
+            INS_MOVE_KEY if command.data.is_empty() => self.move_or_delete_key(command),
             INS_VERIFY if command.p1 == 0 && command.p2 == REFERENCE_PIN => {
                 self.verify_pin(command.data)
             }
@@ -539,6 +543,7 @@ impl PivApplet {
                 self.authenticate_management(command)
             }
             INS_AUTHENTICATE => self.general_authenticate(command),
+            INS_IMPORT_KEY => self.import_key(command),
             INS_SET_MANAGEMENT_KEY => self.set_management_key(command),
             INS_GET_VERSION
             | INS_GET_SERIAL
@@ -546,6 +551,7 @@ impl PivApplet {
             | INS_GENERATE_ASYMMETRIC
             | INS_GET_DATA
             | INS_PUT_DATA
+            | INS_MOVE_KEY
             | INS_VERIFY
             | INS_CHANGE_REFERENCE
             | INS_RESET_RETRY => ResponseApdu::status(STATUS_INCORRECT_PARAMETERS),
@@ -667,6 +673,76 @@ impl PivApplet {
         self.keys.insert(slot, key);
         self.persistent_change = true;
         ResponseApdu::success(encode_tlv(0x7f49, &public))
+    }
+
+    fn import_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+        if !self.management_authenticated {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        if !valid_key_slot(command.p2) {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        let Some(algorithm) = PivAlgorithm::from_id(command.p1) else {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        };
+        let Some(fields) = decode_tlvs(command.data) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        if fields.is_empty()
+            || fields.len() > 3
+            || fields
+                .iter()
+                .any(|(tag, _)| !matches!(*tag, 0x06 | 0xaa | 0xab))
+        {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        let Some(serialized) = unique_field(&fields, 0x06) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(pin_policy) = optional_policy(&fields, 0xaa, default_pin_policy(command.p2))
+        else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Ok(private_key) =
+            SoftwareSigningKey::from_serialized(algorithm.signing_algorithm(), serialized)
+        else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        self.keys.insert(
+            command.p2,
+            PivKey {
+                algorithm,
+                pin_policy,
+                touch_policy,
+                origin: ORIGIN_IMPORTED,
+                private_key,
+            },
+        );
+        self.persistent_change = true;
+        ResponseApdu::success(Vec::new())
+    }
+
+    fn move_or_delete_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+        if !self.management_authenticated {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        if !valid_key_slot(command.p2) {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        if command.p1 != 0xff && !valid_key_slot(command.p1) {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        let Some(key) = self.keys.remove(&command.p2) else {
+            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+        };
+        if command.p1 != 0xff {
+            self.keys.insert(command.p1, key);
+        }
+        self.persistent_change = true;
+        ResponseApdu::success(Vec::new())
     }
 
     fn verify_pin(&mut self, supplied: &[u8]) -> ResponseApdu {
@@ -979,7 +1055,7 @@ fn decode_persistent_keys(
             .map_err(|_| "persistent PIV key has an invalid origin")?;
         if !valid_pin_policy(pin_policy)
             || !valid_touch_policy(touch_policy)
-            || origin != ORIGIN_GENERATED
+            || !matches!(origin, ORIGIN_GENERATED | ORIGIN_IMPORTED)
         {
             return Err("persistent PIV key has unsupported metadata");
         }
@@ -1525,6 +1601,103 @@ mod tests {
             ))
             .status,
             STATUS_SECURITY_NOT_SATISFIED
+        );
+    }
+
+    #[test]
+    fn imports_moves_uses_and_deletes_an_ecc_key() {
+        let imported =
+            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        let public_key = imported.public_key();
+        let private_key = imported.serialized().unwrap();
+        let request = [
+            encode_tlv(0x06, &private_key),
+            encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            encode_tlv(0xab, &[TOUCH_POLICY_NEVER]),
+        ]
+        .concat();
+        let mut piv = PivApplet::new(14, [5, 8, 0]);
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::EccP256 as u8,
+                0x9a,
+                &request,
+            ))
+            .status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::EccP256 as u8,
+                0x9a,
+                &request,
+            ))
+            .status,
+            0x9000
+        );
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]));
+        let fields = decode_tlvs(&metadata.data).unwrap();
+        assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+
+        let digest = [0x33; 32];
+        let request = encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x81, &digest)].concat(),
+        );
+        let response = piv.transmit(&command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9a,
+            &request,
+        ));
+        let signature =
+            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+        public_key
+            .verify_prehash(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &digest,
+                &decode_ecdsa_der(signature, 32),
+            )
+            .unwrap();
+
+        assert_eq!(
+            piv.transmit(&command(INS_MOVE_KEY, 0x82, 0x9a, &[])).status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GET_METADATA, 0, 0x9a, &[]))
+                .status,
+            STATUS_REFERENCE_NOT_FOUND
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GET_METADATA, 0, 0x82, &[])),
+            metadata
+        );
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(14, [5, 8, 0], &encoded).unwrap();
+        authenticate_management(
+            &mut restored,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            restored
+                .transmit(&command(INS_MOVE_KEY, 0xff, 0x82, &[]))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            restored
+                .transmit(&command(INS_GET_METADATA, 0, 0x82, &[]))
+                .status,
+            STATUS_REFERENCE_NOT_FOUND
         );
     }
 
