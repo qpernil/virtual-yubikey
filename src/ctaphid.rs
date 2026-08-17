@@ -27,7 +27,12 @@ const ERR_INVALID_CHANNEL: u8 = 0x0b;
 
 const CAPABILITY_CBOR: u8 = 0x04;
 const CAPABILITY_NMSG: u8 = 0x08;
-const KEEPALIVE_STATUS_UP_NEEDED: u8 = 0x02;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeepaliveStatus {
+    Processing = 0x01,
+    UserPresenceNeeded = 0x02,
+}
 
 #[derive(Debug)]
 struct Transaction {
@@ -223,8 +228,8 @@ fn encode_message(channel: u32, command: u8, payload: &[u8]) -> Vec<[u8; REPORT_
     reports
 }
 
-pub(crate) fn keepalive(channel: u32) -> [u8; REPORT_SIZE] {
-    encode_message(channel, CMD_KEEPALIVE, &[KEEPALIVE_STATUS_UP_NEEDED])[0]
+pub(crate) fn keepalive(channel: u32, status: KeepaliveStatus) -> [u8; REPORT_SIZE] {
+    encode_message(channel, CMD_KEEPALIVE, &[status as u8])[0]
 }
 
 pub(crate) fn is_cancel(report: &[u8; REPORT_SIZE], channel: u32) -> bool {
@@ -358,13 +363,31 @@ mod tests {
     }
 
     #[test]
-    fn encodes_user_presence_keepalive_and_recognizes_cancel() {
+    fn encodes_keepalive_statuses_and_recognizes_cancel() {
         let channel = 0x0102_0304;
-        let keepalive = keepalive(channel);
-        assert_eq!(&keepalive[..8], &[1, 2, 3, 4, 0xbb, 0, 1, 2]);
+        let processing = keepalive(channel, KeepaliveStatus::Processing);
+        assert_eq!(&processing[..8], &[1, 2, 3, 4, 0xbb, 0, 1, 1]);
+        let presence = keepalive(channel, KeepaliveStatus::UserPresenceNeeded);
+        assert_eq!(&presence[..8], &[1, 2, 3, 4, 0xbb, 0, 1, 2]);
 
         let cancel = initial(channel, CMD_CANCEL, &[]);
         assert!(is_cancel(&cancel, channel));
         assert!(!is_cancel(&cancel, channel + 1));
+    }
+
+    #[test]
+    fn cancellation_status_belongs_to_the_original_cbor_response() {
+        let mut device = device();
+        let init = device.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_| unreachable!(),
+        );
+        let channel = assigned_channel(&init);
+
+        let cancelled = device.receive(&initial(channel, CMD_CBOR, &[4]), |_| vec![0x2d]);
+        assert_eq!(&cancelled[0][..8], &[0, 0, 0, 1, 0x90, 0, 1, 0x2d]);
+
+        let cancel_command = device.receive(&initial(channel, CMD_CANCEL, &[]), |_| unreachable!());
+        assert!(cancel_command.is_empty());
     }
 }

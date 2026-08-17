@@ -212,18 +212,34 @@ payloads start with a one-byte command (`T` is touch); unknown commands are
 ignored so future simulated fingerprint commands and their payloads can extend
 the protocol without replacing the socket transport.
 
-Other currently implemented CTAP operations complete synchronously. Any future
-operation that waits for user presence or other slow work must use the same
-keepalive/cancellation path. CCID operations that wait must instead emit command
-time-extension responses. One worker-wide clock schedules both transports, but
-never writes a USB endpoint itself. A transport subscribes only for the lifetime
-of a pending operation, with its first deadline measured from that operation's
-start, and its endpoint-owning thread encodes and writes each scheduled frame.
-HID touch waits subscribe immediately and emit `UP_NEEDED` every 100 ms. A CCID
-APDU runs on a scoped command thread; if it is still calculating after 500 ms,
-the CCID endpoint thread emits time-extension data blocks every 500 ms with the
-original slot and sequence number until it can send the final response. HID and
-CCID retain independent transport threads and connection state.
+Every CTAP operation runs against a staged clone of the logical authenticator.
+If processing lasts 100 ms, the HID endpoint starts emitting
+`KEEPALIVE(PROCESSING)` every 100 ms until it can return the final CBOR response.
+An active-channel `CANCEL` receives no response of its own; it makes the original
+CBOR request return `CTAP2_ERR_KEEPALIVE_CANCEL`, and the staged state is
+discarded. Touch waits subscribe immediately and emit `KEEPALIVE(UP_NEEDED)`
+every 100 ms. After touch, the status changes to `PROCESSING` if computation
+continues. These status values, response ownership, and cancellation semantics
+follow the CTAPHID transport specification.
+
+CCID operations use the separate CCID time-extension mechanism. A PIV APDU runs
+on a scoped command thread; if it is still calculating after 500 ms, the CCID
+endpoint thread emits `RDR_to_PC_DataBlock` time-extension frames every 500 ms
+with the original slot and sequence number until it can send the final response.
+One worker-wide clock schedules both transports but never writes a USB endpoint
+itself. A transport subscribes only for the lifetime of a pending operation,
+with its first deadline measured from that operation's start. HID and CCID keep
+independent endpoint-owner threads, framing, cancellation rules, and connection
+state.
+
+Transport behavior is checked against the
+[FIDO CTAP specification](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
+and the
+[USB CCID specification](https://www.usb.org/sites/default/files/DWG_Smart-Card_CCID_Rev110.pdf).
+PIV APDUs follow
+[NIST SP 800-73 Part 2](https://csrc.nist.gov/pubs/sp/800/73/pt2/5/final),
+with YubiKey-specific extensions matched to the
+[Yubico PIV command reference](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html).
 
 ## Install as a service
 

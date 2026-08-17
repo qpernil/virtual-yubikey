@@ -21,7 +21,10 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, TryRecvError};
 #[cfg(target_os = "linux")]
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
 
@@ -33,6 +36,10 @@ const O_NONBLOCK_LINUX: i32 = 0x800;
 const TOUCH_SOCKET: &str = "/run/virtual-yubikey/touch.sock";
 #[cfg(target_os = "linux")]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(target_os = "linux")]
+const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
+#[cfg(target_os = "linux")]
+const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,7 +316,7 @@ fn serve_hid(
                     ),
                 );
                 let mut persistence_error = None;
-                let mut presence_error = None;
+                let mut command_error = None;
                 let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
                 let replies = ctaphid.receive(&report, |request| {
                     let command = request.first().copied().unwrap_or_default();
@@ -350,15 +357,31 @@ fn serve_hid(
                     }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
                         match wait_for_touch(&mut hid, channel, &clock) {
-                            Ok(true) => fido.exchange(request),
+                            Ok(true) => match exchange_fido_with_keepalives(
+                                &mut hid, &mut fido, request, channel, true, &clock,
+                            ) {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    command_error = Some(error);
+                                    vec![0x7f]
+                                }
+                            },
                             Ok(false) => vec![0x2d],
                             Err(error) => {
-                                presence_error = Some(error);
+                                command_error = Some(error);
                                 vec![0x7f]
                             }
                         }
                     } else {
-                        fido.exchange(request)
+                        match exchange_fido_with_keepalives(
+                            &mut hid, &mut fido, request, channel, false, &clock,
+                        ) {
+                            Ok(response) => response,
+                            Err(error) => {
+                                command_error = Some(error);
+                                vec![0x7f]
+                            }
+                        }
                     };
                     if fido.take_persistent_change() {
                         if let Err(error) = persist_fido_state(&fido, state_path) {
@@ -385,7 +408,7 @@ fn serve_hid(
                 if let Some(error) = persistence_error {
                     return Err(error);
                 }
-                if let Some(error) = presence_error {
+                if let Some(error) = command_error {
                     return Err(error);
                 }
                 for reply in replies {
@@ -398,6 +421,115 @@ fn serve_hid(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_fido_with_keepalives(
+    hid: &mut File,
+    fido: &mut FidoAuthenticator,
+    request: &[u8],
+    channel: u32,
+    follows_user_presence: bool,
+    clock: &crate::keepalive::Handle,
+) -> io::Result<Vec<u8>> {
+    let initial_delay = if follows_user_presence {
+        Duration::ZERO
+    } else {
+        HID_PROCESSING_KEEPALIVE_DELAY
+    };
+    let keepalives = clock.subscribe(initial_delay, HID_KEEPALIVE_INTERVAL)?;
+    let started = Instant::now();
+    let mut staged = fido.clone();
+    let request = request.to_vec();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("fido-command".to_owned())
+        .spawn(move || {
+            let response = staged.exchange(&request);
+            let _ = result_tx.send((staged, response));
+        })?;
+
+    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+    let mut processing_keepalives = 0_u64;
+    loop {
+        match result_rx.try_recv() {
+            Ok((completed, response)) => {
+                *fido = completed;
+                if processing_keepalives != 0 {
+                    diagnostics::log(
+                        Level::Info,
+                        "ctaphid",
+                        "processing_complete",
+                        format_args!(
+                            "channel={channel:08x} keepalives={processing_keepalives} elapsed_ms={}",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                return Ok(response);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Err(io::Error::other("FIDO command thread returned no response"));
+            }
+        }
+
+        if input_ready(hid)? {
+            match hid.read(&mut report) {
+                Ok(length) if length == report.len() => {
+                    if crate::ctaphid::is_cancel(&report, channel) {
+                        diagnostics::log(
+                            Level::Info,
+                            "ctaphid",
+                            "processing_cancelled",
+                            format_args!(
+                                "channel={channel:08x} elapsed_ms={}",
+                                started.elapsed().as_millis()
+                            ),
+                        );
+                        return Ok(vec![0x2d]);
+                    }
+                    diagnostics::log(
+                        Level::Debug,
+                        "ctaphid",
+                        "report_ignored_while_processing",
+                        format_args!(
+                            "channel={:08x} command={:02x}",
+                            u32::from_be_bytes(report[0..4].try_into().unwrap()),
+                            report[4]
+                        ),
+                    );
+                }
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "HID closed")),
+                Ok(length) => diagnostics::log(
+                    Level::Info,
+                    "ctaphid",
+                    "report_rejected",
+                    format_args!("reason=invalid_length length={length}"),
+                ),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if endpoint_is_gone(&error) => return Err(error),
+                Err(error) => return Err(error),
+            }
+        }
+
+        if keepalives.tick_due() {
+            if processing_keepalives == 0 {
+                diagnostics::log(
+                    Level::Info,
+                    "ctaphid",
+                    "processing_started",
+                    format_args!("channel={channel:08x}"),
+                );
+            }
+            hid.write_all(&crate::ctaphid::keepalive(
+                channel,
+                crate::ctaphid::KeepaliveStatus::Processing,
+            ))?;
+            processing_keepalives += 1;
+        }
+        thread::sleep(HID_COMMAND_POLL_INTERVAL);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -499,7 +631,10 @@ fn wait_for_touch(
         }
 
         if keepalives.tick_due() {
-            hid.write_all(&crate::ctaphid::keepalive(channel))?;
+            hid.write_all(&crate::ctaphid::keepalive(
+                channel,
+                crate::ctaphid::KeepaliveStatus::UserPresenceNeeded,
+            ))?;
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -659,6 +794,7 @@ fn ctap_status_name(status: u8) -> &'static str {
         0x12 => "invalid_cbor",
         0x14 => "missing_parameter",
         0x27 => "operation_denied",
+        0x2d => "keepalive_cancel",
         0x2e => "no_credentials",
         0x31 => "pin_invalid",
         0x32 => "pin_blocked",
