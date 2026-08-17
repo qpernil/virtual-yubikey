@@ -458,6 +458,19 @@ impl VirtualYubiKey {
     ) -> Self {
         let fido = FidoAuthenticator::with_configuration(profile.serial, configuration);
         let piv = piv::PivApplet::new(profile.serial, profile.firmware);
+        Self::with_applets(profile, piv, fido)
+    }
+
+    pub fn from_piv_persistent_state(
+        profile: DeviceProfile,
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        let fido = FidoAuthenticator::for_serial(profile.serial);
+        let piv = piv::PivApplet::from_persistent_state(profile.serial, profile.firmware, encoded)?;
+        Ok(Self::with_applets(profile, piv, fido))
+    }
+
+    fn with_applets(profile: DeviceProfile, piv: piv::PivApplet, fido: FidoAuthenticator) -> Self {
         Self {
             profile,
             selected: None,
@@ -466,6 +479,14 @@ impl VirtualYubiKey {
             piv,
             fido,
         }
+    }
+
+    pub fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.piv.persistent_state()
+    }
+
+    pub fn take_piv_persistent_change(&mut self) -> bool {
+        self.piv.take_persistent_change()
     }
 
     pub fn profile(&self) -> &DeviceProfile {
