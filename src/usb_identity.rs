@@ -68,7 +68,6 @@ mod tests {
     use super::*;
 
     const PROFILE: &str = include_str!("../profiles/virtual-yubikey.toml");
-    const FIDO_HID_REPORT: &str = include_str!("../profiles/fido-hid-report.hex");
 
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
@@ -90,6 +89,11 @@ mod tests {
     fn installed_profile_preserves_the_worker_usb_contract() {
         let profile: toml::Value = toml::from_str(PROFILE).unwrap();
         let usb = profile.get("usb").unwrap();
+        let worker = profile.get("worker").unwrap();
+        assert_eq!(
+            worker.get("command").unwrap().as_str(),
+            Some("/home/per/virtual-yubikey/target/release/virtual-yubikey-worker")
+        );
         assert_eq!(usb.get("vendor_id").unwrap().as_integer(), Some(0x1050));
         assert_eq!(usb.get("bcd_usb").unwrap().as_integer(), Some(0x0200));
         assert_eq!(
@@ -115,13 +119,18 @@ mod tests {
         assert_eq!(functions.len(), 2);
         assert_eq!(functions[0].get("type").unwrap().as_str(), Some("hid"));
         assert_eq!(functions[0].get("name").unwrap().as_str(), Some("fido"));
+        assert!(functions[0].get("report_descriptor").is_none());
         assert_eq!(
             functions[1].get("type").unwrap().as_str(),
             Some("functionfs")
         );
         assert_eq!(functions[1].get("name").unwrap().as_str(), Some("ccid"));
 
-        let descriptor = FIDO_HID_REPORT
+        let descriptor = functions[0]
+            .get("report_descriptor_hex")
+            .unwrap()
+            .as_str()
+            .unwrap()
             .split_whitespace()
             .map(|byte| u8::from_str_radix(byte, 16).unwrap())
             .collect::<Vec<_>>();
