@@ -34,6 +34,8 @@ const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
 const INS_IMPORT_KEY: u8 = 0xfe;
+const INS_SET_RETRIES: u8 = 0xfa;
+const INS_RESET: u8 = 0xfb;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 
 const REFERENCE_PIN: u8 = 0x80;
@@ -217,7 +219,7 @@ impl PinReference {
         if self.retries == 0 {
             STATUS_AUTHENTICATION_BLOCKED
         } else {
-            0x63c0 | u16::from(self.retries)
+            0x63c0 | u16::from(self.retries.min(15))
         }
     }
 
@@ -582,6 +584,8 @@ impl PivApplet {
             }
             INS_AUTHENTICATE => self.general_authenticate(command),
             INS_IMPORT_KEY => self.import_key(command),
+            INS_SET_RETRIES if command.data.is_empty() => self.set_retries(command.p1, command.p2),
+            INS_RESET if empty_command(command, 0, 0) => self.reset(),
             INS_SET_MANAGEMENT_KEY => self.set_management_key(command),
             INS_GET_VERSION
             | INS_GET_SERIAL
@@ -592,7 +596,9 @@ impl PivApplet {
             | INS_MOVE_KEY
             | INS_VERIFY
             | INS_CHANGE_REFERENCE
-            | INS_RESET_RETRY => ResponseApdu::status(STATUS_INCORRECT_PARAMETERS),
+            | INS_RESET_RETRY
+            | INS_SET_RETRIES
+            | INS_RESET => ResponseApdu::status(STATUS_INCORRECT_PARAMETERS),
             _ => ResponseApdu::status(STATUS_INSTRUCTION_NOT_SUPPORTED),
         }
     }
@@ -820,6 +826,34 @@ impl PivApplet {
             self.keys.insert(command.p1, key);
         }
         self.persistent_change = true;
+        ResponseApdu::success(Vec::new())
+    }
+
+    fn set_retries(&mut self, pin_retries: u8, puk_retries: u8) -> ResponseApdu {
+        if !self.management_authenticated || !self.pin_verified {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
+        if pin_retries == 0 || puk_retries == 0 {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        self.pin = PinReference::new(FACTORY_PIN);
+        self.pin.retries = pin_retries;
+        self.pin.maximum_retries = pin_retries;
+        self.puk = PinReference::new(FACTORY_PUK);
+        self.puk.retries = puk_retries;
+        self.puk.maximum_retries = puk_retries;
+        self.pin_verified = false;
+        self.persistent_change = true;
+        ResponseApdu::success(Vec::new())
+    }
+
+    fn reset(&mut self) -> ResponseApdu {
+        if self.pin.retries != 0 || self.puk.retries != 0 {
+            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
+        }
+        let mut reset = Self::new(self.serial, self.firmware);
+        reset.persistent_change = true;
+        *self = reset;
         ResponseApdu::success(Vec::new())
     }
 
@@ -1950,6 +1984,91 @@ mod tests {
                 .status,
             0x9000
         );
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+    }
+
+    #[test]
+    fn sets_retry_limits_only_after_both_required_authentications() {
+        let mut piv = PivApplet::new(17, [5, 8, 0]);
+        assert_eq!(
+            piv.transmit(&command(INS_SET_RETRIES, 20, 2, &[])).status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_SET_RETRIES, 20, 2, &[])).status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_SET_RETRIES, 20, 2, &[])).status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &[]))
+                .status,
+            0x63cf
+        );
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, REFERENCE_PIN, &[]));
+        assert_eq!(
+            decode_tlvs(&metadata.data)
+                .unwrap()
+                .into_iter()
+                .find(|(tag, _)| *tag == 0x06)
+                .unwrap()
+                .1,
+            &[20, 20]
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GET_METADATA, 0, REFERENCE_PUK, &[]))
+                .data
+                .last(),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn resets_the_piv_application_only_after_pin_and_puk_are_blocked() {
+        let mut piv = PivApplet::new(18, [5, 8, 0]);
+        assert_eq!(
+            piv.transmit(&command(INS_RESET, 0, 0, &[])).status,
+            STATUS_CONDITIONS_NOT_SATISFIED
+        );
+        for expected in [0x63c2, 0x63c1, STATUS_AUTHENTICATION_BLOCKED] {
+            assert_eq!(
+                piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &[0; 8]))
+                    .status,
+                expected
+            );
+        }
+        let wrong_puk = [[0_u8; 8].as_slice(), FACTORY_PIN.as_slice()].concat();
+        for expected in [0x63c2, 0x63c1, STATUS_AUTHENTICATION_BLOCKED] {
+            assert_eq!(
+                piv.transmit(&command(INS_CHANGE_REFERENCE, 0, REFERENCE_PUK, &wrong_puk,))
+                    .status,
+                expected
+            );
+        }
+        piv.objects.insert(0x5f_ff10, vec![1, 2, 3]);
+        assert_eq!(piv.transmit(&command(INS_RESET, 0, 0, &[])).status, 0x9000);
+        assert!(piv.objects.is_empty());
+        assert!(piv.keys.is_empty());
+        assert_eq!(piv.pin.maximum_retries, FACTORY_RETRIES);
+        assert_eq!(piv.puk.maximum_retries, FACTORY_RETRIES);
+        assert_eq!(piv.management_key.as_slice(), FACTORY_MANAGEMENT_KEY);
+        assert!(piv.take_persistent_change());
         assert_eq!(
             piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
                 .status,
