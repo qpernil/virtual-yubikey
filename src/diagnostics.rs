@@ -23,16 +23,6 @@ impl Level {
             _ => None,
         }
     }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Info => "info",
-            Self::Debug => "debug",
-            Self::Trace => "trace",
-        }
-    }
 }
 
 static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
