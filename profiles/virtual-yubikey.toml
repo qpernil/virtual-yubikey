@@ -10,8 +10,8 @@ max_speed = "full-speed"
 device_class = 0
 device_subclass = 0
 device_protocol = 0
-manufacturer = "Yubico"
-product = "YubiKey FIDO+CCID"
+manufacturer = "Virtual YubiKey"
+product = "Virtual YubiKey FIDO+CCID"
 max_power_ma = 30
 
 [worker]

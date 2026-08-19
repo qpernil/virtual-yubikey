@@ -49,14 +49,14 @@ impl UsbIdentity {
 
     pub(crate) const fn product(self) -> &'static str {
         match self.interfaces.mask() {
-            0x01 => "YubiKey OTP",
-            0x02 => "YubiKey FIDO",
-            0x03 => "YubiKey OTP+FIDO",
-            0x04 => "YubiKey CCID",
-            0x05 => "YubiKey OTP+CCID",
-            0x06 => "YubiKey FIDO+CCID",
-            0x07 => "YubiKey OTP+FIDO+CCID",
-            _ => "YubiKey",
+            0x01 => "Virtual YubiKey OTP",
+            0x02 => "Virtual YubiKey FIDO",
+            0x03 => "Virtual YubiKey OTP+FIDO",
+            0x04 => "Virtual YubiKey CCID",
+            0x05 => "Virtual YubiKey OTP+CCID",
+            0x06 => "Virtual YubiKey FIDO+CCID",
+            0x07 => "Virtual YubiKey OTP+FIDO+CCID",
+            _ => "Virtual YubiKey",
         }
     }
 }
@@ -73,7 +73,7 @@ mod tests {
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
         assert_eq!(UsbIdentity::VENDOR_ID, 0x1050);
         assert_eq!(USB_IDENTITY.product_id(), 0x0406);
-        assert_eq!(USB_IDENTITY.product(), "YubiKey FIDO+CCID");
+        assert_eq!(USB_IDENTITY.product(), "Virtual YubiKey FIDO+CCID");
         assert_eq!(USB_IDENTITY.bcd_device(), 0x0580);
 
         let composite = UsbIdentity::yubikey_5_8(UsbInterfaces {
@@ -82,7 +82,7 @@ mod tests {
             ccid: true,
         });
         assert_eq!(composite.product_id(), 0x0407);
-        assert_eq!(composite.product(), "YubiKey OTP+FIDO+CCID");
+        assert_eq!(composite.product(), "Virtual YubiKey OTP+FIDO+CCID");
     }
 
     #[test]
