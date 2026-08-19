@@ -1,5 +1,7 @@
 # Virtual YubiKey
 
+[![CI](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml/badge.svg)](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml)
+
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
 enumerate as a composite FIDO HID and
 CCID YubiKey for compatibility testing. HID carries FIDO/CTAP; CCID exposes
@@ -309,3 +311,14 @@ sudo systemctl stop usb-gadget-supervisor@virtual-yubikey.service
 sudo /opt/usb-gadget-supervisor/usb-gadget-supervisor \
   --profile /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
 ```
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report
+security-sensitive findings according to [SECURITY.md](SECURITY.md), not in a
+public issue.
+
+## License
+
+This project is licensed under either the [MIT License](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE), at your option.
