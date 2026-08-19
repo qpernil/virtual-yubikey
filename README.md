@@ -194,6 +194,31 @@ LED animation, and touch decision remains in this worker rather than the
 privileged supervisor. The current profile declares no display resources and
 continues to run headlessly.
 
+### Experimental Rust display UI
+
+An optional hardware demonstration proves the intended project-owned display
+stack without adding graphics code to the normal worker build. It uses
+`embedded-graphics` to compose a native 240x240 RGB565 screen, Linux's GPIO
+character-device API for Data/Command, reset, and backlight, and spidev for the
+Waveshare 1.3-inch ST7789 LCD HAT.
+
+Stop any gadget worker that owns the HAT, then build and run the demo on the
+Pi:
+
+```sh
+sudo systemctl stop usb-gadget-supervisor@virtual-trezor-st7789.service
+cargo build --release --locked --features display-demo \
+  --bin st7789-embedded-graphics-demo
+sudo ./target/release/st7789-embedded-graphics-demo
+```
+
+The demo drives SPI0 CE0/MOSI/SCLK, GPIO25 Data/Command, GPIO27 reset, and
+GPIO24 backlight at 62.5 MHz. It renders colored text, shapes, an animated
+marker, and a progress bar for 240 frames, reports the measured frame rate,
+then holds the final image until Enter. This is deliberately a diagnostic
+binary rather than Virtual YubiKey UI integration; the service profile remains
+headless and declares no display resources.
+
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
 `/var/lib/virtual-yubikey/fido-12345678.cbor`. A missing file means a new empty
