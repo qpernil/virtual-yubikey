@@ -77,6 +77,19 @@ and systemd restarted the complete service after two seconds. The new worker
 loaded the existing PIV state, the UDC returned to `configured`, and SHA-256
 hashes of both persistent-state files were unchanged.
 
+## Optional display-stack proof
+
+On 2026-08-19, the optional `display-demo` feature was built natively on a
+Raspberry Pi 4 and run against the physical Waveshare 240x240 ST7789 HAT. The
+demo used `embedded-graphics` for RGB565 text and primitives, `gpiocdev` for
+GPIO25 Data/Command, GPIO27 reset, and GPIO24 backlight, and `spidev` at 62.5
+MHz. It rendered and transferred 240 full-panel animated frames in 3.95
+seconds, or 60.8 frames/s, then held the final image correctly.
+
+This validates the proposed Rust graphics and Linux hardware-access stack. It
+does not yet connect display state or joystick input to the Virtual YubiKey
+worker; the production profile remains headless.
+
 ## Remaining acceptance work
 
 This validates extraction, lifecycle, persistence loading, enumeration,
