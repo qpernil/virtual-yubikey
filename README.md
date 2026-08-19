@@ -3,9 +3,9 @@
 [![CI](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml/badge.svg)](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml)
 
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
-enumerate as a composite FIDO HID and
-CCID YubiKey for compatibility testing. HID carries FIDO/CTAP; CCID exposes
-YubiKey Management and PIV. The USB CCID reader deliberately rejects the FIDO AID.
+enumerate as a composite FIDO HID and CCID, YubiKey-compatible test device.
+HID carries FIDO/CTAP; CCID exposes YubiKey Management and PIV. The USB CCID
+reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -13,8 +13,8 @@ protections of a real YubiKey.
 Privileged ConfigFS, FunctionFS mount, UDC, and process-lifecycle operations
 belong to the separate
 [`usb-gadget-supervisor`](https://github.com/qpernil/usb-gadget-supervisor)
-project. This repository owns only YubiKey protocol behavior, state, USB
-descriptor assets, and its declarative device profile.
+project. This repository owns only its independent protocol implementation,
+state, USB descriptor assets, and declarative device profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
@@ -25,7 +25,7 @@ credential management, resident credentials, and `previewSign`.
 
 | Layer | Behavior |
 | --- | --- |
-| USB identity | Full-speed (12 Mbit/s) `1050:0406`, `Yubico`, `YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
+| USB identity | Full-speed (12 Mbit/s) `1050:0406`, `Virtual YubiKey`, `Virtual YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
@@ -34,9 +34,15 @@ credential management, resident credentials, and `previewSign`.
 | Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
-The program uses Yubico's USB VID/PID solely for controlled compatibility
-testing. Do not distribute a product that presents itself as genuine Yubico
-hardware.
+The development profile retains Yubico's USB VID/PID solely for controlled,
+local compatibility testing while the project owner seeks Yubico's guidance.
+The descriptor strings identify the implementation as virtual. The VID/PID is
+not a project assignment and must not be used for a redistributed, manufactured,
+or commercial device without permission from its owner.
+
+Implementation provenance and public sources are recorded in
+[`PROVENANCE.md`](PROVENANCE.md). Dependency and trademark notices are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Source layout
 
@@ -317,6 +323,13 @@ sudo /opt/usb-gadget-supervisor/usb-gadget-supervisor \
 See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report
 security-sensitive findings according to [SECURITY.md](SECURITY.md), not in a
 public issue.
+
+## Independence and trademarks
+
+This is an independent compatibility project. It is not affiliated with,
+sponsored by, or endorsed by Yubico. Yubico and YubiKey are registered
+trademarks of Yubico AB. Their names are used descriptively to identify the
+protocols and products with which this test implementation interoperates.
 
 ## License
 

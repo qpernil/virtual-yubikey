@@ -46,6 +46,10 @@ bcdDevice 0x0580
 product   YubiKey FIDO+CCID
 ```
 
+This is a historical validation record. The current profile uses truthful
+`Virtual YubiKey` and `Virtual YubiKey FIDO+CCID` descriptor strings;
+the compatibility VID/PID remains unchanged pending guidance from Yubico.
+
 macOS enumerated the emulator at full speed as `YubiKey FIDO+CCID`. `ykman`
 distinguished it from a physical YubiKey by Management serial `12345678`, and
 reported firmware 5.8.0 with FIDO2 and PIV enabled. `ykman fido info` reached
