@@ -92,7 +92,7 @@ mod tests {
         let worker = profile.get("worker").unwrap();
         assert_eq!(
             worker.get("command").unwrap().as_str(),
-            Some("/home/per/virtual-yubikey/target/release/virtual-yubikey-worker")
+            Some("/absolute/path/to/virtual-yubikey-worker")
         );
         assert_eq!(usb.get("vendor_id").unwrap().as_integer(), Some(0x1050));
         assert_eq!(

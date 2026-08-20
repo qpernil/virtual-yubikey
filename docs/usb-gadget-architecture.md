@@ -645,6 +645,11 @@ protocol-level performance difference for this device.
 
 ## Pi preflight
 
+This deployment is tested on both 64-bit Ubuntu and 64-bit Raspberry Pi OS.
+For either system, the normal board-specific setup is simply to enable the
+DWC2 controller in peripheral mode. The resulting UDC is the controller that
+the supervisor composes through ConfigFS and serves through FunctionFS.
+
 Enable peripheral mode in `/boot/firmware/config.txt`:
 
 ```ini
