@@ -46,8 +46,8 @@ where
                     "Usage: virtual-yubikey-worker [--serial DECIMAL] [--log-level LEVEL]\n\
                      \n\
                      This unprivileged binary is started by usb-gadget-supervisor. Its\n\
-                     control descriptor and USB resource paths are inherited through the\n\
-                     versioned worker environment contract. It refuses to run as root.\n\
+                     control socket is fixed at FD 3 and resource descriptors arrive through\n\
+                     the versioned supervisor protocol. It refuses to run as root.\n\
                      LEVEL is off, info (default), debug, or trace. Trace includes payloads\n\
                      and may expose secrets once stateful commands are implemented."
                 );

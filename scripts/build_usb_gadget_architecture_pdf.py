@@ -346,7 +346,7 @@ def page_descriptors(story):
 
 def page_protocol(story):
     story.extend(section("A tiny resource protocol", "03 / file-descriptor handoff"))
-    story.append(p("The supervisor and worker share an <font name='Courier'>AF_UNIX/SOCK_SEQPACKET</font> socket. Each normal-data record is eight bytes; open file descriptions travel separately as <font name='Courier'>SCM_RIGHTS</font> ancillary data. The record declares the exact attached FD count."))
+    story.append(p("The supervisor and worker share an <font name='Courier'>AF_UNIX/SOCK_SEQPACKET</font> socket placed on fixed worker descriptor 3. Each normal-data record is eight bytes; open file descriptions travel separately as <font name='Courier'>SCM_RIGHTS</font> ancillary data. The record declares the exact attached FD count."))
     story.append(code_box(["0..3  magic: UGSP", "4     version: 1", "5     message type", "6..7  exact FD count, big-endian"]))
     story += [Spacer(1, 4 * mm)]
     story.append(
@@ -365,7 +365,7 @@ def page_protocol(story):
     story.append(p("Any descriptor that the receiving process can meaningfully use may be inherited or sent: regular files, pipes, terminals, device nodes, event descriptors, and Unix, TCP, or UDP sockets. The receiver gets a reference to the same open file description: file status flags and offsets are shared, while descriptor-table flags such as close-on-exec belong to each process's descriptor entry."))
     story.append(p("The sender cannot use <font name='Courier'>SCM_RIGHTS</font> to invent extra kernel permissions. Access mode was fixed when the file was opened, and the worker's later operations remain subject to that file's driver behavior and ordinary process security rules."))
     story += [Spacer(1, 2 * mm)]
-    story.append(callout("USB FDs are sent in fixed message slots. Local I2C, SPI, and GPIO descriptors are opened before credential drop and inherited across exec; their decimal numbers are named by USB_GADGET_RESOURCE_&lt;NAME&gt;_FD."))
+    story.append(callout("USB, I2C, SPI, and GPIO descriptors are sent together in fixed pre-bind message slots. The environment carries no descriptor numbers; it contains only the persistent and runtime directory paths."))
     story.append(PageBreak())
 
 
@@ -416,7 +416,7 @@ def page_data_paths(story):
     story.append(p("The pre-bind bundle is CCID <font name='Courier'>ep0</font>, bulk OUT, bulk IN, and interrupt IN. The post-bind bundle is the FIDO HID descriptor. The worker owns CCID framing, PC/SC semantics, CTAPHID, applets, credentials, and persistent authenticator state."))
     story.append(p("The profile advertises manufacturer <font name='Courier'>Virtual USB Gadget</font> and product <font name='Courier'>Virtual Yubico YubiKey FIDO+CCID</font>. Compatibility software may still display an inferred model name such as 'YubiKey 5A'; that UI label is not a USB manufacturer assertion and cannot necessarily be controlled by descriptor strings."))
     story += [Spacer(1, 2 * mm), p("Virtual Trezor", "h2")]
-    story.append(p("The pre-bind bundle is main <font name='Courier'>ep0</font>, OUT, and IN; the post-bind bundle is empty. Upstream firmware logic continues to compose the genuine 128x64 framebuffer. The Linux worker uses inherited I2C/SPI/GPIO descriptors for the selected display and buttons, and clears the display on orderly exit."))
+    story.append(p("The pre-bind bundle is main <font name='Courier'>ep0</font>, OUT, IN, display bus, and GPIO. The post-bind bundle is empty. Upstream firmware logic continues to compose the genuine 128x64 framebuffer. The Linux worker uses those received descriptors for the selected display and buttons, and clears the display on orderly exit."))
     story += [Spacer(1, 2 * mm), p("Virtual YubiHSM", "h2")]
     story.append(p("The same FunctionFS pattern supports a vendor bulk device. Its profile supplies the descriptors; its worker owns commands, sessions, objects, capabilities, audit behavior, and state. The supervisor needs no YubiHSM-specific code."))
     story.append(PageBreak())
@@ -486,7 +486,7 @@ def page_security(story):
         )
     )
     story += [Spacer(1, 5 * mm), p("Capability boundary", "h2")]
-    story.append(p("The worker receives open resources, not permission to explore privileged namespaces. FunctionFS remains root-owned; HID and FunctionFS paths are absent from its environment. The supervisor clears the environment and supplies only the control FD, state/runtime directories, approved local-resource FD numbers, configured arguments, and the transferred USB bundles."))
+    story.append(p("The worker receives open resources, not permission to explore privileged namespaces. FunctionFS remains root-owned. The control socket is fixed at FD 3; every other handle arrives through <font name='Courier'>SCM_RIGHTS</font>. The cleared environment contains only the persistent and runtime directory paths, while configured worker options remain command arguments."))
     story.append(p("This is useful privilege separation, not hardware isolation. A software authenticator or wallet on a general-purpose Pi remains vulnerable to compromise of its worker account, kernel, storage, memory, supply chain, and physical environment."))
     story += [Spacer(1, 2 * mm), p("Operational checks", "h2")]
     for item in [
