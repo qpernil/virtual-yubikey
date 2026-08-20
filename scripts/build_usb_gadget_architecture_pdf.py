@@ -446,6 +446,7 @@ def page_host(story):
 
 def page_pi(story):
     story.extend(section("Pi 4 and Pi 5 use the same model", "07 / UDC discovery"))
+    story.append(p("The deployment is tested on both 64-bit Ubuntu and 64-bit Raspberry Pi OS. On either system, the normal board-specific setup is to enable DWC2 in peripheral mode; the supervisor then uses the resulting UDC through ConfigFS and FunctionFS."))
     story.append(p("USB gadget mode depends on a USB Device Controller, not on I2C target/peripheral support. Raspberry Pi 4 and Pi 5 both use Linux DWC2 device mode on the gadget-capable USB-C connection. The Pi 5's ordinary RP1 USB host ports are not extra gadget controllers."))
     story += [Spacer(1, 3 * mm)]
     story.append(code_box([

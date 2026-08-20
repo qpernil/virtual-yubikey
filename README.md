@@ -145,16 +145,17 @@ The cable must carry USB 2 data as well as power. Early Pi 4 revision 1.1
 boards can reject e-marked USB-C cables; a known data-capable, non-e-marked
 cable or USB-A-to-USB-C data cable is a useful fallback.
 
-The tested deployment uses 64-bit Raspberry Pi OS with systemd. Ubuntu for
-Raspberry Pi also works when its kernel provides DWC2, ConfigFS, and FunctionFS.
+The deployment is tested on both 64-bit Ubuntu and 64-bit Raspberry Pi OS with
+systemd. On both systems, enabling the Raspberry Pi's DWC2 controller in
+peripheral mode is the only board-specific gadget prerequisite. The supervisor
+then uses the resulting UDC through the kernel's ConfigFS and FunctionFS APIs.
 
 ## Install prerequisites
 
 ```sh
 sudo apt update
-sudo apt install --yes git curl build-essential
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-. "$HOME/.cargo/env"
+sudo apt install --yes git build-essential rustup
+rustup default stable
 ```
 
 Enable the device controller in `/boot/firmware/config.txt` on current images,
@@ -176,12 +177,10 @@ A Pi 4 normally reports `fe980000.usb`.
 
 ## Build and run
 
-Clone this repository beside the supervisor, then build both binaries:
+Place this repository beside the supervisor checkout, then build both binaries
+from their common parent directory:
 
 ```sh
-cd /home/per
-git clone https://github.com/qpernil/virtual-yubikey.git
-git clone https://github.com/qpernil/usb-gadget-supervisor.git
 cargo build --release --locked --manifest-path virtual-yubikey/Cargo.toml \
   --bin virtual-yubikey-worker
 cargo build --release --locked --manifest-path usb-gadget-supervisor/Cargo.toml
@@ -308,15 +307,14 @@ with YubiKey-specific extensions matched to the
 
 ## Install as a service
 
-Install the generic supervisor once as described in its README. After cloning
-this repository at `/home/per/virtual-yubikey`, build it in place. The example
-profile runs the worker as user `per`; edit its command and `run_as` fields if
-the clone or account is elsewhere.
+Install the generic supervisor once as described in its README, then build this
+repository in place. Set the profile's `command` and `run_as` fields to the
+worker's installed path and its dedicated unprivileged service account.
 
 ```sh
 cargo build --release --locked
 sudo install -o root -g root -m 0644 \
-  /home/per/virtual-yubikey/profiles/virtual-yubikey.toml \
+  profiles/virtual-yubikey.toml \
   /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
 sudo systemctl enable --now \
   usb-gadget-supervisor@virtual-yubikey.service
