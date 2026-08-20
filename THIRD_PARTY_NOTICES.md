@@ -13,6 +13,9 @@ project is not affiliated with, sponsored by, or endorsed by Yubico.
 The local development profile currently uses Yubico's USB VID/PID for
 controlled compatibility testing. That identifier is not assigned to this
 project and is not licensed here for redistributed or commercial hardware.
+Stock Yubico software may infer and display a genuine-device model name from
+that compatibility identity; such a label does not indicate affiliation,
+sponsorship, endorsement, or product origin.
 
 ## Rust dependencies
 

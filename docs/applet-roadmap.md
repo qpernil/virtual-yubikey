@@ -4,9 +4,9 @@
 
 Develop logical YubiKey behavior in `virtual-yubikey-core`, prove it through
 the Raspberry Pi USB gadget and real host tools, and then make `pkcs11rs` reuse
-that behavior in its tests. Keep the existing `pkcs11rs` implementation working
-throughout each migration; remove duplicated test code only after the shared
-core passes both projects' tests.
+that behavior in its tests. Keep both projects working throughout integration;
+remove duplicated test code only after the shared core passes both projects'
+tests.
 
 The planned order is:
 
@@ -19,7 +19,7 @@ The planned order is:
 HID can be added for another applet when a real client requires it. CCID remains
 the first transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
 
-## Migration pattern
+## Integration pattern
 
 For each applet:
 

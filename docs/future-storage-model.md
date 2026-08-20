@@ -2,9 +2,9 @@
 
 ## Status
 
-This document records a future storage migration. The current FIDO and PIV
-state files remain the supported on-disk format until the replacement is
-implemented and tested. The migration must be explicit; an unsupported or
+This document specifies a future storage design. The current FIDO and PIV state
+files remain the supported on-disk format until the replacement is implemented
+and tested. Activating the replacement must be explicit; an unsupported or
 corrupt state must continue to fail closed rather than silently starting with
 an empty token.
 

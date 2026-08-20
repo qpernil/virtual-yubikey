@@ -49,14 +49,14 @@ impl UsbIdentity {
 
     pub(crate) const fn product(self) -> &'static str {
         match self.interfaces.mask() {
-            0x01 => "Virtual YubiKey OTP",
-            0x02 => "Virtual YubiKey FIDO",
-            0x03 => "Virtual YubiKey OTP+FIDO",
-            0x04 => "Virtual YubiKey CCID",
-            0x05 => "Virtual YubiKey OTP+CCID",
-            0x06 => "Virtual YubiKey FIDO+CCID",
-            0x07 => "Virtual YubiKey OTP+FIDO+CCID",
-            _ => "Virtual YubiKey",
+            0x01 => "Virtual Yubico YubiKey OTP",
+            0x02 => "Virtual Yubico YubiKey FIDO",
+            0x03 => "Virtual Yubico YubiKey OTP+FIDO",
+            0x04 => "Virtual Yubico YubiKey CCID",
+            0x05 => "Virtual Yubico YubiKey OTP+CCID",
+            0x06 => "Virtual Yubico YubiKey FIDO+CCID",
+            0x07 => "Virtual Yubico YubiKey OTP+FIDO+CCID",
+            _ => "Virtual Yubico YubiKey",
         }
     }
 }
@@ -73,7 +73,7 @@ mod tests {
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
         assert_eq!(UsbIdentity::VENDOR_ID, 0x1050);
         assert_eq!(USB_IDENTITY.product_id(), 0x0406);
-        assert_eq!(USB_IDENTITY.product(), "Virtual YubiKey FIDO+CCID");
+        assert_eq!(USB_IDENTITY.product(), "Virtual Yubico YubiKey FIDO+CCID");
         assert_eq!(USB_IDENTITY.bcd_device(), 0x0580);
 
         let composite = UsbIdentity::yubikey_5_8(UsbInterfaces {
@@ -82,7 +82,7 @@ mod tests {
             ccid: true,
         });
         assert_eq!(composite.product_id(), 0x0407);
-        assert_eq!(composite.product(), "Virtual YubiKey OTP+FIDO+CCID");
+        assert_eq!(composite.product(), "Virtual Yubico YubiKey OTP+FIDO+CCID");
     }
 
     #[test]
@@ -95,6 +95,10 @@ mod tests {
             Some("/home/per/virtual-yubikey/target/release/virtual-yubikey-worker")
         );
         assert_eq!(usb.get("vendor_id").unwrap().as_integer(), Some(0x1050));
+        assert_eq!(
+            usb.get("manufacturer").unwrap().as_str(),
+            Some("Virtual USB Gadget")
+        );
         assert_eq!(usb.get("bcd_usb").unwrap().as_integer(), Some(0x0200));
         assert_eq!(
             usb.get("product_id").unwrap().as_integer(),

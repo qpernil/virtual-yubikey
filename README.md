@@ -25,7 +25,7 @@ credential management, resident credentials, and `previewSign`.
 
 | Layer | Behavior |
 | --- | --- |
-| USB identity | Full-speed (12 Mbit/s) `1050:0406`, `Virtual YubiKey`, `Virtual YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
+| USB identity | Full-speed (12 Mbit/s) `1050:0406`, `Virtual USB Gadget`, `Virtual Yubico YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
@@ -36,9 +36,15 @@ credential management, resident credentials, and `previewSign`.
 
 The development profile retains Yubico's USB VID/PID solely for controlled,
 local compatibility testing while the project owner seeks Yubico's guidance.
-The descriptor strings identify the implementation as virtual. The VID/PID is
-not a project assignment and must not be used for a redistributed, manufactured,
-or commercial device without permission from its owner.
+The descriptor strings identify the implementation as a virtual USB gadget.
+The contiguous `Yubico YubiKey` text in the product string is required
+because Yubico's PC/SC discovery uses it to distinguish a USB CCID reader from
+an NFC reader. Stock Yubico Authenticator nevertheless derives its visible
+model name from the compatibility VID/PID and Management response, so it may
+display `YubiKey 5A` rather than the virtual USB descriptor. That UI label does
+not identify this implementation as a Yubico product. The VID/PID is not a
+project assignment and must not be used for a redistributed, manufactured, or
+commercial device without permission from its owner.
 
 Implementation provenance and public sources are recorded in
 [`PROVENANCE.md`](PROVENANCE.md). Dependency and trademark notices are in
@@ -53,15 +59,18 @@ Implementation provenance and public sources are recorded in
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
-| `functionfs.rs` | Unprivileged FunctionFS transport and CCID USB descriptors |
+| `functionfs.rs` | Unprivileged CCID endpoint transport and FunctionFS runtime events |
 | `ctaphid.rs` | CTAPHID channels, packet reassembly, command routing and response fragmentation |
 | `ccid.rs` | CCID framing, reader state, and smart-card activation |
 | `smartcard.rs` | Diagnostics adapter between CCID and `virtual-yubikey-core` |
-| `worker_protocol.rs` | Versioned lifecycle channel shared with the generic supervisor |
-| `profiles/` | Root-installed USB profile and FIDO HID report descriptor asset |
+| `worker_protocol.rs` | Versioned lifecycle and `SCM_RIGHTS` resource channel shared with the supervisor |
+| `profiles/` | Root-installed USB identity, HID, and FunctionFS descriptor data |
 
-The first extracted-worker deployment and remaining host-level acceptance work
-are recorded in [`docs/deployment-validation.md`](docs/deployment-validation.md).
+For a visual explanation of Raspberry Pi USB gadget mode, its direct endpoint
+data paths, the supervisor's privilege boundary, and the Virtual YubiKey,
+Virtual Trezor, and Virtual YubiHSM profiles, see the
+[`USB gadget architecture guide`](docs/usb-gadget-architecture.md), also
+available as a [printable PDF](output/pdf/usb-gadget-architecture.pdf).
 
 ## Developing virtual firmware
 
@@ -179,12 +188,14 @@ cargo build --release --locked --manifest-path usb-gadget-supervisor/Cargo.toml
 ```
 
 The worker is not launched directly. The generic supervisor reads the
-root-owned profile, mounts FunctionFS for the configured account, starts the
-worker with a private `SOCK_SEQPACKET` control descriptor, and waits for it to
-publish its CCID descriptors. Only then does the supervisor bind the UDC,
-prepare `/dev/hidg0`, and send `USB_ATTACHED`. USB payloads flow directly
-between kernel endpoint files and the unprivileged worker; the supervisor never
-proxies CTAP, CCID, APDU, PIN, or key data.
+root-owned schema-1 profile, mounts FunctionFS root-only, validates and
+publishes the CCID descriptors, and opens the resulting endpoints. It transfers
+`ep0`, CCID OUT, CCID IN, and CCID interrupt IN to the worker over a private
+`SOCK_SEQPACKET` socket using `SCM_RIGHTS`. After binding the UDC it opens and
+transfers the FIDO HID descriptor. The worker opens no USB path and needs no
+USB-node ownership change. USB payloads flow directly between those kernel file
+descriptors and the unprivileged worker; the supervisor never proxies CTAP,
+CCID, APDU, PIN, or key data.
 
 Profiles can also declare root-opened local character devices. The supervisor
 passes their descriptors as `USB_GADGET_RESOURCE_<NAME>_FD` after dropping the
@@ -228,13 +239,14 @@ mutating CTAP response is returned. The file is mode `0600`, but contains
 unencrypted test PIN and private-key material and must not be treated as secure
 hardware storage.
 
-The algorithm expansion uses persistent-state version 2. It intentionally does
-not decode the earlier test schema. Before deploying this version over an older
-development build, stop the service and remove that exact state file to start
-with an empty authenticator.
+Persistent authenticator state uses CBOR schema version 2. Unsupported or
+invalid state is a startup error and is never silently replaced; resetting to
+an empty authenticator is an explicit administrative action.
 
-The supervisor unbinds and removes the gadget on shutdown or worker failure. A
-global exclusive lock prevents concurrent profiles from owning the Pi UDC. The
+On worker exit, the still-running supervisor unbinds and removes the old gadget,
+then starts a completely fresh worker incarnation with fresh descriptors. A
+service stop performs the same cleanup and ends the supervisor. A global
+exclusive lock prevents concurrent profiles from owning the Pi UDC. The
 profile supplies the worker serial and log level; its direct options are:
 
 ```text
@@ -312,7 +324,7 @@ sudo systemctl enable --now \
 ```
 
 That is the entire device-specific installation: one profile containing its
-HID descriptor. The worker and touch helper run directly from
+HID and FunctionFS descriptor blobs. The worker and touch helper run directly from
 `target/release`. A normal update is `git pull`, rebuild, and restart; reinstall
 the profile only when it changes.
 
@@ -329,13 +341,8 @@ cat /sys/class/udc/fe980000.usb/state
 
 With a data-capable host connection, the UDC state should be `configured`.
 
-The extracted supervisor/worker installation was exercised on an aarch64
-Raspberry Pi on 2026-08-17. It preserved the existing FIDO and PIV files,
-enumerated on macOS, served automatic CCID/PIV traffic, recovered from a killed
-worker, and enforced the single-supervisor lock. See the
-[validation record](docs/deployment-validation.md) for exact results and the
-remaining FIDO/PIV application tests. To run the same installation manually,
-first stop the service and invoke the supervisor with the installed profile:
+To run the installation manually, first stop the service and invoke the
+supervisor with the installed profile:
 
 ```sh
 sudo systemctl stop usb-gadget-supervisor@virtual-yubikey.service

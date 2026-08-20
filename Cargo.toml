@@ -16,6 +16,7 @@ resolver = "2"
 
 [dependencies]
 embedded-graphics = { version = "0.8.2", optional = true }
+libc = "0.2.189"
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
