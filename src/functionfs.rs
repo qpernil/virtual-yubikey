@@ -3,9 +3,7 @@
 #[cfg(target_os = "linux")]
 use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
-use crate::worker_protocol::{
-    Channel, Message, FUNCTIONFS_CCID_ENV, HID_FIDO_ENV, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV,
-};
+use crate::worker_protocol::{Channel, Message, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
 #[cfg(target_os = "linux")]
 use crate::STOP_REQUESTED;
 #[cfg(target_os = "linux")]
@@ -36,8 +34,6 @@ use virtual_yubikey_core::FidoAuthenticator;
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
-#[cfg(target_os = "linux")]
-const O_NONBLOCK_LINUX: i32 = 0x800;
 #[cfg(target_os = "linux")]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
@@ -93,14 +89,7 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     }
 
     let mut control = Channel::from_environment()?;
-    if control.receive()? != Message::ResourcesReady {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "supervisor did not send RESOURCES_READY",
-        ));
-    }
-    let functionfs = required_path(FUNCTIONFS_CCID_ENV)?;
-    let hid_device = required_path(HID_FIDO_ENV)?;
+    let prebind = control.receive_files(Message::PrebindResources, 4)?;
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
@@ -110,25 +99,18 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     };
     let fido = load_fido_state(serial, &storage.fido_state)?;
     let ccid = load_piv_state(serial, &storage.piv_state)?;
-    let endpoints = Endpoints::open(&functionfs)?;
-    control.send(Message::FunctionFsReady)?;
-    if control.receive()? != Message::UsbAttached {
-        return Err(io::Error::other("supervisor did not send USB_ATTACHED"));
-    }
-    let hid = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&hid_device)
-        .map_err(|error| with_context(error, "open FIDO HID gadget"))?;
+    let endpoints = Endpoints::from_files(prebind)?;
+    control.send(Message::Prepared)?;
+    let mut postbind = control.receive_files(Message::PostbindResources, 1)?;
+    let hid = postbind
+        .pop()
+        .expect("protocol validated one HID descriptor");
+    control.send(Message::Serving)?;
     diagnostics::log(
         Level::Info,
         "worker",
         "ready",
-        format_args!(
-            "serial={serial} functionfs={} hid={}",
-            functionfs.display(),
-            hid_device.display()
-        ),
+        format_args!("serial={serial} usb_descriptors=5"),
     );
     let mut lifecycle = control.try_clone()?;
     thread::Builder::new()
@@ -138,14 +120,7 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
             STOP_REQUESTED.store(true, Ordering::Relaxed);
         })?;
 
-    let result = endpoints.serve(serial, hid, fido, ccid, &storage);
-    let terminal = if result.is_ok() {
-        Message::Stopped
-    } else {
-        Message::Fatal
-    };
-    let _ = control.send(terminal);
-    result
+    endpoints.serve(serial, hid, fido, ccid, &storage)
 }
 
 #[cfg(target_os = "linux")]
@@ -184,22 +159,22 @@ struct WorkerStorage {
 
 #[cfg(target_os = "linux")]
 impl Endpoints {
-    fn open(functionfs: &Path) -> io::Result<Self> {
-        let mut ep0 = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(O_NONBLOCK_LINUX)
-            .open(functionfs.join("ep0"))?;
-        ep0.write_all(&descriptors())
-            .map_err(|error| with_context(error, "write FunctionFS descriptors"))?;
-        ep0.write_all(&strings())
-            .map_err(|error| with_context(error, "write FunctionFS strings"))?;
-
+    fn from_files(files: Vec<File>) -> io::Result<Self> {
+        let [ep0, ccid_out, ccid_in, ccid_interrupt]: [File; 4] =
+            files.try_into().map_err(|files: Vec<File>| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected four pre-bind USB descriptors, got {}",
+                        files.len()
+                    ),
+                )
+            })?;
         Ok(Self {
             ep0,
-            ccid_out: open_nonblocking(functionfs.join("ep1"), true, false)?,
-            ccid_in: open_nonblocking(functionfs.join("ep2"), false, true)?,
-            ccid_interrupt: open_nonblocking(functionfs.join("ep3"), false, true)?,
+            ccid_out,
+            ccid_in,
+            ccid_interrupt,
             ccid_notification_pending: false,
         })
     }
@@ -923,15 +898,6 @@ fn event_name(event_type: u8) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn open_nonblocking(path: impl AsRef<Path>, read: bool, write: bool) -> io::Result<File> {
-    OpenOptions::new()
-        .read(read)
-        .write(write)
-        .custom_flags(O_NONBLOCK_LINUX)
-        .open(path)
-}
-
-#[cfg(target_os = "linux")]
 fn write_nonblocking(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() && !STOP_REQUESTED.load(Ordering::Relaxed) {
         match file.write(bytes) {
@@ -960,7 +926,7 @@ fn endpoint_is_gone(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(19 | 32 | 108))
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn descriptors() -> Vec<u8> {
     const FUNCTIONFS_DESCRIPTORS_MAGIC_V2: u32 = 3;
     const FUNCTIONFS_HAS_FS_DESC: u32 = 1;
@@ -983,7 +949,7 @@ fn descriptors() -> Vec<u8> {
     descriptors
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn descriptor_set(bulk_max_packet_size: u16, interrupt_interval: u8) -> Vec<u8> {
     let mut descriptors = vec![9, 4, 0, 0, 3, 0x0b, 0, 0, 0];
     descriptors.extend_from_slice(&ccid_functional_descriptor());
@@ -1004,7 +970,7 @@ fn descriptor_set(bulk_max_packet_size: u16, interrupt_interval: u8) -> Vec<u8> 
     descriptors
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn ccid_functional_descriptor() -> Vec<u8> {
     let mut descriptor = vec![
         0x36, 0x21, // length and CCID descriptor type
@@ -1029,18 +995,7 @@ fn ccid_functional_descriptor() -> Vec<u8> {
     descriptor
 }
 
-#[cfg(target_os = "linux")]
-fn strings() -> Vec<u8> {
-    const FUNCTIONFS_STRINGS_MAGIC: u32 = 2;
-    let mut strings = Vec::with_capacity(16);
-    push_u32_le(&mut strings, FUNCTIONFS_STRINGS_MAGIC);
-    push_u32_le(&mut strings, 16);
-    push_u32_le(&mut strings, 0);
-    push_u32_le(&mut strings, 0);
-    strings
-}
-
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn push_u32_le(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }

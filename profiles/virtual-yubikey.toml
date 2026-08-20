@@ -10,8 +10,8 @@ max_speed = "full-speed"
 device_class = 0
 device_subclass = 0
 device_protocol = 0
-manufacturer = "Virtual YubiKey"
-product = "Virtual YubiKey FIDO+CCID"
+manufacturer = "Virtual USB Gadget"
+product = "Virtual Yubico YubiKey FIDO+CCID"
 max_power_ma = 30
 
 [worker]
@@ -40,3 +40,26 @@ device = "/dev/hidg0"
 type = "functionfs"
 name = "ccid"
 mount = "/dev/ffs-virtual-yubikey"
+descriptors_hex = """
+03 00 00 00 bc 00 00 00 03 00 00 00 05 00 00 00
+05 00 00 00
+09 04 00 00 03 0b 00 00 00
+36 21 00 01 00 07 02 00 00 00 a0 0f 00 00 a0 0f
+00 00 00 00 b0 04 00 00 b0 04 00 00 f6 0b 00 00
+00 00 00 00 00 00 00 00 fe 00 04 00 00 0c 00 00
+ff
+ff 00 00 00 01
+07 05 01 02 40 00 00 07 05 81 02 40 00 00
+07 05 82 03 08 00 20
+09 04 00 00 03 0b 00 00 00
+36 21 00 01 00 07 02 00 00 00 a0 0f 00 00 a0 0f
+00 00 00 00 b0 04 00 00 b0 04 00 00 f6 0b 00 00
+00 00 00 00 00 00 00 00 fe 00 04 00 00 0c 00 00
+ff
+ff 00 00 00 01
+07 05 01 02 00 02 00 07 05 81 02 00 02 00
+07 05 82 03 08 00 09
+"""
+strings_hex = """
+02 00 00 00 10 00 00 00 00 00 00 00 00 00 00 00
+"""

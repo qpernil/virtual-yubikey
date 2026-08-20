@@ -1123,6 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "gpiocdev",
+ "libc",
  "spidev",
  "toml",
  "virtual-yubikey-core",
