@@ -270,10 +270,12 @@ The supervisor:
 5. Mounts FunctionFS root-only, validates and publishes descriptor blobs, and
    opens each generated endpoint with direction-appropriate access.
 6. Opens any profile-approved local character devices.
-7. Creates a private `AF_UNIX` `SOCK_SEQPACKET` resource/liveness channel.
+7. Creates a private `AF_UNIX` `SOCK_SEQPACKET` resource/liveness channel and
+   places the worker end on fixed descriptor 3.
 8. Clears supplementary groups, drops the worker's GID and UID, enables
    `PR_SET_NO_NEW_PRIVS`, and starts the worker.
-9. Transfers the ordered FunctionFS FD bundle and waits for `PREPARED`.
+9. Transfers the ordered FunctionFS and local-hardware FD bundle and waits for
+   `PREPARED`.
 10. Links functions in deterministic order and binds the selected UDC.
 11. Opens post-bind nodes such as `/dev/hidg0`, transfers their FDs, and waits
     for `SERVING`.
@@ -603,11 +605,13 @@ The supervisor must run as root because ConfigFS creation, FunctionFS mounts,
 descriptor publication, endpoint opening, UDC binding, and credential setup are privileged Linux
 operations. The protocol worker does not need those privileges.
 
-The worker receives only its validated resource contract: a control descriptor,
+The worker receives only its validated resource contract: control socket FD 3,
 state/runtime paths, already-open USB descriptors, and explicitly approved
-local-device descriptors. It receives no USB paths and needs no device-node
-ownership changes. Persistent credentials and private keys remain in the worker
-and its state directory; they never belong to the supervisor.
+local-device descriptors. All handles arrive through fixed protocol positions;
+there are no descriptor-number environment variables. The worker receives no
+USB paths and needs no device-node ownership changes. Persistent credentials
+and private keys remain in the worker and its state directory; they never
+belong to the supervisor.
 
 This separation limits software privilege exposure. It does not turn a
 general-purpose Raspberry Pi into tamper-resistant security hardware.

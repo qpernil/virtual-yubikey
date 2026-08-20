@@ -1,15 +1,14 @@
 //! Fixed-size lifecycle protocol and descriptor transfer from the supervisor.
 
-use std::env;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
-pub(crate) const CONTROL_FD_ENV: &str = "USB_GADGET_CONTROL_FD";
 pub(crate) const STATE_DIRECTORY_ENV: &str = "USB_GADGET_STATE_DIRECTORY";
 pub(crate) const RUNTIME_DIRECTORY_ENV: &str = "USB_GADGET_RUNTIME_DIRECTORY";
+const CONTROL_FD: i32 = 3;
 
 const MAGIC: [u8; 4] = *b"UGSP";
 const VERSION: u8 = 1;
@@ -29,28 +28,16 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
-    pub(crate) fn from_environment() -> io::Result<Self> {
-        let value = env::var(CONTROL_FD_ENV).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("missing inherited {CONTROL_FD_ENV}"),
-            )
-        })?;
-        let descriptor = value.parse::<i32>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid inherited control descriptor {value:?}"),
-            )
-        })?;
-        if descriptor < 3 {
+    pub(crate) fn from_fixed_descriptor() -> io::Result<Self> {
+        if unsafe { libc::fcntl(CONTROL_FD, libc::F_GETFD) } < 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "the inherited control descriptor must be at least 3",
+                format!("missing supervisor control socket on descriptor {CONTROL_FD}"),
             ));
         }
         Ok(Self {
-            // SAFETY: the supervisor transfers this descriptor to exactly one worker.
-            socket: unsafe { UnixStream::from_raw_fd(descriptor) },
+            // SAFETY: the supervisor places the worker's unique socket on FD 3.
+            socket: unsafe { UnixStream::from_raw_fd(CONTROL_FD) },
         })
     }
 

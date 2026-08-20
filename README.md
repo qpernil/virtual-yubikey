@@ -198,12 +198,11 @@ descriptors and the unprivileged worker; the supervisor never proxies CTAP,
 CCID, APDU, PIN, or key data.
 
 Profiles can also declare root-opened local character devices. The supervisor
-passes their descriptors as `USB_GADGET_RESOURCE_<NAME>_FD` after dropping the
-worker to its configured account. Future SSD1306/GPIO support will use that
-mechanism, while every I2C transaction, framebuffer operation, button debounce,
-LED animation, and touch decision remains in this worker rather than the
-privileged supervisor. The current profile declares no display resources and
-continues to run headlessly.
+appends their descriptors to the pre-bind `SCM_RIGHTS` packet in profile order.
+Future SSD1306/GPIO support will use that mechanism, while every I2C
+transaction, framebuffer operation, button debounce, LED animation, and touch
+decision remains in this worker rather than the privileged supervisor. The
+current profile declares no display resources and continues to run headlessly.
 
 ### Experimental Rust display UI
 
