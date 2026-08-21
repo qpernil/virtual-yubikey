@@ -269,7 +269,8 @@ The supervisor:
 4. Creates an unbound ConfigFS gadget and its USB identity.
 5. Mounts FunctionFS root-only, validates and publishes descriptor blobs, and
    opens each generated endpoint with direction-appropriate access.
-6. Opens any profile-approved local character devices.
+6. Opens profile-approved local character devices and claims exact GPIO line
+   groups.
 7. Creates a private `AF_UNIX` `SOCK_SEQPACKET` resource/liveness channel and
    places the worker end on fixed descriptor 3.
 8. Clears supplementary groups, drops the worker's GID and UID, enables
@@ -442,7 +443,13 @@ profile can additionally expose a debug interface or U2F HID interface.
 USB carries commands and responses, but physical confirmation remains local to
 the virtual appliance: upstream Trezor firmware draws its framebuffer, the Pi
 HAL sends it to the attached OLED, and GPIO buttons provide No/Yes input. The
-supervisor may pass pre-opened I2C/GPIO descriptors, but it does not interpret
+supervisor opens the I2C/SPI bus and claims two exact GPIO v2 line groups: one
+output handle for display control and one pollable input/event handle for all
+buttons. It closes the broad GPIO-chip descriptor before the worker starts and
+passes only the line-request handles. The worker therefore knows semantic bit
+positions, not GPIO paths or offsets, and cannot claim additional lines. It
+blocks on button events while idle and takes immediate atomic value snapshots
+only when firmware behavior needs them. The supervisor does not interpret
 wallet screens, buttons, seeds, or signing requests.
 
 ### Case 4: vendor-specific bulk USB, such as YubiHSM 2
@@ -606,12 +613,14 @@ descriptor publication, endpoint opening, UDC binding, and credential setup are 
 operations. The protocol worker does not need those privileges.
 
 The worker receives only its validated resource contract: control socket FD 3,
-state/runtime paths, already-open USB descriptors, and explicitly approved
-local-device descriptors. All handles arrive through fixed protocol positions;
+state/runtime paths, already-open USB descriptors, approved local-device
+descriptors, and exact GPIO line-request handles. The supervisor rejects raw
+GPIO-chip resources. All handles arrive through fixed protocol positions;
 there are no descriptor-number environment variables. The worker receives no
-USB paths and needs no device-node ownership changes. Persistent credentials
-and private keys remain in the worker and its state directory; they never
-belong to the supervisor.
+USB or GPIO paths and needs no device-node ownership changes. Process exit
+closes its descriptor table, releasing every line group and endpoint even after
+a crash. Persistent credentials and private keys remain in the worker and its
+state directory; they never belong to the supervisor.
 
 This separation limits software privilege exposure. It does not turn a
 general-purpose Raspberry Pi into tamper-resistant security hardware.
