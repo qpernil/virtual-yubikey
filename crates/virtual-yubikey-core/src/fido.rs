@@ -9,13 +9,13 @@ use hmac::{Hmac, Mac};
 use minicbor::Encoder;
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
-use std::fmt;
-use subtle::ConstantTimeEq;
 #[cfg(test)]
-use virtual_yubikey_crypto::post_quantum;
-use virtual_yubikey_crypto::software_signing::{
+use software_key_core::post_quantum;
+use software_key_core::software_signing::{
     EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
 };
+use std::fmt;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;

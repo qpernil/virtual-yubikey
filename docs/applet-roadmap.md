@@ -36,7 +36,7 @@ For each applet:
 
 ## Cryptographic boundary
 
-Keep `virtual-yubikey-crypto` protocol-neutral and limited to behavior both
+Keep `software-key-core` protocol-neutral and limited to behavior both
 repositories actually share: key serialization, public projection, raw and
 profiled signing/verification, RSA encodings, ML-DSA policy, and ECDH. It should
 compose RustCrypto and other established upstream crates rather than duplicate

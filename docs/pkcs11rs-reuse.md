@@ -9,6 +9,11 @@ device behavior is implemented in the core and exercised over both standalone
 and USB paths. `pkcs11rs` consumes `virtual-yubikey-core` through its optional
 `mock-yubikey` feature.
 
+Protocol-neutral software key operations live in the independent sibling
+`software-key-core` repository. Both this workspace and `pkcs11rs` consume the
+same working tree through dependency-by-path, so neither device emulation nor
+the PKCS #11 provider owns the shared implementation.
+
 The Linux USB layers remain here: ConfigFS, FunctionFS, CCID framing, endpoint
 ownership, privilege separation, and systemd integration. PC/SC,
 CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
@@ -23,10 +28,10 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 | Component | Responsibility |
 | --- | --- |
 | `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO and PIV behavior, and persistent logical device state |
-| `virtual-yubikey-crypto::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
-| `virtual-yubikey-crypto::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
-| `virtual-yubikey-crypto::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
-| `virtual-yubikey-crypto::software_key_agreement` | Raw ECDH for any compatible RustCrypto short-Weierstrass curve, persistent X25519 keys, public projection, serialization, contributory key agreement, and shared-secret handling |
+| `software-key-core::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
+| `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
+| `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
+| `software-key-core::software_key_agreement` | Raw ECDH for any compatible RustCrypto short-Weierstrass curve, persistent X25519 keys, public projection, serialization, contributory key agreement, and shared-secret handling |
 | `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
 | `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
@@ -34,7 +39,7 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
                                       |
                                       v
-                             virtual-yubikey-crypto <---- pkcs11rs software backend
+                                 software-key-core <---- pkcs11rs software backend
 ```
 
 The core does not depend on either top-level application. This avoids a cycle

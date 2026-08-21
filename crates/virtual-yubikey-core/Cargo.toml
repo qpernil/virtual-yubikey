@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-virtual-yubikey-crypto = { path = "../virtual-yubikey-crypto" }
+software-key-core = { path = "../../../software-key-core" }
 aes = "0.8.4"
 getrandom = "0.4.3"
 hkdf = "0.13.0"

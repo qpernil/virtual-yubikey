@@ -2,12 +2,12 @@ use crate::{
     crypto::{aes_ecb_block, Direction, AES_BLOCK_SIZE},
     CommandApdu, ResponseApdu,
 };
-use std::{collections::BTreeMap, fmt};
-use subtle::ConstantTimeEq;
-use virtual_yubikey_crypto::{
+use software_key_core::{
     software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
     software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
 };
+use std::{collections::BTreeMap, fmt};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const PIV_AID: [u8; 11] = [
@@ -843,7 +843,7 @@ impl PivApplet {
                     {
                         Ok(key)
                     } else {
-                        Err(virtual_yubikey_crypto::software_signing::SoftwareSigningError::InvalidPrivateKey)
+                        Err(software_key_core::software_signing::SoftwareSigningError::InvalidPrivateKey)
                     }
                 })
                 .map(PivPrivateKey::Signing)

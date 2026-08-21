@@ -54,7 +54,7 @@ Implementation provenance and public sources are recorded in
 
 | Module | Responsibility |
 | --- | --- |
-| `crates/virtual-yubikey-crypto` | Protocol-neutral signing, verification, key serialization, RSA encodings, ECDH/X25519 agreement, and ML-DSA controls shared with clients such as `pkcs11rs` |
+| `../software-key-core` | Sibling path dependency providing protocol-neutral signing, verification, key serialization, RSA encodings, ECDH/X25519 agreement, and ML-DSA controls shared with clients such as `pkcs11rs` |
 | `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, and PIV applet state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |

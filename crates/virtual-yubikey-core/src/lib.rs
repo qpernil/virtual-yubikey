@@ -9,7 +9,7 @@ mod fido;
 mod openpgp;
 mod piv;
 mod preview_sign;
-use virtual_yubikey_crypto::{
+use software_key_core::{
     post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
 };
 

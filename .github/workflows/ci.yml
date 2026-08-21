@@ -15,6 +15,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+
       - name: Run tests
         run: cargo test --locked --workspace --all-features
 
@@ -31,6 +34,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+
       - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@1.85.0
 
@@ -43,6 +49,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
 
       - name: Install iOS Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
