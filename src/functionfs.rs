@@ -40,6 +40,8 @@ const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
+#[cfg(target_os = "linux")]
+const IDLE_ENDPOINT_WAIT_MS: i32 = 250;
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +76,8 @@ unsafe extern "C" {
 
 #[cfg(target_os = "linux")]
 const POLLIN: i16 = 0x0001;
+#[cfg(target_os = "linux")]
+const POLLOUT: i16 = 0x0004;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
@@ -264,7 +268,7 @@ impl Endpoints {
             }
 
             if !progressed {
-                thread::sleep(Duration::from_millis(5));
+                wait_for_main_activity(&ep0, &ccid_interrupt, ccid_notification_pending)?;
             }
         }
         Ok(())
@@ -282,7 +286,7 @@ fn serve_ccid(
     let mut request = [0_u8; MAX_TRANSFER];
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
-            Ok(0) => {}
+            Ok(0) => wait_for_descriptor(&output, POLLIN, IDLE_ENDPOINT_WAIT_MS)?,
             Ok(length) => {
                 let replies =
                     ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
@@ -296,7 +300,7 @@ fn serve_ccid(
                 }
             }
             Err(error) if transient_endpoint_error(&error) => {
-                thread::sleep(Duration::from_millis(5));
+                wait_for_descriptor(&output, POLLIN, IDLE_ENDPOINT_WAIT_MS)?;
             }
             Err(error) => return Err(error),
         }
@@ -687,6 +691,53 @@ fn input_ready(file: &File) -> io::Result<bool> {
         return Err(error);
     }
     Ok(result > 0 && descriptor.revents != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_main_activity(
+    ep0: &File,
+    ccid_interrupt: &File,
+    ccid_notification_pending: bool,
+) -> io::Result<()> {
+    let mut descriptors = [
+        PollFd {
+            fd: ep0.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+        PollFd {
+            fd: ccid_interrupt.as_raw_fd(),
+            events: POLLOUT,
+            revents: 0,
+        },
+    ];
+    let count = if ccid_notification_pending { 2 } else { 1 };
+    wait_for_poll(&mut descriptors, count, IDLE_ENDPOINT_WAIT_MS)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_descriptor(file: &File, events: i16, timeout_ms: i32) -> io::Result<()> {
+    let mut descriptor = [PollFd {
+        fd: file.as_raw_fd(),
+        events,
+        revents: 0,
+    }];
+    wait_for_poll(&mut descriptor, 1, timeout_ms)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_poll(descriptors: &mut [PollFd], count: usize, timeout_ms: i32) -> io::Result<()> {
+    // SAFETY: `descriptors` contains at least `count` initialized pollfd values.
+    let result = unsafe { poll(descriptors.as_mut_ptr(), count, timeout_ms) };
+    if result >= 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::Interrupted {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 #[cfg(target_os = "linux")]
