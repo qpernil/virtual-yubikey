@@ -3,9 +3,9 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-#[cfg(any(test, not(target_os = "linux")))]
-use std::os::fd::AsRawFd;
-use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(test)]
+use std::os::fd::AsFd;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 #[cfg(test)]
 use std::os::unix::net::UnixStream;
 
@@ -30,22 +30,26 @@ pub(crate) enum Message {
     Serving = 0x82,
 }
 
-pub(crate) struct Channel {
-    descriptor: libc::c_int,
+pub(crate) struct Channel<'descriptor> {
+    descriptor: BorrowedFd<'descriptor>,
 }
 
-impl Channel {
+impl Channel<'static> {
     pub(crate) fn from_fixed_descriptor() -> Self {
         Self {
-            descriptor: CONTROL_FD,
+            // SAFETY: the supervisor installs FD 3 before exec, and the worker
+            // deliberately retains that inherited descriptor until process exit.
+            descriptor: unsafe { BorrowedFd::borrow_raw(CONTROL_FD) },
         }
     }
+}
 
+impl Channel<'_> {
     pub(crate) fn send(&mut self, message: Message) -> io::Result<()> {
         let packet = message.encode(0);
         let length = unsafe {
             libc::send(
-                self.descriptor,
+                self.descriptor.as_raw_fd(),
                 packet.as_ptr().cast::<c_void>(),
                 packet.len(),
                 libc::MSG_NOSIGNAL,
@@ -90,8 +94,13 @@ impl Channel {
             header.msg_control = control.as_mut_ptr().cast::<c_void>();
             header.msg_controllen = control.len() as _;
         }
-        let length =
-            unsafe { libc::recvmsg(self.descriptor, &mut header, RECEIVE_DESCRIPTOR_FLAGS) };
+        let length = unsafe {
+            libc::recvmsg(
+                self.descriptor.as_raw_fd(),
+                &mut header,
+                RECEIVE_DESCRIPTOR_FLAGS,
+            )
+        };
         if length < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -170,7 +179,7 @@ impl Channel {
         let mut record = [0_u8; PACKET_LENGTH + 1];
         let length = unsafe {
             libc::recv(
-                self.descriptor,
+                self.descriptor.as_raw_fd(),
                 record.as_mut_ptr().cast::<c_void>(),
                 record.len(),
                 0,
@@ -299,7 +308,7 @@ mod tests {
         send_file(&sender, Message::PostbindResources, &source);
 
         let mut channel = Channel {
-            descriptor: receiver.as_raw_fd(),
+            descriptor: receiver.as_fd(),
         };
         let received = channel
             .receive_files(Message::PostbindResources, 1)
