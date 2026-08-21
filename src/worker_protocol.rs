@@ -3,7 +3,10 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(any(test, not(target_os = "linux")))]
+use std::os::fd::AsRawFd;
+use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(test)]
 use std::os::unix::net::UnixStream;
 
 pub(crate) const STATE_DIRECTORY_ENV: &str = "USB_GADGET_STATE_DIRECTORY";
@@ -28,34 +31,21 @@ pub(crate) enum Message {
 }
 
 pub(crate) struct Channel {
-    socket: UnixStream,
+    descriptor: libc::c_int,
 }
 
 impl Channel {
-    pub(crate) fn from_fixed_descriptor() -> io::Result<Self> {
-        if unsafe { libc::fcntl(CONTROL_FD, libc::F_GETFD) } < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("missing supervisor control socket on descriptor {CONTROL_FD}"),
-            ));
+    pub(crate) fn from_fixed_descriptor() -> Self {
+        Self {
+            descriptor: CONTROL_FD,
         }
-        Ok(Self {
-            // SAFETY: the supervisor places the worker's unique socket on FD 3.
-            socket: unsafe { UnixStream::from_raw_fd(CONTROL_FD) },
-        })
-    }
-
-    pub(crate) fn try_clone(&self) -> io::Result<Self> {
-        Ok(Self {
-            socket: self.socket.try_clone()?,
-        })
     }
 
     pub(crate) fn send(&mut self, message: Message) -> io::Result<()> {
         let packet = message.encode(0);
         let length = unsafe {
             libc::send(
-                self.socket.as_raw_fd(),
+                self.descriptor,
                 packet.as_ptr().cast::<c_void>(),
                 packet.len(),
                 libc::MSG_NOSIGNAL,
@@ -100,13 +90,8 @@ impl Channel {
             header.msg_control = control.as_mut_ptr().cast::<c_void>();
             header.msg_controllen = control.len() as _;
         }
-        let length = unsafe {
-            libc::recvmsg(
-                self.socket.as_raw_fd(),
-                &mut header,
-                RECEIVE_DESCRIPTOR_FLAGS,
-            )
-        };
+        let length =
+            unsafe { libc::recvmsg(self.descriptor, &mut header, RECEIVE_DESCRIPTOR_FLAGS) };
         if length < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -185,7 +170,7 @@ impl Channel {
         let mut record = [0_u8; PACKET_LENGTH + 1];
         let length = unsafe {
             libc::recv(
-                self.socket.as_raw_fd(),
+                self.descriptor,
                 record.as_mut_ptr().cast::<c_void>(),
                 record.len(),
                 0,
@@ -313,7 +298,9 @@ mod tests {
         let source = File::open("/dev/null").unwrap();
         send_file(&sender, Message::PostbindResources, &source);
 
-        let mut channel = Channel { socket: receiver };
+        let mut channel = Channel {
+            descriptor: receiver.as_raw_fd(),
+        };
         let received = channel
             .receive_files(Message::PostbindResources, 1)
             .unwrap();

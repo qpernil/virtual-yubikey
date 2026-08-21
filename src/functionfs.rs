@@ -92,7 +92,7 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         ));
     }
 
-    let mut control = Channel::from_fixed_descriptor()?;
+    let mut control = Channel::from_fixed_descriptor();
     let prebind = control.receive_files(Message::PrebindResources, 4)?;
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
@@ -116,7 +116,7 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         "ready",
         format_args!("serial={serial} usb_descriptors=5"),
     );
-    let mut lifecycle = control.try_clone()?;
+    let mut lifecycle = control;
     thread::Builder::new()
         .name("worker-control".to_owned())
         .spawn(move || {
