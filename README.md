@@ -152,11 +152,34 @@ then uses the resulting UDC through the kernel's ConfigFS and FunctionFS APIs.
 
 ## Install prerequisites
 
+Raspberry Pi OS based on Debian 13 and Ubuntu 24.04 through 26.04 provide
+`rustup` through APT. This is the preferred installation on Raspberry Pi
+ARM64, Ubuntu ARM64, Ubuntu AMD64, and Ubuntu under WSL2. APT owns the rustup
+launcher and proxy commands, while rustup keeps the selected compiler
+toolchain in the invoking user's home directory.
+
 ```sh
 sudo apt update
 sudo apt install --yes git build-essential rustup
-rustup default stable
+rustup set profile minimal
+rustup toolchain install 1.85.0
+rustup default 1.85.0
+
+rustup show active-toolchain
+rustc --version
+cargo --version
 ```
+
+Use the exact `1.85.0` toolchain rather than the moving `stable` channel so a
+later rustup update cannot silently change the compiler used with the checked-in
+`Cargo.lock`. Rustup automatically selects `aarch64-unknown-linux-gnu` on
+64-bit Raspberry Pi and ARM Ubuntu, and `x86_64-unknown-linux-gnu` on AMD64
+Ubuntu and Ubuntu under WSL2. On a minimal Ubuntu installation, enable the
+Ubuntu `universe` repository first if APT cannot find `rustup`.
+
+Machines that only run prebuilt workers need the `rustup` APT package at most;
+do not install a Rust toolchain on them. In particular, no APT `rustc`,
+`cargo`, LLVM, or Rust standard-library packages are required by this setup.
 
 Enable the device controller in `/boot/firmware/config.txt` on current images,
 or `/boot/config.txt` on older images. Add this under `[all]`:
@@ -196,9 +219,10 @@ USB-node ownership change. USB payloads flow directly between those kernel file
 descriptors and the unprivileged worker; the supervisor never proxies CTAP,
 CCID, APDU, PIN, or key data.
 
-Profiles can also declare root-opened local character devices. The supervisor
-appends their descriptors to the pre-bind `SCM_RIGHTS` packet in profile order.
-Future SSD1306/GPIO support will use that mechanism, while every I2C
+Profiles can also declare root-opened local character devices and exact GPIO
+line groups. The supervisor appends their descriptors or line-request handles
+to the pre-bind `SCM_RIGHTS` packet in profile order. Future SSD1306/GPIO
+support will use that mechanism, while every I2C
 transaction, framebuffer operation, button debounce, LED animation, and touch
 decision remains in this worker rather than the privileged supervisor. The
 current profile declares no display resources and continues to run headlessly.
