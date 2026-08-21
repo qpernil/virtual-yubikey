@@ -13,6 +13,10 @@ const CONTROL_FD: i32 = 3;
 const MAGIC: [u8; 4] = *b"UGSP";
 const VERSION: u8 = 1;
 const PACKET_LENGTH: usize = 8;
+#[cfg(target_os = "linux")]
+const RECEIVE_DESCRIPTOR_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECEIVE_DESCRIPTOR_FLAGS: libc::c_int = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -96,7 +100,13 @@ impl Channel {
             header.msg_control = control.as_mut_ptr().cast::<c_void>();
             header.msg_controllen = control.len() as _;
         }
-        let length = unsafe { libc::recvmsg(self.socket.as_raw_fd(), &mut header, 0) };
+        let length = unsafe {
+            libc::recvmsg(
+                self.socket.as_raw_fd(),
+                &mut header,
+                RECEIVE_DESCRIPTOR_FLAGS,
+            )
+        };
         if length < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -158,10 +168,14 @@ impl Channel {
                 ),
             ));
         }
-        for descriptor in &descriptors {
-            if unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0
-            {
-                return Err(io::Error::last_os_error());
+        #[cfg(not(target_os = "linux"))]
+        {
+            for descriptor in &descriptors {
+                if unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) }
+                    != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
             }
         }
         Ok(descriptors.into_iter().map(File::from).collect())
