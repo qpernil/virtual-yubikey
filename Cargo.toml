@@ -15,25 +15,12 @@ members = ["crates/virtual-yubikey-core", "crates/virtual-yubikey-crypto"]
 resolver = "2"
 
 [dependencies]
-embedded-graphics = { version = "0.8.2", optional = true }
 libc = "0.2.189"
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gpiocdev = { version = "0.8.0", optional = true }
-spidev = { version = "0.7.1", optional = true }
-
-[features]
-display-demo = ["dep:embedded-graphics", "dep:gpiocdev", "dep:spidev"]
 
 [[bin]]
 name = "virtual-yubikey-worker"
 path = "src/main.rs"
-
-[[bin]]
-name = "st7789-embedded-graphics-demo"
-path = "src/bin/st7789-embedded-graphics-demo.rs"
-required-features = ["display-demo"]
 
 [dev-dependencies]
 toml = "0.9.12"
