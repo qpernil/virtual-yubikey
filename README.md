@@ -125,10 +125,10 @@ verify credentials using these COSE algorithms:
 | RSA-PSS | PS256 (`-37`), PS384 (`-38`), PS512 (`-39`) |
 | RSA PKCS #1 v1.5 | RS256 (`-257`), RS384 (`-258`), RS512 (`-259`) |
 
-For post-quantum compatibility testing, the emulator deliberately prefers the
-strongest offered ML-DSA parameter set—87, then 65, then 44—before considering
-classical algorithms in client order. This is test policy rather than an attempt
-to reproduce every authenticator's negotiation policy.
+Credential creation follows the client's preference order and selects its first
+supported algorithm, as required by CTAP/WebAuthn. Post-quantum compatibility
+tests can request ML-DSA first or offer it alone; ordinary clients that prefer
+ES256 therefore receive ES256 credentials.
 
 ML-DSA uses the RustCrypto `ml-dsa` implementation in ordinary Raspberry Pi
 software. It is suitable for interoperability development, not as evidence of
