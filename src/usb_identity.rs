@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_profile_contains_only_the_launch_boundary() {
+    fn installed_profile_contains_launch_display_and_touch_boundaries() {
         let profile: toml::Value = toml::from_str(PROFILE).unwrap();
         assert_eq!(profile.get("schema").unwrap().as_integer(), Some(1));
         assert_eq!(
@@ -238,6 +238,34 @@ mod tests {
         );
         assert!(profile.get("usb").is_none());
         assert!(profile.get("functions").is_none());
+        let resources = profile.get("resources").unwrap().as_array().unwrap();
+        assert_eq!(resources.len(), 3);
+        assert_eq!(
+            resources[0].get("name").unwrap().as_str(),
+            Some("display-spi")
+        );
+        assert_eq!(
+            resources[1].get("name").unwrap().as_str(),
+            Some("display-control")
+        );
+        assert_eq!(
+            resources[2].get("name").unwrap().as_str(),
+            Some("touch-button")
+        );
+        assert_eq!(
+            resources[2].get("offsets").unwrap().as_array().unwrap()[0].as_integer(),
+            Some(13)
+        );
+        assert_eq!(
+            resources[2].get("direction").unwrap().as_str(),
+            Some("input")
+        );
+        assert_eq!(
+            resources[2].get("active_low").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(resources[2].get("bias").unwrap().as_str(), Some("pull-up"));
+        assert_eq!(resources[2].get("edge").unwrap().as_str(), Some("both"));
         assert_eq!(
             profile
                 .get("worker")

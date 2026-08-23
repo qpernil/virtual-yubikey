@@ -44,6 +44,10 @@ const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(target_os = "linux")]
 const ENDPOINT_RETRY_DELAY: Duration = Duration::from_millis(50);
+#[cfg(target_os = "linux")]
+const FIDO_PRESENCE_BLINK_HALF_PERIOD: Duration = Duration::from_millis(384);
+#[cfg(target_os = "linux")]
+pub(crate) const USER_PRESENCE_TOUCH: u8 = b'T';
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +59,7 @@ enum UserPresenceCommand {
 impl UserPresenceCommand {
     fn decode(value: u8) -> Option<Self> {
         match value {
-            b'T' => Some(Self::Touch),
+            USER_PRESENCE_TOUCH => Some(Self::Touch),
             // Additional command bytes can represent simulated
             // biometric results without changing the IPC transport.
             _ => None,
@@ -78,13 +82,9 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
 
     STOP_REQUESTED.store(false, Ordering::Relaxed);
     let control = Channel::from_fixed_descriptor();
-    let resources = validate_initial_resources(control.receive()?)?;
-    if !resources.is_empty() {
-        return invalid(format!(
-            "virtual YubiKey received {} unexpected initial resources",
-            resources.len()
-        ));
-    }
+    let resources = InitialResources::parse(validate_initial_resources(control.receive()?)?)?;
+    let display =
+        crate::display::Controller::start(resources.display_spi, resources.display_control)?;
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
@@ -92,6 +92,8 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         piv_state: state_directory.join(format!("piv-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
+    let buttons =
+        crate::buttons::Controller::start(resources.touch_button, storage.touch_socket.clone())?;
     let fido = load_fido_state(serial, &storage.fido_state)?;
     let ccid = load_piv_state(serial, &storage.piv_state)?;
     let configure_request = 1;
@@ -133,10 +135,48 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     );
 
     let keepalive = crate::keepalive::Scheduler::start()?;
-    let ccid_notifications = endpoints.start(serial, fido, ccid, &storage, &keepalive)?;
-    let result = serve_control(control, generation, ccid_notifications);
+    let activity = display.activity();
+    let ccid_notifications =
+        endpoints.start(serial, fido, ccid, &storage, &keepalive, &activity)?;
+    let result = serve_control(control, generation, ccid_notifications, &display);
     drop(keepalive);
-    result
+    let button_result = buttons.shutdown();
+    let display_result = display.shutdown();
+    result.and(button_result).and(display_result)
+}
+
+#[cfg(target_os = "linux")]
+struct InitialResources {
+    display_spi: File,
+    display_control: File,
+    touch_button: File,
+}
+
+#[cfg(target_os = "linux")]
+impl InitialResources {
+    fn parse(resources: Vec<(String, File)>) -> io::Result<Self> {
+        let mut display_spi = None;
+        let mut display_control = None;
+        let mut touch_button = None;
+        for (name, file) in resources {
+            let target = match name.as_str() {
+                "display-spi" => &mut display_spi,
+                "display-control" => &mut display_control,
+                "touch-button" => &mut touch_button,
+                _ => return invalid(format!("unexpected initial resource {name}")),
+            };
+            if target.replace(file).is_some() {
+                return invalid(format!("duplicate initial resource {name}"));
+            }
+        }
+        Ok(Self {
+            display_spi: display_spi.ok_or_else(|| data_error("missing display-spi resource"))?,
+            display_control: display_control
+                .ok_or_else(|| data_error("missing display-control resource"))?,
+            touch_button: touch_button
+                .ok_or_else(|| data_error("missing touch-button resource"))?,
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -171,6 +211,15 @@ struct WorkerStorage {
     fido_state: PathBuf,
     piv_state: PathBuf,
     touch_socket: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+struct HidRuntime {
+    serial: u32,
+    state_path: PathBuf,
+    touch_socket: PathBuf,
+    clock: crate::keepalive::Handle,
+    display_activity: crate::display::Activity,
 }
 
 #[cfg(target_os = "linux")]
@@ -237,6 +286,7 @@ impl Endpoints {
         ccid: crate::ccid::Device,
         storage: &WorkerStorage,
         keepalive: &crate::keepalive::Scheduler,
+        display_activity: &crate::display::Activity,
     ) -> io::Result<SyncSender<()>> {
         let Self {
             fido_out,
@@ -276,8 +326,16 @@ impl Endpoints {
         thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
+            let display_activity = display_activity.clone();
             move || {
-                if let Err(error) = serve_ccid(ccid_out, ccid_in, ccid, &state_path, clock) {
+                if let Err(error) = serve_ccid(
+                    ccid_out,
+                    ccid_in,
+                    ccid,
+                    &state_path,
+                    clock,
+                    display_activity,
+                ) {
                     diagnostics::log(
                         Level::Info,
                         "ccid",
@@ -290,19 +348,15 @@ impl Endpoints {
         })?;
 
         thread::Builder::new().name("fido-hid".to_owned()).spawn({
-            let state_path = storage.fido_state.clone();
-            let touch_socket = storage.touch_socket.clone();
-            let clock = keepalive.handle();
+            let runtime = HidRuntime {
+                serial,
+                state_path: storage.fido_state.clone(),
+                touch_socket: storage.touch_socket.clone(),
+                clock: keepalive.handle(),
+                display_activity: display_activity.clone(),
+            };
             move || {
-                if let Err(error) = serve_hid(
-                    fido_out,
-                    fido_in,
-                    fido,
-                    serial,
-                    &state_path,
-                    &touch_socket,
-                    clock,
-                ) {
+                if let Err(error) = serve_hid(fido_out, fido_in, fido, runtime) {
                     diagnostics::log(
                         Level::Info,
                         "ctaphid",
@@ -327,6 +381,7 @@ fn serve_control(
     control: Channel<'static>,
     generation: u32,
     ccid_notifications: SyncSender<()>,
+    display: &crate::display::Controller,
 ) -> io::Result<()> {
     loop {
         let record = match control.receive() {
@@ -350,12 +405,17 @@ fn serve_control(
                     format_args!("event={event:?} activation={activation}"),
                 );
                 if event == UsbBusEvent::Enable {
+                    display.resume()?;
                     match ccid_notifications.try_send(()) {
                         Ok(()) | Err(TrySendError::Full(())) => {}
                         Err(TrySendError::Disconnected(())) => {
                             return Err(io::Error::other("CCID notification endpoint stopped"));
                         }
                     }
+                } else if event == UsbBusEvent::Suspend {
+                    display.suspend()?;
+                } else if event == UsbBusEvent::Resume {
+                    display.resume()?;
                 }
             }
             Kind::UsbControlRequest if record.request_id != 0 => {
@@ -463,12 +523,14 @@ fn serve_ccid(
     mut ccid: crate::ccid::Device,
     state_path: &Path,
     clock: crate::keepalive::Handle,
+    display_activity: crate::display::Activity,
 ) -> io::Result<()> {
     let mut request = [0_u8; MAX_TRANSFER];
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
             Ok(0) => {}
             Ok(length) => {
+                display_activity.pulse();
                 let replies =
                     ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
                         write_transfer(&mut input, keepalive)
@@ -493,11 +555,15 @@ fn serve_hid(
     output: File,
     mut input: File,
     mut fido: FidoAuthenticator,
-    serial: u32,
-    state_path: &Path,
-    touch_socket: &Path,
-    clock: crate::keepalive::Handle,
+    runtime: HidRuntime,
 ) -> io::Result<()> {
+    let HidRuntime {
+        serial,
+        state_path,
+        touch_socket,
+        clock,
+        display_activity,
+    } = runtime;
     let reports = start_hid_reader(output)?;
     let mut ctaphid = crate::ctaphid::Device::new(
         virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
@@ -514,6 +580,9 @@ fn serve_hid(
                 return Err(io::Error::other("FIDO OUT reader stopped"))
             }
         };
+        if !report.is_empty() {
+            display_activity.pulse();
+        }
         match report.len() {
             0 => {}
             length if length != crate::ctaphid::REPORT_SIZE => {
@@ -577,7 +646,14 @@ fn serve_hid(
                         );
                     }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                        match wait_for_touch(&mut input, &reports, channel, touch_socket, &clock) {
+                        match wait_for_touch(
+                            &mut input,
+                            &reports,
+                            channel,
+                            &touch_socket,
+                            &clock,
+                            &display_activity,
+                        ) {
                             Ok(true) => match exchange_fido_with_keepalives(
                                 &mut input, &reports, &mut fido, request, channel, true, &clock,
                             ) {
@@ -605,7 +681,7 @@ fn serve_hid(
                         }
                     };
                     if fido.take_persistent_change() {
-                        if let Err(error) = persist_fido_state(&fido, state_path) {
+                        if let Err(error) = persist_fido_state(&fido, &state_path) {
                             persistence_error = Some(error);
                         }
                     }
@@ -815,6 +891,7 @@ fn wait_for_touch(
     channel: u32,
     touch_socket: &Path,
     clock: &crate::keepalive::Handle,
+    display_activity: &crate::display::Activity,
 ) -> io::Result<bool> {
     let touch = TouchSocket::bind(touch_socket)?;
     diagnostics::log(
@@ -824,6 +901,7 @@ fn wait_for_touch(
         format_args!("channel={channel:08x} socket={}", touch_socket.display()),
     );
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
+    let _presence_wait = display_activity.wait_for_presence(FIDO_PRESENCE_BLINK_HALF_PERIOD)?;
     let mut signal = [0_u8; 1];
 
     while !STOP_REQUESTED.load(Ordering::Relaxed) {

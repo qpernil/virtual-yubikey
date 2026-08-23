@@ -390,6 +390,36 @@ This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
 
+FIDO and CCID endpoint owners also send non-blocking activity hints to a
+dedicated local-display thread. That thread alternates two pre-encoded native
+ST7789 frames so the YubiKey's cut-out y and NFC arcs blink green during USB
+traffic. An atomic pending flag deliberately coalesces activity hints before
+they enter the non-blocking display command channel: display SPI work can never
+delay either USB application, while sustained traffic may still blink as
+enthusiastically as the panel can accept complete frames. USB suspend and worker
+exit clear the display and turn off its backlight.
+
+A separate reference-counted physical-presence state blinks for as long as any
+application is blocked waiting for touch. Each scoped guard carries its cadence:
+FIDO uses a measured 384 ms half-period, approximately 1.30 blinks per second,
+matching a YubiKey 5 NFC. PIV and OpenPGP will use a 500 ms half-period for one
+blink per second when their application paths implement touch. If applications
+wait concurrently, the fastest active cadence wins. The smart-card application
+paths can reuse the same state without teaching the display which protocol
+requested presence.
+
+The ST7789 and joystick share a HAT but not an I/O path. Display frames use SPI;
+GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. A separate
+active-low GPIO13 event handle reports only the joystick's center press. A worker
+thread blocks in `poll` on that handle and a private shutdown socket, so idle
+button handling consumes no CPU and never enters `display-backends`.
+
+Every GPIO edge is drained immediately. A logical rising edge sends the same
+one-byte touch command as the local helper, but the destination datagram socket
+exists only for the lifetime of the current FIDO presence wait. Closing a wait
+destroys its socket and queued datagrams. Presses made while idle or while a
+previous request was active can therefore never approve a later operation.
+
 ### Case 3: Trezor vendor/WebUSB transport
 
 Trezor Suite or `trezorctl` exchanges framed Trezor protocol messages with the
@@ -505,7 +535,7 @@ flowchart TB
 
 | Virtual appliance | Host-facing applications | USB interfaces | Pi endpoint implementation | Device-specific worker responsibility |
 | --- | --- | --- | --- | --- |
-| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, FIDO2, keys and state |
+| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, FIDO2, keys, state, and local activity display |
 | Virtual Trezor | Trezor Suite, `trezorctl`, Trezor Connect | Main vendor/WebUSB, optional debug and U2F HID | Primarily FunctionFS; profile-selected HID where appropriate | Trezor framing, legacy firmware, OLED framebuffer, buttons, wallet state |
 | Virtual YubiHSM | `yubihsm-shell`, PKCS #11 module, SDKs | Vendor-specific bulk OUT/IN | FunctionFS | YubiHSM sessions, commands, objects, capabilities, audit and state |
 

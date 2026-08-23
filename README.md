@@ -201,8 +201,8 @@ A Pi 4 normally reports `fe980000.usb`.
 
 ## Build and run
 
-Place this repository beside the supervisor checkout, then build both binaries
-from their common parent directory:
+Place this repository beside the supervisor and `display-backends` checkouts,
+then build both binaries from their common parent directory:
 
 ```sh
 cargo build --release --locked --manifest-path virtual-yubikey/Cargo.toml \
@@ -225,13 +225,21 @@ There is no data framing, proxy, acknowledgement, or polling loop between the
 worker and FunctionFS. The supervisor never handles CTAP, CCID, APDU, PIN, or
 key data.
 
-Profiles can also declare root-opened local character devices and exact GPIO
-line groups. The supervisor sends their named handles in the initial
-`SCM_RIGHTS` resource record. Future display/GPIO
-support will use that mechanism, while every I2C
-transaction, framebuffer operation, button debounce, LED animation, and touch
-decision remains in this worker rather than the privileged supervisor. The
-current profile declares no display resources and continues to run headlessly.
+The profile also declares the ST7789 SPI device, its exact data/command, reset,
+and backlight GPIO lines, and joystick-center GPIO13 as a separate active-low
+input with both-edge events. The supervisor opens those capabilities as root
+and sends their named handles in the initial `SCM_RIGHTS` resource record.
+The worker renders an included vertical YubiKey image as a native 240x240
+RGB565 frame. Accepted FIDO and CCID traffic toggles the green cut-out details
+on a dedicated, coalescing display thread; 90 ms without new activity returns
+the image to its idle state. While any application is blocked waiting for
+physical presence, the same cut-outs blink until touch, cancellation, or failure
+ends the wait. Each application supplies its authentic cadence: FIDO uses a
+384 ms half-period for approximately 1.30 blinks per second, matching a measured
+YubiKey 5 NFC, while PIV and OpenPGP touch policies will use a 500 ms half-period
+for one blink per second when those application paths implement touch. USB
+suspend and worker shutdown clear the panel and turn off its backlight. Display
+traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
@@ -261,8 +269,9 @@ Trace logging includes complete protocol payloads and may expose PINs or
 cryptographic material as the emulator grows.
 
 FIDO HID `authenticatorSelection`, `authenticatorMakeCredential`, and
-`authenticatorGetAssertion` wait for an explicit simulated touch. While waiting,
-the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
+`authenticatorGetAssertion` wait for an explicit touch. Pressing the display
+HAT joystick straight down supplies that touch; directional movement does
+nothing. While waiting, the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
 browser-issued CTAPHID `CANCEL`. Cancellation returns
 `CTAP2_ERR_KEEPALIVE_CANCEL` without changing credential state. The worker
 exposes a mode-`0600` Unix datagram socket at
@@ -273,9 +282,13 @@ The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event
 virtual-yubikey-touch
 ```
 
-The tool fails when no operation is waiting, so touches cannot be queued for a
-later request. Browser or operating-system UI remains responsible for PIN entry
-and cancellation; the IPC event represents only the physical touch. The `/run`
+The GPIO thread drains edge events continuously but sends only a newly observed
+press into the socket for the currently active wait. The helper fails when no
+operation is waiting. A press while idle, a button held before a request, switch
+bounce after completion, and unread datagrams from a completed wait therefore
+cannot approve a later request. Browser or operating-system UI remains
+responsible for PIN entry and cancellation; the IPC event represents only the
+physical touch. The `/run`
 directory is volatile and is also removed during clean service shutdown. IPC
 payloads start with a one-byte command (`T` is touch); unknown commands are
 ignored so future simulated fingerprint commands and their payloads can extend
@@ -326,9 +339,10 @@ sudo systemctl enable --now \
 ```
 
 That is the entire device-specific installation: one small profile containing
-the worker launch and resource boundary. The worker owns its USB personality;
-the worker and touch helper run directly from `target/release`. A normal update
-is `git pull`, rebuild, and restart; reinstall the profile only when it changes.
+the worker launch and resource boundary. The worker owns its USB personality
+and drives the display through the shared `display-backends` crate; the worker
+and touch helper run directly from `target/release`. A normal update is
+`git pull`, rebuild, and restart; reinstall the profile only when it changes.
 
 The supervisor rejects a profile that is not a regular root-owned file. It
 accepts a worker owned by root or its configured unprivileged user, but rejects
