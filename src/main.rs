@@ -1,11 +1,15 @@
 //! Unprivileged YubiKey protocol worker for `usb-gadget-supervisor`.
 
+#[cfg(target_os = "linux")]
+mod buttons;
 #[cfg(any(target_os = "linux", test))]
 mod ccid;
 mod cli;
 #[cfg(any(target_os = "linux", test))]
 mod ctaphid;
 mod diagnostics;
+#[cfg(any(target_os = "linux", test))]
+mod display;
 mod functionfs;
 #[cfg(any(target_os = "linux", test))]
 mod keepalive;

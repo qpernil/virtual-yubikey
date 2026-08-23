@@ -22,6 +22,11 @@ The principal public implementation references are:
 - Yubico's publicly available developer documentation for YubiKey Management
   and PIV extensions.
 
+The optional physical display uses Yubico's publicly published YubiKey 5 NFC
+front product image as recorded in `assets/README.md`. The image is kept as an
+external brand asset with its own terms, not as an implementation source or as
+code licensed by this repository.
+
 Compatibility was validated through normal, documented host applications and
 protocol exchanges with software including browsers, PC/SC, `ykman`,
 `yubico-piv-tool`, and Yubico Authenticator. Observed protocol facts and test
