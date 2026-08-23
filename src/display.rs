@@ -99,6 +99,14 @@ impl Controller {
         }
     }
 
+    pub(crate) fn bind(&self) -> io::Result<()> {
+        send_command(&self.sender, Command::Bind)
+    }
+
+    pub(crate) fn unbind(&self) -> io::Result<()> {
+        send_command(&self.sender, Command::Unbind)
+    }
+
     pub(crate) fn suspend(&self) -> io::Result<()> {
         send_command(&self.sender, Command::Suspend)
     }
@@ -121,6 +129,8 @@ enum Command {
     Activity,
     PresenceWaitStarted,
     PresenceWaitEnded,
+    Bind,
+    Unbind,
     Suspend,
     Resume,
     Shutdown,
@@ -144,11 +154,11 @@ fn display_loop(
     activity_pending: Arc<AtomicBool>,
 ) {
     let mut hardware = Hardware::new(bus, control);
+    let mut bound = false;
     let mut suspended = false;
     let mut lit = false;
     let mut presence_waiters = 0_u32;
     let mut idle_at: Option<Instant> = None;
-    hardware.render(false);
 
     loop {
         let received = match idle_at {
@@ -164,12 +174,12 @@ fn display_loop(
             Ok(Some(command)) => command,
             Ok(None) => unreachable!(),
             Err(RecvTimeoutError::Timeout) => {
-                if !suspended && presence_waiters != 0 {
+                if bound && !suspended && presence_waiters != 0 {
                     lit = !lit;
                     hardware.render(lit);
                     idle_at = Some(Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
                 } else {
-                    if !suspended && lit {
+                    if bound && !suspended && lit {
                         lit = false;
                         hardware.render(false);
                     }
@@ -182,7 +192,7 @@ fn display_loop(
         match command {
             Command::Activity => {
                 activity_pending.store(false, Ordering::Release);
-                if suspended || presence_waiters != 0 {
+                if !bound || suspended || presence_waiters != 0 {
                     continue;
                 }
                 lit = !lit;
@@ -191,7 +201,7 @@ fn display_loop(
             }
             Command::PresenceWaitStarted => {
                 presence_waiters = presence_waiters.saturating_add(1);
-                if presence_waiters == 1 && !suspended {
+                if presence_waiters == 1 && bound && !suspended {
                     lit = true;
                     hardware.render(true);
                     idle_at = Some(Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
@@ -201,20 +211,37 @@ fn display_loop(
                 presence_waiters = presence_waiters.saturating_sub(1);
                 if presence_waiters == 0 {
                     idle_at = None;
-                    if !suspended && lit {
+                    if bound && !suspended && lit {
                         lit = false;
                         hardware.render(false);
                     }
                 }
             }
+            Command::Bind => {
+                bound = true;
+                suspended = false;
+                lit = presence_waiters != 0;
+                hardware.render(lit);
+                idle_at =
+                    (presence_waiters != 0).then(|| Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
+            }
+            Command::Unbind => {
+                bound = false;
+                suspended = false;
+                lit = false;
+                idle_at = None;
+                hardware.turn_off("USB unbind");
+            }
             Command::Suspend => {
                 suspended = true;
                 lit = false;
                 idle_at = None;
-                hardware.turn_off("USB suspend");
+                if bound {
+                    hardware.turn_off("USB suspend");
+                }
             }
             Command::Resume => {
-                if suspended {
+                if bound && suspended {
                     suspended = false;
                     lit = presence_waiters != 0;
                     hardware.render(lit);

@@ -241,8 +241,9 @@ will reuse this state when those application paths implement touch. USB
 suspend and worker shutdown clear the panel and turn off its backlight. KEY3
 also turns the display off while the worker publishes its current personality
 again; the supervisor replaces only the USB generation, and the same worker
-restores the idle image after its new endpoints are serving. To the host and
-observer this is an eject followed by insertion without a process restart.
+restores the idle image only when the replacement generation is bound to USB.
+To the host and observer this is an eject followed by insertion without a
+process restart.
 Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
