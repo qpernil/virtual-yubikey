@@ -263,6 +263,8 @@ On worker exit, the still-running supervisor unbinds and removes the old gadget,
 then starts a completely fresh worker incarnation with fresh descriptors. A
 service stop performs the same cleanup and ends the supervisor. A global
 exclusive lock prevents concurrent profiles from owning the Pi UDC. The
+supervisor keeps every replacement detached for at least 250 ms before rebind;
+initial service attachment has no artificial delay. The
 profile supplies the worker serial and log level; its direct options are:
 
 ```text
@@ -335,14 +337,20 @@ with YubiKey-specific extensions matched to the
 ## Install as a service
 
 Install the generic supervisor once as described in its README, then build this
-repository in place. Set the profile's `command` and `run_as` fields to the
-worker's installed path and its dedicated unprivileged service account.
+repository in place. Copy the neutral profile to a temporary file and set its
+`command` and `run_as` fields to the worker's absolute path and dedicated
+unprivileged service account; do not put machine-local paths into the checked-in
+template.
 
 ```sh
 cargo build --release --locked
+cp profiles/virtual-yubikey.toml /tmp/virtual-yubikey.toml
+editor /tmp/virtual-yubikey.toml
 sudo install -o root -g root -m 0644 \
-  profiles/virtual-yubikey.toml \
+  /tmp/virtual-yubikey.toml \
   /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
+sudo /opt/usb-gadget-supervisor/usb-gadget-supervisor --check-profile \
+  --profile /opt/usb-gadget-supervisor/profiles/virtual-yubikey.toml
 sudo systemctl enable --now \
   usb-gadget-supervisor@virtual-yubikey.service
 ```

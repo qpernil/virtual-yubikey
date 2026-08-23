@@ -14,8 +14,10 @@ Protocol-neutral software key operations live in the independent sibling
 same working tree through dependency-by-path, so neither device emulation nor
 the PKCS #11 provider owns the shared implementation.
 
-The Linux USB layers remain here: ConfigFS, FunctionFS, CCID framing, endpoint
-ownership, privilege separation, and systemd integration. PC/SC,
+The Linux device layers remain split across the gadget projects. The generic
+supervisor owns ConfigFS, the FunctionFS mount and `ep0`, UDC lifecycle,
+privilege separation, and systemd integration. This repository owns CTAPHID,
+CCID framing, direct FunctionFS data-endpoint I/O, and device behavior. PC/SC,
 CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
 The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
@@ -32,7 +34,8 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
 | `software-key-core::software_key_agreement` | Raw ECDH for any compatible RustCrypto short-Weierstrass curve, persistent X25519 keys, public projection, serialization, contributory key agreement, and shared-secret handling |
-| `virtual-yubikey` binary | ConfigFS, FunctionFS, CTAPHID, CCID, privilege separation, diagnostics and systemd integration |
+| `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
+| `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
 | `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
 ```text
