@@ -45,8 +45,6 @@ const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(target_os = "linux")]
 const ENDPOINT_RETRY_DELAY: Duration = Duration::from_millis(50);
 #[cfg(target_os = "linux")]
-const FIDO_PRESENCE_BLINK_HALF_PERIOD: Duration = Duration::from_millis(384);
-#[cfg(target_os = "linux")]
 pub(crate) const USER_PRESENCE_TOUCH: u8 = b'T';
 
 #[cfg(target_os = "linux")]
@@ -901,7 +899,7 @@ fn wait_for_touch(
         format_args!("channel={channel:08x} socket={}", touch_socket.display()),
     );
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
-    let _presence_wait = display_activity.wait_for_presence(FIDO_PRESENCE_BLINK_HALF_PERIOD)?;
+    let _presence_wait = display_activity.wait_for_presence()?;
     let mut signal = [0_u8; 1];
 
     while !STOP_REQUESTED.load(Ordering::Relaxed) {

@@ -9,8 +9,6 @@ use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
 use display_backends::{Backend, Display};
 #[cfg(target_os = "linux")]
-use std::collections::BTreeMap;
-#[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io;
@@ -30,6 +28,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 const ACTIVITY_HOLD: Duration = Duration::from_millis(90);
 #[cfg(target_os = "linux")]
+const PRESENCE_BLINK_HALF_PERIOD: Duration = Duration::from_millis(384);
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct Activity {
     sender: Sender<Command>,
@@ -47,19 +47,12 @@ impl Activity {
         }
     }
 
-    pub(crate) fn wait_for_presence(&self, half_period: Duration) -> io::Result<PresenceWait> {
-        if half_period.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "presence blink half-period must be nonzero",
-            ));
-        }
+    pub(crate) fn wait_for_presence(&self) -> io::Result<PresenceWait> {
         self.sender
-            .send(Command::PresenceWaitStarted(half_period))
+            .send(Command::PresenceWaitStarted)
             .map_err(|_| display_stopped())?;
         Ok(PresenceWait {
             sender: self.sender.clone(),
-            half_period,
         })
     }
 }
@@ -67,15 +60,12 @@ impl Activity {
 #[cfg(target_os = "linux")]
 pub(crate) struct PresenceWait {
     sender: Sender<Command>,
-    half_period: Duration,
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for PresenceWait {
     fn drop(&mut self) {
-        let _ = self
-            .sender
-            .send(Command::PresenceWaitEnded(self.half_period));
+        let _ = self.sender.send(Command::PresenceWaitEnded);
     }
 }
 
@@ -129,8 +119,8 @@ impl Controller {
 #[derive(Clone, Copy)]
 enum Command {
     Activity,
-    PresenceWaitStarted(Duration),
-    PresenceWaitEnded(Duration),
+    PresenceWaitStarted,
+    PresenceWaitEnded,
     Suspend,
     Resume,
     Shutdown,
@@ -156,7 +146,7 @@ fn display_loop(
     let mut hardware = Hardware::new(bus, control);
     let mut suspended = false;
     let mut lit = false;
-    let mut presence_waiters = BTreeMap::<Duration, u32>::new();
+    let mut presence_waiters = 0_u32;
     let mut idle_at: Option<Instant> = None;
     hardware.render(false);
 
@@ -174,10 +164,10 @@ fn display_loop(
             Ok(Some(command)) => command,
             Ok(None) => unreachable!(),
             Err(RecvTimeoutError::Timeout) => {
-                if !suspended && !presence_waiters.is_empty() {
+                if !suspended && presence_waiters != 0 {
                     lit = !lit;
                     hardware.render(lit);
-                    idle_at = presence_deadline(&presence_waiters);
+                    idle_at = Some(Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
                 } else {
                     if !suspended && lit {
                         lit = false;
@@ -192,40 +182,29 @@ fn display_loop(
         match command {
             Command::Activity => {
                 activity_pending.store(false, Ordering::Release);
-                if suspended || !presence_waiters.is_empty() {
+                if suspended || presence_waiters != 0 {
                     continue;
                 }
                 lit = !lit;
                 hardware.render(lit);
                 idle_at = Some(Instant::now() + ACTIVITY_HOLD);
             }
-            Command::PresenceWaitStarted(half_period) => {
-                let first = presence_waiters.is_empty();
-                let count = presence_waiters.entry(half_period).or_default();
-                *count = count.saturating_add(1);
-                if !suspended {
-                    if first {
-                        lit = true;
-                        hardware.render(true);
-                    }
-                    idle_at = presence_deadline(&presence_waiters);
+            Command::PresenceWaitStarted => {
+                presence_waiters = presence_waiters.saturating_add(1);
+                if presence_waiters == 1 && !suspended {
+                    lit = true;
+                    hardware.render(true);
+                    idle_at = Some(Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
                 }
             }
-            Command::PresenceWaitEnded(half_period) => {
-                if let Some(count) = presence_waiters.get_mut(&half_period) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        presence_waiters.remove(&half_period);
-                    }
-                }
-                if presence_waiters.is_empty() {
+            Command::PresenceWaitEnded => {
+                presence_waiters = presence_waiters.saturating_sub(1);
+                if presence_waiters == 0 {
                     idle_at = None;
                     if !suspended && lit {
                         lit = false;
                         hardware.render(false);
                     }
-                } else if !suspended {
-                    idle_at = presence_deadline(&presence_waiters);
                 }
             }
             Command::Suspend => {
@@ -237,9 +216,10 @@ fn display_loop(
             Command::Resume => {
                 if suspended {
                     suspended = false;
-                    lit = !presence_waiters.is_empty();
+                    lit = presence_waiters != 0;
                     hardware.render(lit);
-                    idle_at = presence_deadline(&presence_waiters);
+                    idle_at = (presence_waiters != 0)
+                        .then(|| Instant::now() + PRESENCE_BLINK_HALF_PERIOD);
                 }
             }
             Command::Shutdown => {
@@ -248,11 +228,6 @@ fn display_loop(
             }
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn presence_deadline(waiters: &BTreeMap<Duration, u32>) -> Option<Instant> {
-    waiters.keys().next().map(|period| Instant::now() + *period)
 }
 
 #[cfg(target_os = "linux")]
