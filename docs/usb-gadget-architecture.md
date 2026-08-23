@@ -35,15 +35,11 @@ flowchart TB
     subgraph Kernel["Linux kernel gadget framework"]
         GadgetCore["Composite USB gadget"]
         ConfigFS["ConfigFS identity and composition"]
-        HID["HID gadget function"]
-        FFS["FunctionFS CCID function"]
-        HIDDev["/dev/hidg0"]
+        FFS["FunctionFS composite function"]
         FFSEps["FunctionFS endpoint files"]
 
         ConfigFS -. "defines" .-> GadgetCore
-        GadgetCore <--> HID
         GadgetCore <--> FFS
-        HID <--> HIDDev
         FFS <--> FFSEps
     end
 
@@ -56,10 +52,10 @@ flowchart TB
         State["Persistent state: /var/lib/virtual-yubikey"]
 
         Systemd -. "starts and restarts" .-> Supervisor
-        Profile -. "configuration" .-> Supervisor
-        Supervisor -. "USB FD bundles and liveness socket" .-> Worker
-        HIDDev <== "FIDO packets" ==> Worker
-        FFSEps <== "CCID packets" ==> Worker
+        Profile -. "launch and resources" .-> Supervisor
+        Worker -. "USB personality and control replies" .-> Supervisor
+        Supervisor -. "lifecycle and endpoint FDs" .-> Worker
+        FFSEps <== "FIDO and CCID packets" ==> Worker
         Worker <--> Core
         Core <--> State
     end
@@ -77,10 +73,9 @@ flowchart TB
 | Host USB stack | Discovers the composite USB device and routes HID and CCID transfers to host applications. |
 | DWC2 UDC | Implements the Raspberry Pi's USB 2.0 device-side controller on the USB-C connector. |
 | ConfigFS | Defines the host-visible device identity, configuration, and ordered functions. |
-| HID gadget function | Exposes the FIDO interface through `/dev/hidg0`. |
-| FunctionFS | Exposes the CCID control and data endpoints to the worker. |
-| `usb-gadget-supervisor` | Validates and publishes profile descriptors, opens USB resources, starts and monitors workers, binds the UDC, rebuilds incarnations, and cleans up. |
-| `virtual-yubikey-worker` | Receives already-open USB FDs, handles runtime events and endpoint traffic, and implements transport framing. |
+| FunctionFS | Exposes one userspace composite function containing FIDO HID and CCID endpoints. |
+| `usb-gadget-supervisor` | Validates the worker personality, owns ep0/ConfigFS/lifecycle, transfers data endpoints, binds the UDC, and cleans up. |
+| `virtual-yubikey-worker` | Publishes its USB personality, answers forwarded setup requests, and implements FIDO and CCID over received endpoint files. |
 | `virtual-yubikey-core` | Implements Management, PIV, FIDO2, credentials, policy, cryptography, and persistent logical state. |
 
 ## UDC, ConfigFS, and FunctionFS
@@ -101,10 +96,9 @@ An analogy is useful:
 - **ConfigFS is the wiring and identity plan**. It tells the kernel which device
   to build: VID/PID, strings, configurations, functions, interface order, power
   declaration, and the UDC to which the completed gadget should attach.
-- **FunctionFS is a service hatch into one function**. Userspace supplies that
-  function's USB descriptors and reads or writes its endpoint files. In this
-  design the supervisor performs the one-time publication and the worker uses
-  the resulting open files for the actual protocol.
+- **FunctionFS is a service hatch into one function**. The worker declares the
+  function's descriptors; the supervisor reformats and publishes them, retains
+  ep0, and gives the worker the resulting data endpoint files.
 
 ### UDC: the device-side hardware
 
@@ -175,10 +169,9 @@ origin.
 
 ### FunctionFS: implement a USB function in userspace
 
-Some standard functions can live almost entirely in the kernel. The FIDO HID
-interface uses the ConfigFS HID function, which exposes `/dev/hidg0` to the
-worker. CCID is different: Virtual YubiKey implements its CCID protocol in
-userspace, so it uses FunctionFS.
+Virtual YubiKey exposes both FIDO HID and CCID through one FunctionFS composite
+function. This keeps the USB personality under worker control and gives both
+applications the same direct endpoint model.
 
 The supervisor mounts an instance such as:
 
@@ -186,28 +179,24 @@ The supervisor mounts an instance such as:
 /dev/ffs-virtual-yubikey/
 ```
 
-Initially that mount provides `ep0`. The descriptor contents live in the
-device project's root-owned profile. The supervisor validates them, writes the
-FunctionFS descriptor and string tables to `ep0`, and derives the expected
-endpoint order and direction. FunctionFS then creates endpoint files
-corresponding to those descriptors, conceptually:
+Initially that mount provides `ep0`. At startup the worker constructs a typed
+`UsbPersonality` containing device, configuration, HID, CCID, endpoint, and
+string descriptors and serializes it as CBOR over the control channel. The
+supervisor validates and logs the personality, writes the corresponding
+FunctionFS descriptor tables to `ep0`, and opens the generated endpoints:
 
 ```text
 /dev/ffs-virtual-yubikey/
 ├── ep0    # setup requests, events, descriptors and control handling
-├── ep1    # one CCID data direction
-├── ep2    # the other CCID data direction
-└── ep3    # CCID interrupt notifications
+├── ep1..  # FIDO interrupt OUT and IN
+└── ep*    # CCID bulk OUT/IN and interrupt IN
 ```
 
-The supervisor opens `ep0` and all three data endpoints, then transfers
-duplicates to the unprivileged worker with `SCM_RIGHTS`. The worker retains
-`ep0` for runtime `ENABLE`, `DISABLE`, `UNBIND`, and `SETUP` events; it does not
-publish descriptor data. The `ep1`, `ep2`, and `ep3` names are local
-FunctionFS handles. FunctionFS maps them to the actual endpoint numbers
-assigned when the composite gadget is
-assembled, so the worker does not hard-code global interface or endpoint
-numbers.
+The supervisor retains `ep0`, translates setup and lifecycle activity into the
+versioned worker-control protocol, and transfers only the data endpoints with
+`SCM_RIGHTS`. Each endpoint record includes the USB address, transfer type, and
+maximum packet size, so the worker validates the semantic map instead of
+depending on local `epN` filenames.
 
 Once attached, a host CCID OUT transfer becomes readable bytes on a FunctionFS
 endpoint file. A worker write to the corresponding IN endpoint becomes a USB
@@ -219,16 +208,16 @@ ConfigFS answers **"what USB device should Linux expose?"** FunctionFS answers
 **"which userspace process implements this particular USB function, and how do
 its endpoint bytes move?"**
 
-For Virtual YubiKey:
+For Virtual YubiKey both applications use the same mechanism:
 
 | Interface | Device composition | Runtime protocol path |
 | --- | --- | --- |
-| FIDO HID | ConfigFS `hid.fido` function | `/dev/hidg0` directly to the worker |
-| CCID | ConfigFS `ffs.ccid` function | FunctionFS `ep*` files directly to the worker |
+| FIDO HID | FunctionFS interface 0 | Interrupt OUT/IN files directly to the worker |
+| CCID | FunctionFS interface 1 | Bulk OUT/IN and interrupt IN files directly to the worker |
 
-The device project owns the descriptor contents. The supervisor validates and
-publishes them, prepares both mechanisms, opens every USB path, and binds the
-UDC. The worker owns runtime protocol behavior over the received FDs.
+The worker owns the descriptor contents and runtime behavior. The supervisor
+validates and publishes the declaration, opens the USB paths, forwards ep0
+requests and lifecycle events, and binds the UDC.
 
 ## Supervisor startup sequence
 
@@ -241,46 +230,44 @@ sequenceDiagram
     participant H as Host computer
 
     S->>G: Start service
-    G->>G: Validate profile and acquire UDC lock
-    G->>K: Create unbound ConfigFS gadget
-    G->>K: Mount FunctionFS; publish and open endpoints
+    G->>G: Validate launch profile and acquire UDC lock
     G->>W: Drop credentials and start worker
-    G-->>W: PREBIND_RESOURCES + FunctionFS FDs
-    W-->>G: PREPARED
-    G->>K: Link functions and write UDC name
+    G-->>W: InitialResources
+    W-->>G: Configure + UsbPersonality CBOR
+    G->>K: Create ConfigFS gadget; mount and publish FunctionFS
+    G-->>W: UsbEndpoints + five FunctionFS FDs
+    W-->>G: Serving
+    G->>K: Link function and write UDC name
     K->>H: Connect and enumerate over USB
-    G->>K: Open post-bind HID node
-    G-->>W: POSTBIND_RESOURCES + HID FD
-    W-->>G: SERVING
+    G-->>W: UsbBusEvent and UsbControlRequest
+    W-->>G: UsbControlResponse
     H<<->>W: HID and CCID traffic through kernel endpoints
 ```
 
 The gadget remains unbound while it is incomplete. The host sees it only after
-the supervisor has published FunctionFS descriptors, the worker has accepted
-its pre-bind bundle, and every configured function has been linked.
+the supervisor has accepted and published the personality and the worker has
+validated all five endpoint handles.
 
 ## What the supervisor does
 
 The supervisor:
 
-1. Loads and strictly validates the root-owned TOML profile.
+1. Loads and strictly validates the root-owned launch/resource profile.
 2. Acquires the global UDC lifecycle lock.
 3. Ensures ConfigFS and `libcomposite` are available.
-4. Creates an unbound ConfigFS gadget and its USB identity.
-5. Mounts FunctionFS root-only, validates and publishes descriptor blobs, and
-   opens each generated endpoint with direction-appropriate access.
-6. Opens profile-approved local character devices and claims exact GPIO line
+4. Creates the private `AF_UNIX` `SOCK_SEQPACKET` control channel, starts the
+   worker with reduced credentials, and sends named initial resources.
+5. Receives, validates, and logs the worker's complete USB personality.
+6. Creates the unbound ConfigFS gadget, mounts FunctionFS root-only, publishes
+   the personality, and opens every generated endpoint.
+7. Opens profile-approved local character devices and claims exact GPIO line
    groups.
-7. Creates a private `AF_UNIX` `SOCK_SEQPACKET` resource/liveness channel and
-   places the worker end on fixed descriptor 3.
-8. Clears supplementary groups, drops the worker's GID and UID, enables
-   `PR_SET_NO_NEW_PRIVS`, and starts the worker.
-9. Transfers the ordered FunctionFS and local-hardware FD bundle and waits for
-   `PREPARED`.
-10. Links functions in deterministic order and binds the selected UDC.
-11. Opens post-bind nodes such as `/dev/hidg0`, transfers their FDs, and waits
-    for `SERVING`.
-12. On worker exit, unbinds first, cleans the incarnation, and constructs a
+8. Transfers the typed FunctionFS endpoint map and matching FDs, then waits for
+   `Serving`.
+9. Links the function and binds the selected UDC.
+10. Owns ep0, forwarding USB control requests and lifecycle events while data
+    endpoints flow directly between the kernel and worker.
+11. On worker exit, unbinds first, cleans the incarnation, and constructs a
     fresh worker process; on service stop it performs final cleanup and exits.
 
 It does not parse CTAP, CCID, APDU, PIN, credential, or private-key data. It is
@@ -288,21 +275,10 @@ not an application-level USB proxy.
 
 ## Direct USB data paths
 
-FIDO HID traffic follows this path:
+FIDO HID and CCID traffic follow the same direct path:
 
 ```text
 host application
-  <-> host USB stack
-  <-> USB-C / DWC2 UDC
-  <-> Linux HID gadget function
-  <-> /dev/hidg0
-  <-> virtual-yubikey-worker
-```
-
-CCID and PIV traffic follows this path:
-
-```text
-host smart-card application
   <-> host USB stack
   <-> USB-C / DWC2 UDC
   <-> Linux FunctionFS
@@ -332,8 +308,7 @@ and enumerates it:
 3. An application talks through that interface's normal host API. It does not
    need to know that the device is implemented by Linux on a Raspberry Pi.
 4. The host stack turns API operations into USB transfers. On the Pi, the UDC
-   and gadget framework deliver those transfers to `/dev/hidg0` or FunctionFS
-   endpoint files.
+   and gadget framework deliver those transfers to FunctionFS endpoint files.
 
 The same composite device can therefore use several host paths at once:
 
@@ -381,7 +356,7 @@ browser or FIDO client
   -> WebAuthn / FIDO client stack
   -> host HID API and HID driver
   -> USB interrupt OUT reports
-  -> Pi /dev/hidg0
+  -> Pi FunctionFS interrupt OUT endpoint
   -> virtual-yubikey-worker
   -> response returns through interrupt IN reports
 ```
@@ -491,15 +466,15 @@ device protocol. It is optional: direct USB and connector-mediated access are
 two alternative host architectures.
 
 A future `virtual-yubihsm-worker` would naturally publish its vendor-specific
-bulk descriptors through FunctionFS and read/write its bulk endpoint files.
-The generic supervisor would not need YubiHSM knowledge; only the device profile
-and worker would change.
+personality and read/write its bulk FunctionFS endpoint files. The generic
+supervisor would not need YubiHSM knowledge; only the launch profile and worker
+would change.
 
 ### Host-side comparison
 
 | Device interface | Host-visible class | Usual host access | USB transfers | Pi userspace endpoint |
 | --- | --- | --- | --- | --- |
-| FIDO HID | HID (`0x03`) | WebAuthn/FIDO stack through OS HID APIs | Interrupt OUT/IN reports | `/dev/hidg0` |
+| FIDO HID | HID (`0x03`) | WebAuthn/FIDO stack through OS HID APIs | Interrupt OUT/IN reports | FunctionFS `ep*` |
 | CCID | Smart card/CCID (`0x0b`) | PC/SC service and CCID driver | Bulk OUT/IN, optional interrupt IN | FunctionFS `ep*` |
 | Trezor main transport | Vendor/WebUSB | WebUSB/native transport or Trezor Bridge | Primarily bulk OUT/IN | FunctionFS `ep*` |
 | YubiHSM-style device | Vendor-specific | `libyubihsm`/`libusb`, directly or through a connector | Bulk OUT/IN | FunctionFS `ep*` |
@@ -530,7 +505,7 @@ flowchart TB
 
 | Virtual appliance | Host-facing applications | USB interfaces | Pi endpoint implementation | Device-specific worker responsibility |
 | --- | --- | --- | --- | --- |
-| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool` | FIDO HID plus CCID | `/dev/hidg0` plus FunctionFS | CTAPHID, CCID, Management, PIV, FIDO2, keys and state |
+| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, FIDO2, keys and state |
 | Virtual Trezor | Trezor Suite, `trezorctl`, Trezor Connect | Main vendor/WebUSB, optional debug and U2F HID | Primarily FunctionFS; profile-selected HID where appropriate | Trezor framing, legacy firmware, OLED framebuffer, buttons, wallet state |
 | Virtual YubiHSM | `yubihsm-shell`, PKCS #11 module, SDKs | Vendor-specific bulk OUT/IN | FunctionFS | YubiHSM sessions, commands, objects, capabilities, audit and state |
 
@@ -538,11 +513,12 @@ The common boundary remains unchanged:
 
 ```text
 usb-gadget-supervisor
-  = root-owned profile, descriptor publication, open USB FDs, ConfigFS, UDC,
-    credentials, lifecycle
+  = root-owned launch/resource profile, personality validation and publication,
+    ep0, open data FDs, ConfigFS, UDC, credentials, lifecycle
 
 selected device worker
-  = ep0 runtime events, endpoint traffic, protocol, cryptography, policy, UI, state
+  = USB personality, control replies, endpoint traffic, protocol, cryptography,
+    policy, UI, state
 ```
 
 The Virtual YubiKey and Virtual Trezor workers implement this resource boundary.
@@ -582,18 +558,21 @@ be deterministic in a multi-UDC system.
 
 ## Lifecycle and failure containment
 
-The private version-1 channel carries fixed eight-byte state records and attached file
-descriptors via `SCM_RIGHTS`. It never carries normal USB frames.
+The private version-1 `SOCK_SEQPACKET` channel carries 20-byte record headers,
+typed bodies, and attached file descriptors via `SCM_RIGHTS`. It never carries
+normal USB frames.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing
-    Preparing --> AwaitingWorker: publish/open FunctionFS; send PREBIND_RESOURCES
-    AwaitingWorker --> Binding: PREPARED
-    Binding --> Running: bind; send POSTBIND_RESOURCES; receive SERVING
+    Preparing --> AwaitingPersonality: start worker; send InitialResources
+    AwaitingPersonality --> AwaitingWorker: receive Configure; publish/open FunctionFS
+    AwaitingWorker --> Binding: send UsbEndpoints; receive Serving
+    Binding --> Running: bind UDC
     Running --> Cleaning: worker exit or EOF
     Cleaning --> Preparing: fresh worker incarnation
     Preparing --> FinalCleanup: service stop or setup failure
+    AwaitingPersonality --> FinalCleanup: service stop or timeout
     AwaitingWorker --> FinalCleanup: service stop or timeout
     Binding --> FinalCleanup: service stop or bind failure
     Running --> FinalCleanup: service stop
@@ -602,9 +581,10 @@ stateDiagram-v2
 
 If the worker exits or closes the channel while attached, the supervisor
 immediately unbinds the UDC. It then removes that incarnation's resources and
-starts a new process with a new immutable FD bundle while the supervisor
-service remains running. A firmware reconnect request uses this same complete
-process-reset path.
+starts a fresh process and USB generation while the supervisor service remains
+running. A worker-requested personality change quiesces the current generation,
+publishes replacement endpoints, and preserves the worker process; `SIGHUP`
+intentionally performs the broader fresh-worker reload.
 
 ## Privilege boundary
 
@@ -613,11 +593,12 @@ descriptor publication, endpoint opening, UDC binding, and credential setup are 
 operations. The protocol worker does not need those privileges.
 
 The worker receives only its validated resource contract: control socket FD 3,
-state/runtime paths, already-open USB descriptors, approved local-device
-descriptors, and exact GPIO line-request handles. The supervisor rejects raw
-GPIO-chip resources. All handles arrive through fixed protocol positions;
-there are no descriptor-number environment variables. The worker receives no
-USB or GPIO paths and needs no device-node ownership changes. Process exit
+state/runtime paths, already-open USB data endpoints, approved local-device
+handles, and exact GPIO line-request handles. The supervisor rejects raw
+GPIO-chip resources. Named initial handles and typed endpoint maps arrive over
+the control protocol; there are no descriptor-number environment variables.
+The worker receives no USB or GPIO paths and needs no device-node ownership
+changes. Process exit
 closes its descriptor table, releasing every line group and endpoint even after
 a crash. Persistent credentials and private keys remain in the worker and its
 state directory; they never belong to the supervisor.

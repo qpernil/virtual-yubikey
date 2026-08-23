@@ -75,6 +75,11 @@ impl Device {
         }
     }
 
+    #[cfg(test)]
+    fn with_profile(profile: virtual_yubikey_core::DeviceProfile) -> Self {
+        Self::with_card(Card::with_profile(profile))
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         self.card.piv_persistent_state()
@@ -616,6 +621,12 @@ mod tests {
     use super::*;
     use crate::smartcard::{MANAGEMENT_AID, OPENPGP_AID};
 
+    fn openpgp_device(serial: u32) -> Device {
+        let mut profile = virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial);
+        profile.applets.openpgp = true;
+        Device::with_profile(profile)
+    }
+
     fn request(message_type: u8, sequence: u8, specific: [u8; 3], data: &[u8]) -> Vec<u8> {
         let mut output = vec![message_type];
         output.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -656,7 +667,7 @@ mod tests {
 
     #[test]
     fn openpgp_large_extended_le_uses_descriptor_bounded_response_chaining() {
-        let mut device = Device::new(1);
+        let mut device = openpgp_device(1);
         device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
 
         let select = [
@@ -695,7 +706,7 @@ mod tests {
 
     #[test]
     fn ccid_response_boundary_accounts_for_header_and_status_word() {
-        let mut device = Device::new(1);
+        let mut device = openpgp_device(1);
         device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
         let select = [
             vec![0, 0xa4, 4, 0, OPENPGP_AID.len() as u8],
@@ -727,7 +738,7 @@ mod tests {
 
     #[test]
     fn reassembles_descriptor_bounded_command_blocks() {
-        let mut device = Device::new(1);
+        let mut device = openpgp_device(1);
         device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
         let select = [
             vec![0, 0xa4, 4, 0, OPENPGP_AID.len() as u8],
