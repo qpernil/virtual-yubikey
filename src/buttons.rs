@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 const GPIO_V2_LINE_EVENT_SIZE: usize = 48;
 const GPIO_V2_LINE_EVENT_ID_OFFSET: usize = 8;
 const GPIO_V2_LINE_EVENT_RISING_EDGE: u32 = 1;
+const GPIO_V2_LINE_EVENT_FALLING_EDGE: u32 = 2;
 
 pub(crate) struct Controller {
     shutdown: UnixDatagram,
@@ -53,13 +54,18 @@ impl Controller {
         self.reconnect.as_raw_fd()
     }
 
-    pub(crate) fn take_reconnect_request(&self) -> io::Result<bool> {
-        let mut requested = false;
+    pub(crate) fn take_reconnect_transition(&self) -> io::Result<Option<bool>> {
         let mut byte = [0_u8; 1];
         loop {
             match self.reconnect.recv(&mut byte) {
-                Ok(_) => requested = true,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(requested),
+                Ok(1) if byte[0] <= 1 => return Ok(Some(byte[0] != 0)),
+                Ok(length) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid reconnect transition packet: length={length}"),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
@@ -177,30 +183,6 @@ fn drain_touch_events(
 }
 
 fn drain_reconnect_events(lines: &mut File, notifier: &UnixDatagram) -> io::Result<()> {
-    drain_events(lines, || match notifier.send(&[1]) {
-        Ok(1) => diagnostics::log(
-            Level::Info,
-            "button",
-            "reconnect",
-            format_args!("input=key3 requested=true"),
-        ),
-        Ok(length) => diagnostics::log(
-            Level::Info,
-            "button",
-            "failed",
-            format_args!("operation=request-reconnect bytes={length}"),
-        ),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-        Err(error) => diagnostics::log(
-            Level::Info,
-            "button",
-            "failed",
-            format_args!("operation=request-reconnect error={error:?}"),
-        ),
-    })
-}
-
-fn drain_events(lines: &mut File, mut rising: impl FnMut()) -> io::Result<()> {
     loop {
         let mut event = [0_u8; GPIO_V2_LINE_EVENT_SIZE];
         match lines.read(&mut event) {
@@ -210,8 +192,33 @@ fn drain_events(lines: &mut File, mut rising: impl FnMut()) -> io::Result<()> {
                         .try_into()
                         .unwrap(),
                 );
-                if id == GPIO_V2_LINE_EVENT_RISING_EDGE {
-                    rising();
+                let state = match id {
+                    GPIO_V2_LINE_EVENT_RISING_EDGE => Some(1),
+                    GPIO_V2_LINE_EVENT_FALLING_EDGE => Some(0),
+                    _ => None,
+                };
+                if let Some(state) = state {
+                    match notifier.send(&[state]) {
+                        Ok(1) => diagnostics::log(
+                            Level::Info,
+                            "button",
+                            "reconnect_state",
+                            format_args!("input=key3 pressed={}", state != 0),
+                        ),
+                        Ok(length) => diagnostics::log(
+                            Level::Info,
+                            "button",
+                            "failed",
+                            format_args!("operation=send-reconnect-state bytes={length}"),
+                        ),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) => diagnostics::log(
+                            Level::Info,
+                            "button",
+                            "failed",
+                            format_args!("operation=send-reconnect-state error={error:?}"),
+                        ),
+                    }
                 }
             }
             Ok(0) => {

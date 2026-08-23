@@ -145,7 +145,6 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
             endpoint_runtime.notifications(),
             &display,
             &buttons,
-            &personality,
             &mut configure_request,
         );
         let outcome = control_result?;
@@ -153,7 +152,7 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         match outcome {
             ControlOutcome::Quiesce {
                 request_id,
-                reconfigure,
+                ejected,
             } => {
                 control.send(&Record::new(
                     Kind::Quiesced,
@@ -161,10 +160,18 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
                     request_id,
                     Vec::new(),
                 ))?;
-                if !reconfigure {
+                if !ejected {
                     return Ok(());
                 }
-                let _ = buttons.take_reconnect_request()?;
+                if !wait_for_reinsert(
+                    &control,
+                    generation,
+                    &buttons,
+                    &personality,
+                    &mut configure_request,
+                )? {
+                    return Ok(());
+                }
                 continue;
             }
             ControlOutcome::Exit => return Ok(()),
@@ -440,7 +447,7 @@ fn required_endpoint(file: Option<File>, name: &str) -> io::Result<File> {
 
 #[cfg(target_os = "linux")]
 enum ControlOutcome {
-    Quiesce { request_id: u32, reconfigure: bool },
+    Quiesce { request_id: u32, ejected: bool },
     Exit,
 }
 
@@ -451,10 +458,9 @@ fn serve_control(
     ccid_notifications: &SyncSender<()>,
     display: &crate::display::Controller,
     buttons: &crate::buttons::Controller,
-    personality: &[u8],
     configure_request: &mut u32,
 ) -> io::Result<ControlOutcome> {
-    let mut reconfiguration_pending = false;
+    let mut unconfiguration_pending = false;
     loop {
         let mut poll_fds = [
             libc::pollfd {
@@ -551,37 +557,23 @@ fn serve_control(
                     return if record.request_id == 0 {
                         Ok(ControlOutcome::Quiesce {
                             request_id: 0,
-                            reconfigure: false,
+                            ejected: false,
                         })
-                    } else if reconfiguration_pending && record.request_id == *configure_request {
+                    } else if unconfiguration_pending && record.request_id == *configure_request {
                         Ok(ControlOutcome::Quiesce {
                             request_id: record.request_id,
-                            reconfigure: true,
+                            ejected: true,
                         })
                     } else {
                         invalid("supervisor quiesced an unknown configuration request")
                     };
                 }
-                Kind::ConfigurationRejected => {
-                    if !reconfiguration_pending || record.request_id != *configure_request {
-                        return invalid("supervisor rejected an unknown configuration request");
-                    }
-                    diagnostics::log(
-                        Level::Info,
-                        "usb",
-                        "reconnect_rejected",
-                        format_args!("{}", String::from_utf8_lossy(&record.body)),
-                    );
-                    reconfiguration_pending = false;
-                    display.bind()?;
-                }
                 _ => return invalid(format!("unexpected runtime record {:?}", record.kind)),
             }
         }
 
-        if poll_fds[1].revents & libc::POLLIN != 0 {
-            let requested = buttons.take_reconnect_request()?;
-            if requested && !reconfiguration_pending {
+        if poll_fds[1].revents & libc::POLLIN != 0 && !unconfiguration_pending {
+            if buttons.take_reconnect_transition()? == Some(true) {
                 let request_id = configure_request
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
@@ -590,17 +582,86 @@ fn serve_control(
                     Kind::Configure,
                     generation,
                     request_id,
-                    personality.to_vec(),
+                    Vec::new(),
                 ))?;
                 *configure_request = request_id;
-                reconfiguration_pending = true;
+                unconfiguration_pending = true;
                 diagnostics::log(
                     Level::Info,
                     "usb",
-                    "reconnect_requested",
+                    "eject_requested",
                     format_args!("generation={generation} request={request_id}"),
                 );
             }
+        }
+        let unexpected = poll_fds[1].revents & !libc::POLLIN;
+        if unexpected != 0 {
+            return Err(io::Error::other(format!(
+                "reconnect notification descriptor reported poll events 0x{unexpected:x}"
+            )));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_reinsert(
+    control: &Channel<'static>,
+    generation: u32,
+    buttons: &crate::buttons::Controller,
+    personality: &[u8],
+    configure_request: &mut u32,
+) -> io::Result<bool> {
+    loop {
+        let mut poll_fds = [
+            libc::pollfd {
+                fd: control.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: buttons.reconnect_descriptor(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if poll_fds[0].revents != 0 {
+            return match control.receive() {
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+                Err(error) => Err(error),
+                Ok(record) => invalid(format!(
+                    "unexpected supervisor message while USB is ejected: {:?}",
+                    record.kind
+                )),
+            };
+        }
+        if poll_fds[1].revents & libc::POLLIN != 0
+            && buttons.take_reconnect_transition()? == Some(false)
+        {
+            let request_id = configure_request
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
+            control.send(&Record::new(
+                Kind::Configure,
+                generation,
+                request_id,
+                personality.to_vec(),
+            ))?;
+            *configure_request = request_id;
+            diagnostics::log(
+                Level::Info,
+                "usb",
+                "insert_requested",
+                format_args!("generation={generation} request={request_id}"),
+            );
+            return Ok(true);
         }
         let unexpected = poll_fds[1].revents & !libc::POLLIN;
         if unexpected != 0 {

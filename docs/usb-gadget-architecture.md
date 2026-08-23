@@ -421,16 +421,17 @@ destroys its socket and queued datagrams. Presses made while idle or while a
 previous request was active can therefore never approve a later operation.
 
 A fresh KEY3 press is delivered privately to the main worker thread. The worker
-turns off its display and publishes the same complete personality with a new
-request identifier. The supervisor performs the standard quiesce, unbind,
-FunctionFS replacement, and rebind sequence; it does not interpret the button
-or control the display. Endpoint threads are joined before the worker accepts
-the replacement endpoint files. `Serving` alone leaves the display dark; the
-idle image returns on the replacement generation's `Bind` event. `Unbind`
-turns it off, while `Disable` leaves it on because the device remains physically
-present. The host observes detach and enumeration while the worker, its initial
-resource handles, and persistent authenticator state survive. The supervisor
-keeps the UDC detached for at least 250 ms before binding the replacement.
+turns off its display and publishes an empty personality with a new request
+identifier. The supervisor unbinds, performs the standard endpoint quiesce,
+and waits with no configured USB generation. Release makes the worker publish
+its complete personality; the supervisor creates and binds that generation
+immediately, without imposing the 250 ms floor used by atomic replacement.
+Endpoint threads are joined before the worker accepts the new endpoint files.
+`Serving` alone leaves the display dark; the idle image returns on the new
+generation's `Bind` event. `Unbind` turns it off, while `Disable` leaves it on
+because the device remains physically present. The host observes a detach for
+exactly the physical hold interval while the worker, initial resource handles,
+and persistent authenticator state survive.
 
 ### Case 3: Trezor vendor/WebUSB transport
 
