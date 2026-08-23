@@ -406,17 +406,27 @@ per second. PIV and OpenPGP can reuse the same scoped state when their touch
 paths are implemented, without teaching the display which protocol requested
 presence.
 
-The ST7789 and joystick share a HAT but not an I/O path. Display frames use SPI;
-GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. A separate
-active-low GPIO13 event handle reports only the joystick's center press. A worker
-thread blocks in `poll` on that handle and a private shutdown socket, so idle
-button handling consumes no CPU and never enters `display-backends`.
+The ST7789 and buttons share a HAT but not an I/O path. Display frames use SPI;
+GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. Separate
+active-low event handles expose joystick-center GPIO13 for presence and KEY3
+GPIO16 for USB reconnect. A worker thread blocks in `poll` on those handles and
+a private shutdown socket, so idle button handling consumes no CPU and never
+enters `display-backends`.
 
 Every GPIO edge is drained immediately. A logical rising edge sends the same
 one-byte touch command as the local helper, but the destination datagram socket
 exists only for the lifetime of the current FIDO presence wait. Closing a wait
 destroys its socket and queued datagrams. Presses made while idle or while a
 previous request was active can therefore never approve a later operation.
+
+A fresh KEY3 press is delivered privately to the main worker thread. The worker
+turns off its display and publishes the same complete personality with a new
+request identifier. The supervisor performs the standard quiesce, unbind,
+FunctionFS replacement, and rebind sequence; it does not interpret the button
+or control the display. Endpoint threads are joined before the worker accepts
+the replacement endpoint files, then the idle image returns after `Serving`.
+The host observes detach and enumeration while the worker, its initial resource
+handles, and persistent authenticator state survive.
 
 ### Case 3: Trezor vendor/WebUSB transport
 

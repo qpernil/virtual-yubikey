@@ -90,53 +90,87 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         piv_state: state_directory.join(format!("piv-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
-    let buttons =
-        crate::buttons::Controller::start(resources.touch_button, storage.touch_socket.clone())?;
-    let fido = load_fido_state(serial, &storage.fido_state)?;
-    let ccid = load_piv_state(serial, &storage.piv_state)?;
-    let configure_request = 1;
+    let buttons = crate::buttons::Controller::start(
+        resources.touch_button,
+        resources.reconnect_button,
+        storage.touch_socket.clone(),
+    )?;
+    let personality = crate::usb_identity::personality().to_cbor()?;
+    let mut configure_request = 1;
     control.send(&Record::new(
         Kind::Configure,
         0,
         configure_request,
-        crate::usb_identity::personality().to_cbor()?,
+        personality.clone(),
     ))?;
-    let endpoints_record = control.receive()?;
-    if endpoints_record.kind == Kind::ConfigurationRejected {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "supervisor rejected USB personality: {}",
-                String::from_utf8_lossy(&endpoints_record.body)
-            ),
-        ));
-    }
-    if endpoints_record.kind != Kind::UsbEndpoints
-        || endpoints_record.generation == 0
-        || endpoints_record.request_id != configure_request
-    {
-        return invalid("expected USB endpoints for the published personality");
-    }
-    let generation = endpoints_record.generation;
-    let endpoints = Endpoints::from_record(endpoints_record)?;
-    control.send(&Record::new(
-        Kind::Serving,
-        generation,
-        configure_request,
-        Vec::new(),
-    ))?;
-    diagnostics::log(
-        Level::Info,
-        "worker",
-        "ready",
-        format_args!("serial={serial} generation={generation} usb_endpoints=5"),
-    );
-
     let keepalive = crate::keepalive::Scheduler::start()?;
     let activity = display.activity();
-    let ccid_notifications =
-        endpoints.start(serial, fido, ccid, &storage, &keepalive, &activity)?;
-    let result = serve_control(control, generation, ccid_notifications, &display);
+    let result = (|| loop {
+        let endpoints_record = control.receive()?;
+        if endpoints_record.kind == Kind::ConfigurationRejected {
+            return invalid(format!(
+                "supervisor rejected USB personality: {}",
+                String::from_utf8_lossy(&endpoints_record.body)
+            ));
+        }
+        if endpoints_record.kind != Kind::UsbEndpoints
+            || endpoints_record.generation == 0
+            || endpoints_record.request_id != configure_request
+        {
+            return invalid("expected USB endpoints for the published personality");
+        }
+        let generation = endpoints_record.generation;
+        let endpoints = Endpoints::from_record(endpoints_record)?;
+        STOP_REQUESTED.store(false, Ordering::Relaxed);
+        let fido = load_fido_state(serial, &storage.fido_state)?;
+        let ccid = load_piv_state(serial, &storage.piv_state)?;
+        let endpoint_runtime =
+            endpoints.start(serial, fido, ccid, &storage, &keepalive, &activity)?;
+        control.send(&Record::new(
+            Kind::Serving,
+            generation,
+            configure_request,
+            Vec::new(),
+        ))?;
+        display.resume()?;
+        diagnostics::log(
+            Level::Info,
+            "worker",
+            "ready",
+            format_args!("serial={serial} generation={generation} usb_endpoints=5"),
+        );
+
+        let control_result = serve_control(
+            &control,
+            generation,
+            endpoint_runtime.notifications(),
+            &display,
+            &buttons,
+            &personality,
+            &mut configure_request,
+        );
+        let outcome = control_result?;
+        endpoint_runtime.shutdown()?;
+        match outcome {
+            ControlOutcome::Quiesce {
+                request_id,
+                reconfigure,
+            } => {
+                control.send(&Record::new(
+                    Kind::Quiesced,
+                    generation,
+                    request_id,
+                    Vec::new(),
+                ))?;
+                if !reconfigure {
+                    return Ok(());
+                }
+                let _ = buttons.take_reconnect_request()?;
+                continue;
+            }
+            ControlOutcome::Exit => return Ok(()),
+        }
+    })();
     drop(keepalive);
     let button_result = buttons.shutdown();
     let display_result = display.shutdown();
@@ -148,6 +182,7 @@ struct InitialResources {
     display_spi: File,
     display_control: File,
     touch_button: File,
+    reconnect_button: File,
 }
 
 #[cfg(target_os = "linux")]
@@ -156,11 +191,13 @@ impl InitialResources {
         let mut display_spi = None;
         let mut display_control = None;
         let mut touch_button = None;
+        let mut reconnect_button = None;
         for (name, file) in resources {
             let target = match name.as_str() {
                 "display-spi" => &mut display_spi,
                 "display-control" => &mut display_control,
                 "touch-button" => &mut touch_button,
+                "reconnect-button" => &mut reconnect_button,
                 _ => return invalid(format!("unexpected initial resource {name}")),
             };
             if target.replace(file).is_some() {
@@ -173,6 +210,8 @@ impl InitialResources {
                 .ok_or_else(|| data_error("missing display-control resource"))?,
             touch_button: touch_button
                 .ok_or_else(|| data_error("missing touch-button resource"))?,
+            reconnect_button: reconnect_button
+                .ok_or_else(|| data_error("missing reconnect-button resource"))?,
         })
     }
 }
@@ -218,6 +257,29 @@ struct HidRuntime {
     touch_socket: PathBuf,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
+}
+
+#[cfg(target_os = "linux")]
+struct EndpointRuntime {
+    notifications: Option<SyncSender<()>>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl EndpointRuntime {
+    fn notifications(&self) -> &SyncSender<()> {
+        self.notifications.as_ref().unwrap()
+    }
+
+    fn shutdown(mut self) -> io::Result<()> {
+        self.notifications.take();
+        for thread in self.threads {
+            thread
+                .join()
+                .map_err(|_| io::Error::other("USB endpoint thread panicked"))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -285,7 +347,7 @@ impl Endpoints {
         storage: &WorkerStorage,
         keepalive: &crate::keepalive::Scheduler,
         display_activity: &crate::display::Activity,
-    ) -> io::Result<SyncSender<()>> {
+    ) -> io::Result<EndpointRuntime> {
         let Self {
             fido_out,
             fido_in,
@@ -295,7 +357,7 @@ impl Endpoints {
         } = self;
         let (notification_tx, notification_rx) = mpsc::sync_channel(1);
 
-        thread::Builder::new()
+        let notification_thread = thread::Builder::new()
             .name("ccid-notify".to_owned())
             .spawn(move || {
                 while notification_rx.recv().is_ok() {
@@ -321,7 +383,7 @@ impl Endpoints {
                 }
             })?;
 
-        thread::Builder::new().name("ccid-usb".to_owned()).spawn({
+        let ccid_thread = thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
@@ -345,7 +407,7 @@ impl Endpoints {
             }
         })?;
 
-        thread::Builder::new().name("fido-hid".to_owned()).spawn({
+        let fido_thread = thread::Builder::new().name("fido-hid".to_owned()).spawn({
             let runtime = HidRuntime {
                 serial,
                 state_path: storage.fido_state.clone(),
@@ -365,7 +427,10 @@ impl Endpoints {
                 }
             }
         })?;
-        Ok(notification_tx)
+        Ok(EndpointRuntime {
+            notifications: Some(notification_tx),
+            threads: vec![notification_thread, ccid_thread, fido_thread],
+        })
     }
 }
 
@@ -375,73 +440,171 @@ fn required_endpoint(file: Option<File>, name: &str) -> io::Result<File> {
 }
 
 #[cfg(target_os = "linux")]
+enum ControlOutcome {
+    Quiesce { request_id: u32, reconfigure: bool },
+    Exit,
+}
+
+#[cfg(target_os = "linux")]
 fn serve_control(
-    control: Channel<'static>,
+    control: &Channel<'static>,
     generation: u32,
-    ccid_notifications: SyncSender<()>,
+    ccid_notifications: &SyncSender<()>,
     display: &crate::display::Controller,
-) -> io::Result<()> {
+    buttons: &crate::buttons::Controller,
+    personality: &[u8],
+    configure_request: &mut u32,
+) -> io::Result<ControlOutcome> {
+    let mut reconfiguration_pending = false;
     loop {
-        let record = match control.receive() {
-            Ok(record) => record,
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                STOP_REQUESTED.store(true, Ordering::Relaxed);
-                return Ok(());
+        let mut poll_fds = [
+            libc::pollfd {
+                fd: control.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: buttons.reconnect_descriptor(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // A timeout lets signal and endpoint failures terminate the generation.
+        let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, 250) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
             }
-            Err(error) => return Err(error),
-        };
-        if record.generation != generation || !record.files.is_empty() {
-            return invalid("supervisor sent a mismatched runtime record");
+            return Err(error);
         }
-        match record.kind {
-            Kind::UsbBusEvent if record.request_id == 0 => {
-                let (event, activation) = UsbBusEvent::decode(&record.body)?;
+        if STOP_REQUESTED.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "USB endpoint generation stopped",
+            ));
+        }
+        if poll_fds[0].revents == 0 && poll_fds[1].revents == 0 {
+            continue;
+        }
+        if poll_fds[0].revents & libc::POLLIN == 0 {
+            let unexpected = poll_fds[0].revents;
+            if unexpected != 0 {
+                STOP_REQUESTED.store(true, Ordering::Relaxed);
+                return if unexpected & libc::POLLHUP != 0 {
+                    Ok(ControlOutcome::Exit)
+                } else {
+                    Err(io::Error::other(format!(
+                        "worker-control descriptor reported poll events 0x{unexpected:x}"
+                    )))
+                };
+            }
+        } else {
+            let record = match control.receive() {
+                Ok(record) => record,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    STOP_REQUESTED.store(true, Ordering::Relaxed);
+                    return Ok(ControlOutcome::Exit);
+                }
+                Err(error) => return Err(error),
+            };
+            if record.generation != generation || !record.files.is_empty() {
+                return invalid("supervisor sent a mismatched runtime record");
+            }
+            match record.kind {
+                Kind::UsbBusEvent if record.request_id == 0 => {
+                    let (event, activation) = UsbBusEvent::decode(&record.body)?;
+                    diagnostics::log(
+                        Level::Info,
+                        "usb",
+                        "bus_event",
+                        format_args!("event={event:?} activation={activation}"),
+                    );
+                    if event == UsbBusEvent::Enable {
+                        display.resume()?;
+                        match ccid_notifications.try_send(()) {
+                            Ok(()) | Err(TrySendError::Full(())) => {}
+                            Err(TrySendError::Disconnected(())) => {
+                                return Err(io::Error::other("CCID notification endpoint stopped"));
+                            }
+                        }
+                    } else if event == UsbBusEvent::Suspend {
+                        display.suspend()?;
+                    } else if event == UsbBusEvent::Resume {
+                        display.resume()?;
+                    }
+                }
+                Kind::UsbControlRequest if record.request_id != 0 => {
+                    let response = respond_to_control_request(&record.body)?;
+                    control.send(&Record::new(
+                        Kind::UsbControlResponse,
+                        generation,
+                        record.request_id,
+                        response,
+                    ))?;
+                }
+                Kind::Quiesce if record.body.is_empty() => {
+                    STOP_REQUESTED.store(true, Ordering::Relaxed);
+                    display.suspend()?;
+                    return if record.request_id == 0 {
+                        Ok(ControlOutcome::Quiesce {
+                            request_id: 0,
+                            reconfigure: false,
+                        })
+                    } else if reconfiguration_pending && record.request_id == *configure_request {
+                        Ok(ControlOutcome::Quiesce {
+                            request_id: record.request_id,
+                            reconfigure: true,
+                        })
+                    } else {
+                        invalid("supervisor quiesced an unknown configuration request")
+                    };
+                }
+                Kind::ConfigurationRejected => {
+                    if !reconfiguration_pending || record.request_id != *configure_request {
+                        return invalid("supervisor rejected an unknown configuration request");
+                    }
+                    diagnostics::log(
+                        Level::Info,
+                        "usb",
+                        "reconnect_rejected",
+                        format_args!("{}", String::from_utf8_lossy(&record.body)),
+                    );
+                    reconfiguration_pending = false;
+                    display.resume()?;
+                }
+                _ => return invalid(format!("unexpected runtime record {:?}", record.kind)),
+            }
+        }
+
+        if poll_fds[1].revents & libc::POLLIN != 0 {
+            let requested = buttons.take_reconnect_request()?;
+            if requested && !reconfiguration_pending {
+                let request_id = configure_request
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
+                display.suspend()?;
+                control.send(&Record::new(
+                    Kind::Configure,
+                    generation,
+                    request_id,
+                    personality.to_vec(),
+                ))?;
+                *configure_request = request_id;
+                reconfiguration_pending = true;
                 diagnostics::log(
                     Level::Info,
                     "usb",
-                    "bus_event",
-                    format_args!("event={event:?} activation={activation}"),
+                    "reconnect_requested",
+                    format_args!("generation={generation} request={request_id}"),
                 );
-                if event == UsbBusEvent::Enable {
-                    display.resume()?;
-                    match ccid_notifications.try_send(()) {
-                        Ok(()) | Err(TrySendError::Full(())) => {}
-                        Err(TrySendError::Disconnected(())) => {
-                            return Err(io::Error::other("CCID notification endpoint stopped"));
-                        }
-                    }
-                } else if event == UsbBusEvent::Suspend {
-                    display.suspend()?;
-                } else if event == UsbBusEvent::Resume {
-                    display.resume()?;
-                }
             }
-            Kind::UsbControlRequest if record.request_id != 0 => {
-                let response = respond_to_control_request(&record.body)?;
-                control.send(&Record::new(
-                    Kind::UsbControlResponse,
-                    generation,
-                    record.request_id,
-                    response,
-                ))?;
-            }
-            Kind::Quiesce if record.body.is_empty() => {
-                STOP_REQUESTED.store(true, Ordering::Relaxed);
-                control.send(&Record::new(
-                    Kind::Quiesced,
-                    generation,
-                    record.request_id,
-                    Vec::new(),
-                ))?;
-                return Ok(());
-            }
-            Kind::ConfigurationRejected => {
-                return invalid(format!(
-                    "supervisor rejected USB personality: {}",
-                    String::from_utf8_lossy(&record.body)
-                ));
-            }
-            _ => return invalid(format!("unexpected runtime record {:?}", record.kind)),
+        }
+        let unexpected = poll_fds[1].revents & !libc::POLLIN;
+        if unexpected != 0 {
+            return Err(io::Error::other(format!(
+                "reconnect notification descriptor reported poll events 0x{unexpected:x}"
+            )));
         }
     }
 }
@@ -562,133 +725,136 @@ fn serve_hid(
         clock,
         display_activity,
     } = runtime;
-    let reports = start_hid_reader(output)?;
-    let mut ctaphid = crate::ctaphid::Device::new(
-        virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
-    );
-    while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        let report = match reports.recv_timeout(Duration::from_millis(250)) {
-            Ok(Ok(report)) => report,
-            Ok(Err(error)) => return Err(error),
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) if STOP_REQUESTED.load(Ordering::Relaxed) => {
-                return Ok(())
+    let reports = HidReader::start(output)?;
+    let result = (|| {
+        let receiver = reports.receiver();
+        let mut ctaphid = crate::ctaphid::Device::new(
+            virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
+        );
+        while !STOP_REQUESTED.load(Ordering::Relaxed) {
+            let report = match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(Ok(report)) => report,
+                Ok(Err(error)) => return Err(error),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) if STOP_REQUESTED.load(Ordering::Relaxed) => {
+                    return Ok(())
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other("FIDO OUT reader stopped"))
+                }
+            };
+            if !report.is_empty() {
+                display_activity.pulse();
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(io::Error::other("FIDO OUT reader stopped"))
-            }
-        };
-        if !report.is_empty() {
-            display_activity.pulse();
-        }
-        match report.len() {
-            0 => {}
-            length if length != crate::ctaphid::REPORT_SIZE => {
-                diagnostics::log(
-                    Level::Info,
-                    "ctaphid",
-                    "report_rejected",
-                    format_args!("reason=invalid_length length={length}"),
-                );
-            }
-            _ => {
-                let report: [u8; crate::ctaphid::REPORT_SIZE] = report.try_into().unwrap();
-                diagnostics::log(
-                    Level::Debug,
-                    "ctaphid",
-                    "report",
-                    format_args!(
-                        "channel={:08x} command={:02x}",
-                        u32::from_be_bytes(report[0..4].try_into().unwrap()),
-                        report[4]
-                    ),
-                );
-                let mut persistence_error = None;
-                let mut command_error = None;
-                let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
-                let replies = ctaphid.receive(&report, |request| {
-                    let command = request.first().copied().unwrap_or_default();
+            match report.len() {
+                0 => {}
+                length if length != crate::ctaphid::REPORT_SIZE => {
                     diagnostics::log(
                         Level::Info,
-                        "ctap2",
-                        "request",
+                        "ctaphid",
+                        "report_rejected",
+                        format_args!("reason=invalid_length length={length}"),
+                    );
+                }
+                _ => {
+                    let report: [u8; crate::ctaphid::REPORT_SIZE] = report.try_into().unwrap();
+                    diagnostics::log(
+                        Level::Debug,
+                        "ctaphid",
+                        "report",
                         format_args!(
-                            "command=0x{command:02x} name={} cbor_length={}",
-                            if request.is_empty() {
-                                "missing"
-                            } else {
-                                ctap_command_name(command)
-                            },
-                            request.len().saturating_sub(1)
+                            "channel={:08x} command={:02x}",
+                            u32::from_be_bytes(report[0..4].try_into().unwrap()),
+                            report[4]
                         ),
                     );
-                    if let Some(algorithms) = FidoAuthenticator::make_credential_algorithms(request)
-                    {
+                    let mut persistence_error = None;
+                    let mut command_error = None;
+                    let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
+                    let replies = ctaphid.receive(&report, |request| {
+                        let command = request.first().copied().unwrap_or_default();
                         diagnostics::log(
                             Level::Info,
                             "ctap2",
-                            "make_credential_algorithms",
-                            format_args!("algorithms={algorithms:?}"),
-                        );
-                    }
-                    if let Some(algorithm) = fido.selected_make_credential_algorithm(request) {
-                        diagnostics::log(
-                            Level::Info,
-                            "ctap2",
-                            "make_credential_algorithm_selected",
+                            "request",
                             format_args!(
-                                "algorithm={} cose={}",
-                                algorithm.name(),
-                                algorithm.cose_identifier()
+                                "command=0x{command:02x} name={} cbor_length={}",
+                                if request.is_empty() {
+                                    "missing"
+                                } else {
+                                    ctap_command_name(command)
+                                },
+                                request.len().saturating_sub(1)
                             ),
                         );
-                    }
-                    let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                        match wait_for_touch(
-                            &mut input,
-                            &reports,
-                            channel,
-                            &touch_socket,
-                            &clock,
-                            &display_activity,
-                        ) {
-                            Ok(true) => match exchange_fido_with_keepalives(
-                                &mut input, &reports, &mut fido, request, channel, true, &clock,
+                        if let Some(algorithms) =
+                            FidoAuthenticator::make_credential_algorithms(request)
+                        {
+                            diagnostics::log(
+                                Level::Info,
+                                "ctap2",
+                                "make_credential_algorithms",
+                                format_args!("algorithms={algorithms:?}"),
+                            );
+                        }
+                        if let Some(algorithm) = fido.selected_make_credential_algorithm(request) {
+                            diagnostics::log(
+                                Level::Info,
+                                "ctap2",
+                                "make_credential_algorithm_selected",
+                                format_args!(
+                                    "algorithm={} cose={}",
+                                    algorithm.name(),
+                                    algorithm.cose_identifier()
+                                ),
+                            );
+                        }
+                        let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
+                            match wait_for_touch(
+                                &mut input,
+                                receiver,
+                                channel,
+                                &touch_socket,
+                                &clock,
+                                &display_activity,
+                            ) {
+                                Ok(true) => match exchange_fido_with_keepalives(
+                                    &mut input, receiver, &mut fido, request, channel, true, &clock,
+                                ) {
+                                    Ok(response) => response,
+                                    Err(error) => {
+                                        command_error = Some(error);
+                                        vec![0x7f]
+                                    }
+                                },
+                                Ok(false) => vec![0x2d],
+                                Err(error) => {
+                                    command_error = Some(error);
+                                    vec![0x7f]
+                                }
+                            }
+                        } else {
+                            match exchange_fido_with_keepalives(
+                                &mut input, receiver, &mut fido, request, channel, false, &clock,
                             ) {
                                 Ok(response) => response,
                                 Err(error) => {
                                     command_error = Some(error);
                                     vec![0x7f]
                                 }
-                            },
-                            Ok(false) => vec![0x2d],
-                            Err(error) => {
-                                command_error = Some(error);
-                                vec![0x7f]
+                            }
+                        };
+                        if fido.take_persistent_change() {
+                            if let Err(error) = persist_fido_state(&fido, &state_path) {
+                                persistence_error = Some(error);
                             }
                         }
-                    } else {
-                        match exchange_fido_with_keepalives(
-                            &mut input, &reports, &mut fido, request, channel, false, &clock,
-                        ) {
-                            Ok(response) => response,
-                            Err(error) => {
-                                command_error = Some(error);
-                                vec![0x7f]
-                            }
-                        }
-                    };
-                    if fido.take_persistent_change() {
-                        if let Err(error) = persist_fido_state(&fido, &state_path) {
-                            persistence_error = Some(error);
-                        }
-                    }
-                    let status = response.first().copied().unwrap_or_default();
-                    diagnostics::log(
-                        Level::Info,
-                        "ctap2",
-                        "response",
-                        format_args!(
+                        let status = response.first().copied().unwrap_or_default();
+                        diagnostics::log(
+                            Level::Info,
+                            "ctap2",
+                            "response",
+                            format_args!(
                             "command=0x{command:02x} status=0x{status:02x} name={} cbor_length={}",
                             if response.is_empty() {
                                 "missing"
@@ -697,50 +863,72 @@ fn serve_hid(
                             },
                             response.len().saturating_sub(1)
                         ),
-                    );
-                    response
-                });
-                if let Some(error) = persistence_error {
-                    return Err(error);
-                }
-                if let Some(error) = command_error {
-                    return Err(error);
-                }
-                for reply in replies {
-                    write_transfer(&mut input, &reply)?;
+                        );
+                        response
+                    });
+                    if let Some(error) = persistence_error {
+                        return Err(error);
+                    }
+                    if let Some(error) = command_error {
+                        return Err(error);
+                    }
+                    for reply in replies {
+                        write_transfer(&mut input, &reply)?;
+                    }
                 }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    let reader_result = reports.shutdown();
+    result.and(reader_result)
 }
 
 #[cfg(target_os = "linux")]
-fn start_hid_reader(mut output: File) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::Builder::new()
-        .name("fido-out".to_owned())
-        .spawn(move || {
-            let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
-            while !STOP_REQUESTED.load(Ordering::Relaxed) {
-                match output.read(&mut report) {
-                    Ok(length) => {
-                        if sender.send(Ok(report[..length].to_vec())).is_err() {
+struct HidReader {
+    receiver: Receiver<io::Result<Vec<u8>>>,
+    thread: thread::JoinHandle<()>,
+}
+
+#[cfg(target_os = "linux")]
+impl HidReader {
+    fn start(mut output: File) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("fido-out".to_owned())
+            .spawn(move || {
+                let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+                while !STOP_REQUESTED.load(Ordering::Relaxed) {
+                    match output.read(&mut report) {
+                        Ok(length) => {
+                            if sender.send(Ok(report[..length].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) if endpoint_is_gone(&error) => {
+                            thread::sleep(ENDPOINT_RETRY_DELAY);
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
                             break;
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(error) if endpoint_is_gone(&error) => {
-                        thread::sleep(ENDPOINT_RETRY_DELAY);
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                        break;
-                    }
                 }
-            }
-        })?;
-    Ok(receiver)
+            })?;
+        Ok(Self { receiver, thread })
+    }
+
+    fn receiver(&self) -> &Receiver<io::Result<Vec<u8>>> {
+        &self.receiver
+    }
+
+    fn shutdown(self) -> io::Result<()> {
+        drop(self.receiver);
+        self.thread
+            .join()
+            .map_err(|_| io::Error::other("FIDO OUT reader thread panicked"))
+    }
 }
 
 #[cfg(target_os = "linux")]

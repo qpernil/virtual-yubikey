@@ -73,6 +73,10 @@ impl Channel<'static> {
 }
 
 impl Channel<'_> {
+    pub(crate) fn as_raw_fd(&self) -> i32 {
+        self.descriptor.as_raw_fd()
+    }
+
     pub(crate) fn send(&self, record: &Record) -> io::Result<()> {
         if !record.files.is_empty() {
             return invalid("workers cannot attach descriptors to this record");

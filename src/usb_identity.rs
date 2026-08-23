@@ -239,7 +239,7 @@ mod tests {
         assert!(profile.get("usb").is_none());
         assert!(profile.get("functions").is_none());
         let resources = profile.get("resources").unwrap().as_array().unwrap();
-        assert_eq!(resources.len(), 3);
+        assert_eq!(resources.len(), 4);
         assert_eq!(
             resources[0].get("name").unwrap().as_str(),
             Some("display-spi")
@@ -266,6 +266,24 @@ mod tests {
         );
         assert_eq!(resources[2].get("bias").unwrap().as_str(), Some("pull-up"));
         assert_eq!(resources[2].get("edge").unwrap().as_str(), Some("both"));
+        assert_eq!(
+            resources[3].get("name").unwrap().as_str(),
+            Some("reconnect-button")
+        );
+        assert_eq!(
+            resources[3].get("offsets").unwrap().as_array().unwrap()[0].as_integer(),
+            Some(16)
+        );
+        assert_eq!(
+            resources[3].get("direction").unwrap().as_str(),
+            Some("input")
+        );
+        assert_eq!(
+            resources[3].get("active_low").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(resources[3].get("bias").unwrap().as_str(), Some("pull-up"));
+        assert_eq!(resources[3].get("edge").unwrap().as_str(), Some("both"));
         assert_eq!(
             profile
                 .get("worker")

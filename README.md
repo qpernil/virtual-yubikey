@@ -226,9 +226,10 @@ worker and FunctionFS. The supervisor never handles CTAP, CCID, APDU, PIN, or
 key data.
 
 The profile also declares the ST7789 SPI device, its exact data/command, reset,
-and backlight GPIO lines, and joystick-center GPIO13 as a separate active-low
-input with both-edge events. The supervisor opens those capabilities as root
-and sends their named handles in the initial `SCM_RIGHTS` resource record.
+and backlight GPIO lines, joystick-center GPIO13 for touch, and KEY3 GPIO16 for
+USB reconnect as separate active-low inputs with both-edge events. The
+supervisor opens those capabilities as root and sends their named handles in
+the initial `SCM_RIGHTS` resource record.
 The worker renders an included vertical YubiKey image as a native 240x240
 RGB565 frame. Accepted FIDO and CCID traffic toggles the green cut-out details
 on a dedicated, coalescing display thread; 90 ms without new activity returns
@@ -237,8 +238,12 @@ physical presence, the same cut-outs blink until touch, cancellation, or failure
 ends the wait. Every application uses the same measured YubiKey 5 NFC cadence:
 a 384 ms half-period, or approximately 1.30 blinks per second. PIV and OpenPGP
 will reuse this state when those application paths implement touch. USB
-suspend and worker shutdown clear the panel and turn off its backlight. Display
-traffic never blocks a USB endpoint thread.
+suspend and worker shutdown clear the panel and turn off its backlight. KEY3
+also turns the display off while the worker publishes its current personality
+again; the supervisor replaces only the USB generation, and the same worker
+restores the idle image after its new endpoints are serving. To the host and
+observer this is an eject followed by insertion without a process restart.
+Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
@@ -280,6 +285,10 @@ The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event
 ```sh
 virtual-yubikey-touch
 ```
+
+Pressing display-HAT KEY3 requests a physical-style USB reconnect. The worker
+sends a new complete `Configure` record rather than signalling or restarting
+the supervisor. KEY1 and KEY2 are intentionally unassigned.
 
 The GPIO thread drains edge events continuously but sends only a newly observed
 press into the socket for the currently active wait. The helper fails when no
