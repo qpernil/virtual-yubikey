@@ -132,7 +132,6 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
             configure_request,
             Vec::new(),
         ))?;
-        display.resume()?;
         diagnostics::log(
             Level::Info,
             "worker",
@@ -520,8 +519,11 @@ fn serve_control(
                         "bus_event",
                         format_args!("event={event:?} activation={activation}"),
                     );
-                    if event == UsbBusEvent::Enable {
-                        display.resume()?;
+                    if event == UsbBusEvent::Bind {
+                        display.bind()?;
+                    } else if event == UsbBusEvent::Unbind {
+                        display.unbind()?;
+                    } else if event == UsbBusEvent::Enable {
                         match ccid_notifications.try_send(()) {
                             Ok(()) | Err(TrySendError::Full(())) => {}
                             Err(TrySendError::Disconnected(())) => {
@@ -545,7 +547,7 @@ fn serve_control(
                 }
                 Kind::Quiesce if record.body.is_empty() => {
                     STOP_REQUESTED.store(true, Ordering::Relaxed);
-                    display.suspend()?;
+                    display.unbind()?;
                     return if record.request_id == 0 {
                         Ok(ControlOutcome::Quiesce {
                             request_id: 0,
@@ -571,7 +573,7 @@ fn serve_control(
                         format_args!("{}", String::from_utf8_lossy(&record.body)),
                     );
                     reconfiguration_pending = false;
-                    display.resume()?;
+                    display.bind()?;
                 }
                 _ => return invalid(format!("unexpected runtime record {:?}", record.kind)),
             }
@@ -583,7 +585,7 @@ fn serve_control(
                 let request_id = configure_request
                     .checked_add(1)
                     .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
-                display.suspend()?;
+                display.unbind()?;
                 control.send(&Record::new(
                     Kind::Configure,
                     generation,

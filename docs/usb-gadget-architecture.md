@@ -424,9 +424,11 @@ turns off its display and publishes the same complete personality with a new
 request identifier. The supervisor performs the standard quiesce, unbind,
 FunctionFS replacement, and rebind sequence; it does not interpret the button
 or control the display. Endpoint threads are joined before the worker accepts
-the replacement endpoint files, then the idle image returns after `Serving`.
-The host observes detach and enumeration while the worker, its initial resource
-handles, and persistent authenticator state survive.
+the replacement endpoint files. `Serving` alone leaves the display dark; the
+idle image returns on the replacement generation's `Bind` event. `Unbind`
+turns it off, while `Disable` leaves it on because the device remains physically
+present. The host observes detach and enumeration while the worker, its initial
+resource handles, and persistent authenticator state survive.
 
 ### Case 3: Trezor vendor/WebUSB transport
 
