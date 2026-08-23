@@ -1,4 +1,4 @@
-//! Event-driven physical-presence input from the display HAT joystick center.
+//! Event-driven controls from the display HAT joystick and keys.
 
 use crate::diagnostics::{self, Level};
 use crate::functionfs::USER_PRESENCE_TOUCH;
@@ -15,17 +15,55 @@ const GPIO_V2_LINE_EVENT_RISING_EDGE: u32 = 1;
 
 pub(crate) struct Controller {
     shutdown: UnixDatagram,
+    reconnect: UnixDatagram,
     thread: JoinHandle<io::Result<()>>,
 }
 
 impl Controller {
-    pub(crate) fn start(lines: File, touch_socket: PathBuf) -> io::Result<Self> {
-        set_nonblocking(&lines)?;
+    pub(crate) fn start(
+        touch_lines: File,
+        reconnect_lines: File,
+        touch_socket: PathBuf,
+    ) -> io::Result<Self> {
+        set_nonblocking(&touch_lines)?;
+        set_nonblocking(&reconnect_lines)?;
         let (shutdown, receiver) = UnixDatagram::pair()?;
+        let (reconnect_sender, reconnect) = UnixDatagram::pair()?;
+        reconnect.set_nonblocking(true)?;
+        reconnect_sender.set_nonblocking(true)?;
         let thread = thread::Builder::new()
-            .name("yubikey-touch-button".to_owned())
-            .spawn(move || button_loop(lines, receiver, touch_socket))?;
-        Ok(Self { shutdown, thread })
+            .name("yubikey-buttons".to_owned())
+            .spawn(move || {
+                button_loop(
+                    touch_lines,
+                    reconnect_lines,
+                    receiver,
+                    reconnect_sender,
+                    touch_socket,
+                )
+            })?;
+        Ok(Self {
+            shutdown,
+            reconnect,
+            thread,
+        })
+    }
+
+    pub(crate) fn reconnect_descriptor(&self) -> i32 {
+        self.reconnect.as_raw_fd()
+    }
+
+    pub(crate) fn take_reconnect_request(&self) -> io::Result<bool> {
+        let mut requested = false;
+        let mut byte = [0_u8; 1];
+        loop {
+            match self.reconnect.recv(&mut byte) {
+                Ok(_) => requested = true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(requested),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub(crate) fn shutdown(self) -> io::Result<()> {
@@ -36,17 +74,28 @@ impl Controller {
     }
 }
 
-fn button_loop(mut lines: File, shutdown: UnixDatagram, touch_socket: PathBuf) -> io::Result<()> {
+fn button_loop(
+    mut touch_lines: File,
+    mut reconnect_lines: File,
+    shutdown: UnixDatagram,
+    reconnect: UnixDatagram,
+    touch_socket: PathBuf,
+) -> io::Result<()> {
     diagnostics::log(
         Level::Info,
         "button",
         "ready",
-        format_args!("input=joystick-center gpio=13"),
+        format_args!("touch=joystick-center gpio=13 reconnect=key3 gpio=16"),
     );
     let notifier = UnixDatagram::unbound()?;
     let mut poll_fds = [
         libc::pollfd {
-            fd: lines.as_raw_fd(),
+            fd: touch_lines.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: reconnect_lines.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         },
@@ -67,22 +116,30 @@ fn button_loop(mut lines: File, shutdown: UnixDatagram, touch_socket: PathBuf) -
             }
             return Err(error);
         }
-        if poll_fds[1].revents & libc::POLLIN != 0 {
+        if poll_fds[2].revents & libc::POLLIN != 0 {
             return Ok(());
         }
         if poll_fds[0].revents & libc::POLLIN != 0 {
-            drain_button_events(&mut lines, &notifier, &touch_socket)?;
+            drain_touch_events(&mut touch_lines, &notifier, &touch_socket)?;
         }
-        let unexpected = poll_fds[0].revents & !(libc::POLLIN);
-        if unexpected != 0 {
-            return Err(io::Error::other(format!(
-                "touch-button descriptor reported poll events 0x{unexpected:x}"
-            )));
+        if poll_fds[1].revents & libc::POLLIN != 0 {
+            drain_reconnect_events(&mut reconnect_lines, &reconnect)?;
+        }
+        for (name, descriptor) in [
+            ("touch-button", poll_fds[0]),
+            ("reconnect-button", poll_fds[1]),
+        ] {
+            let unexpected = descriptor.revents & !libc::POLLIN;
+            if unexpected != 0 {
+                return Err(io::Error::other(format!(
+                    "{name} descriptor reported poll events 0x{unexpected:x}"
+                )));
+            }
         }
     }
 }
 
-fn drain_button_events(
+fn drain_touch_events(
     lines: &mut File,
     notifier: &UnixDatagram,
     touch_socket: &PathBuf,
@@ -104,6 +161,63 @@ fn drain_button_events(
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "touch-button descriptor closed",
+                ))
+            }
+            Ok(length) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("partial GPIO edge event: {length} bytes"),
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn drain_reconnect_events(lines: &mut File, notifier: &UnixDatagram) -> io::Result<()> {
+    drain_events(lines, || match notifier.send(&[1]) {
+        Ok(1) => diagnostics::log(
+            Level::Info,
+            "button",
+            "reconnect",
+            format_args!("input=key3 requested=true"),
+        ),
+        Ok(length) => diagnostics::log(
+            Level::Info,
+            "button",
+            "failed",
+            format_args!("operation=request-reconnect bytes={length}"),
+        ),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) => diagnostics::log(
+            Level::Info,
+            "button",
+            "failed",
+            format_args!("operation=request-reconnect error={error:?}"),
+        ),
+    })
+}
+
+fn drain_events(lines: &mut File, mut rising: impl FnMut()) -> io::Result<()> {
+    loop {
+        let mut event = [0_u8; GPIO_V2_LINE_EVENT_SIZE];
+        match lines.read(&mut event) {
+            Ok(GPIO_V2_LINE_EVENT_SIZE) => {
+                let id = u32::from_ne_bytes(
+                    event[GPIO_V2_LINE_EVENT_ID_OFFSET..GPIO_V2_LINE_EVENT_ID_OFFSET + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                if id == GPIO_V2_LINE_EVENT_RISING_EDGE {
+                    rising();
+                }
+            }
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "button descriptor closed",
                 ))
             }
             Ok(length) => {

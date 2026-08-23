@@ -33,3 +33,13 @@ direction = "input"
 active_low = true
 bias = "pull-up"
 edge = "both"
+
+[[resources]]
+type = "gpio-lines"
+name = "reconnect-button"
+path = "/dev/gpiochip0"
+offsets = [16]
+direction = "input"
+active_low = true
+bias = "pull-up"
+edge = "both"
