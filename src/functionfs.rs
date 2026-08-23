@@ -572,27 +572,27 @@ fn serve_control(
             }
         }
 
-        if poll_fds[1].revents & libc::POLLIN != 0 && !unconfiguration_pending {
-            if buttons.take_reconnect_transition()? == Some(true) {
-                let request_id = configure_request
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
-                display.unbind()?;
-                control.send(&Record::new(
-                    Kind::Configure,
-                    generation,
-                    request_id,
-                    Vec::new(),
-                ))?;
-                *configure_request = request_id;
-                unconfiguration_pending = true;
-                diagnostics::log(
-                    Level::Info,
-                    "usb",
-                    "eject_requested",
-                    format_args!("generation={generation} request={request_id}"),
-                );
-            }
+        if poll_fds[1].revents & libc::POLLIN != 0
+            && !unconfiguration_pending
+            && buttons.take_reconnect_transition()? == Some(true)
+        {
+            let request_id = configure_request
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
+            control.send(&Record::new(
+                Kind::Configure,
+                generation,
+                request_id,
+                Vec::new(),
+            ))?;
+            *configure_request = request_id;
+            unconfiguration_pending = true;
+            diagnostics::log(
+                Level::Info,
+                "usb",
+                "eject_requested",
+                format_args!("generation={generation} request={request_id}"),
+            );
         }
         let unexpected = poll_fds[1].revents & !libc::POLLIN;
         if unexpected != 0 {
