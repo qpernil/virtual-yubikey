@@ -390,11 +390,12 @@ This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
 
-FIDO and CCID endpoint owners also send non-blocking activity hints to a
-dedicated local-display thread. That thread alternates two pre-encoded native
-ST7789 frames so the YubiKey's cut-out y and NFC arcs blink green during USB
-traffic. An atomic pending flag deliberately coalesces activity hints before
-they enter the non-blocking display command channel: display SPI work can never
+Non-empty FIDO HID OUT reports and CCID bulk OUT transfers send non-blocking
+activity hints to a dedicated local-display thread. That thread alternates two
+pre-encoded native ST7789 frames so the YubiKey's cut-out y and NFC arcs blink
+green during USB traffic. An atomic pending flag deliberately coalesces
+activity hints before they enter the non-blocking display command channel:
+display SPI work can never
 delay either USB application, while sustained traffic may still blink as
 enthusiastically as the panel can accept complete frames. USB suspend and worker
 exit clear the display and turn off its backlight.
@@ -428,7 +429,8 @@ the replacement endpoint files. `Serving` alone leaves the display dark; the
 idle image returns on the replacement generation's `Bind` event. `Unbind`
 turns it off, while `Disable` leaves it on because the device remains physically
 present. The host observes detach and enumeration while the worker, its initial
-resource handles, and persistent authenticator state survive.
+resource handles, and persistent authenticator state survive. The supervisor
+keeps the UDC detached for at least 250 ms before binding the replacement.
 
 ### Case 3: Trezor vendor/WebUSB transport
 
