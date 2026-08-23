@@ -234,10 +234,9 @@ RGB565 frame. Accepted FIDO and CCID traffic toggles the green cut-out details
 on a dedicated, coalescing display thread; 90 ms without new activity returns
 the image to its idle state. While any application is blocked waiting for
 physical presence, the same cut-outs blink until touch, cancellation, or failure
-ends the wait. Each application supplies its authentic cadence: FIDO uses a
-384 ms half-period for approximately 1.30 blinks per second, matching a measured
-YubiKey 5 NFC, while PIV and OpenPGP touch policies will use a 500 ms half-period
-for one blink per second when those application paths implement touch. USB
+ends the wait. Every application uses the same measured YubiKey 5 NFC cadence:
+a 384 ms half-period, or approximately 1.30 blinks per second. PIV and OpenPGP
+will reuse this state when those application paths implement touch. USB
 suspend and worker shutdown clear the panel and turn off its backlight. Display
 traffic never blocks a USB endpoint thread.
 

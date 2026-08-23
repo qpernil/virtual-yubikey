@@ -400,13 +400,11 @@ enthusiastically as the panel can accept complete frames. USB suspend and worker
 exit clear the display and turn off its backlight.
 
 A separate reference-counted physical-presence state blinks for as long as any
-application is blocked waiting for touch. Each scoped guard carries its cadence:
-FIDO uses a measured 384 ms half-period, approximately 1.30 blinks per second,
-matching a YubiKey 5 NFC. PIV and OpenPGP will use a 500 ms half-period for one
-blink per second when their application paths implement touch. If applications
-wait concurrently, the fastest active cadence wins. The smart-card application
-paths can reuse the same state without teaching the display which protocol
-requested presence.
+application is blocked waiting for touch. It uses the measured YubiKey 5 NFC
+cadence for every application: a 384 ms half-period, approximately 1.30 blinks
+per second. PIV and OpenPGP can reuse the same scoped state when their touch
+paths are implemented, without teaching the display which protocol requested
+presence.
 
 The ST7789 and joystick share a HAT but not an I/O path. Display frames use SPI;
 GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. A separate
