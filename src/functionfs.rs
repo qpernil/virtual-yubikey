@@ -1,9 +1,11 @@
-//! Unprivileged FunctionFS transport for the virtual YubiKey CCID interface.
+//! Unprivileged FunctionFS transport for the virtual YubiKey worker.
 
 #[cfg(target_os = "linux")]
 use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
-use crate::worker_protocol::{Channel, Message, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
+use crate::worker_protocol::{
+    validate_initial_resources, Channel, Kind, Record, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV,
+};
 #[cfg(target_os = "linux")]
 use crate::STOP_REQUESTED;
 #[cfg(target_os = "linux")]
@@ -13,8 +15,6 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixDatagram;
@@ -23,12 +23,14 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(target_os = "linux")]
 use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+use usb_gadget_worker::UsbBusEvent;
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
 
@@ -41,7 +43,7 @@ const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(target_os = "linux")]
-const IDLE_ENDPOINT_WAIT_MS: i32 = 250;
+const ENDPOINT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,24 +64,6 @@ impl UserPresenceCommand {
 }
 
 #[cfg(target_os = "linux")]
-#[repr(C)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn poll(fds: *mut PollFd, count: usize, timeout_ms: i32) -> i32;
-}
-
-#[cfg(target_os = "linux")]
-const POLLIN: i16 = 0x0001;
-#[cfg(target_os = "linux")]
-const POLLOUT: i16 = 0x0004;
-
-#[cfg(target_os = "linux")]
 pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
@@ -92,8 +76,15 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         ));
     }
 
-    let mut control = Channel::from_fixed_descriptor();
-    let prebind = control.receive_files(Message::PrebindResources, 4)?;
+    STOP_REQUESTED.store(false, Ordering::Relaxed);
+    let control = Channel::from_fixed_descriptor();
+    let resources = validate_initial_resources(control.receive()?)?;
+    if !resources.is_empty() {
+        return invalid(format!(
+            "virtual YubiKey received {} unexpected initial resources",
+            resources.len()
+        ));
+    }
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
@@ -103,28 +94,49 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     };
     let fido = load_fido_state(serial, &storage.fido_state)?;
     let ccid = load_piv_state(serial, &storage.piv_state)?;
-    let endpoints = Endpoints::from_files(prebind)?;
-    control.send(Message::Prepared)?;
-    let mut postbind = control.receive_files(Message::PostbindResources, 1)?;
-    let hid = postbind
-        .pop()
-        .expect("protocol validated one HID descriptor");
-    control.send(Message::Serving)?;
+    let configure_request = 1;
+    control.send(&Record::new(
+        Kind::Configure,
+        0,
+        configure_request,
+        crate::usb_identity::personality().to_cbor()?,
+    ))?;
+    let endpoints_record = control.receive()?;
+    if endpoints_record.kind == Kind::ConfigurationRejected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "supervisor rejected USB personality: {}",
+                String::from_utf8_lossy(&endpoints_record.body)
+            ),
+        ));
+    }
+    if endpoints_record.kind != Kind::UsbEndpoints
+        || endpoints_record.generation == 0
+        || endpoints_record.request_id != configure_request
+    {
+        return invalid("expected USB endpoints for the published personality");
+    }
+    let generation = endpoints_record.generation;
+    let endpoints = Endpoints::from_record(endpoints_record)?;
+    control.send(&Record::new(
+        Kind::Serving,
+        generation,
+        configure_request,
+        Vec::new(),
+    ))?;
     diagnostics::log(
         Level::Info,
         "worker",
         "ready",
-        format_args!("serial={serial} usb_descriptors=5"),
+        format_args!("serial={serial} generation={generation} usb_endpoints=5"),
     );
-    let mut lifecycle = control;
-    thread::Builder::new()
-        .name("worker-control".to_owned())
-        .spawn(move || {
-            let _ = lifecycle.receive();
-            STOP_REQUESTED.store(true, Ordering::Relaxed);
-        })?;
 
-    endpoints.serve(serial, hid, fido, ccid, &storage)
+    let keepalive = crate::keepalive::Scheduler::start()?;
+    let ccid_notifications = endpoints.start(serial, fido, ccid, &storage, &keepalive)?;
+    let result = serve_control(control, generation, ccid_notifications);
+    drop(keepalive);
+    result
 }
 
 #[cfg(target_os = "linux")]
@@ -147,11 +159,11 @@ fn required_path(name: &str) -> io::Result<PathBuf> {
 
 #[cfg(target_os = "linux")]
 struct Endpoints {
-    ep0: File,
+    fido_out: File,
+    fido_in: File,
     ccid_out: File,
     ccid_in: File,
     ccid_interrupt: File,
-    ccid_notification_pending: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -163,55 +175,117 @@ struct WorkerStorage {
 
 #[cfg(target_os = "linux")]
 impl Endpoints {
-    fn from_files(files: Vec<File>) -> io::Result<Self> {
-        let [ep0, ccid_out, ccid_in, ccid_interrupt]: [File; 4] =
-            files.try_into().map_err(|files: Vec<File>| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "expected four pre-bind USB descriptors, got {}",
-                        files.len()
-                    ),
-                )
-            })?;
+    fn from_record(record: Record) -> io::Result<Self> {
+        let count = record
+            .body
+            .get(..2)
+            .ok_or_else(|| data_error("truncated USB endpoint map"))?;
+        let count = u16::from_be_bytes(count.try_into().unwrap()) as usize;
+        if record.body.len() != 2 + count * 4 || record.files.len() != count {
+            return invalid("USB endpoint map and descriptors differ");
+        }
+        let mut fido_out = None;
+        let mut fido_in = None;
+        let mut ccid_out = None;
+        let mut ccid_in = None;
+        let mut ccid_interrupt = None;
+        for (entry, file) in record.body[2..].chunks_exact(4).zip(record.files) {
+            let address = entry[0];
+            let transfer_type = entry[1];
+            let packet_size = u16::from_be_bytes(entry[2..4].try_into().unwrap());
+            let target = match address {
+                crate::usb_identity::FIDO_OUT if transfer_type == 3 && packet_size == 64 => {
+                    &mut fido_out
+                }
+                crate::usb_identity::FIDO_IN if transfer_type == 3 && packet_size == 64 => {
+                    &mut fido_in
+                }
+                crate::usb_identity::CCID_OUT if transfer_type == 2 && packet_size == 64 => {
+                    &mut ccid_out
+                }
+                crate::usb_identity::CCID_IN if transfer_type == 2 && packet_size == 64 => {
+                    &mut ccid_in
+                }
+                crate::usb_identity::CCID_INTERRUPT_IN
+                    if transfer_type == 3 && packet_size == 8 =>
+                {
+                    &mut ccid_interrupt
+                }
+                _ => {
+                    return invalid(format!(
+                        "unexpected USB endpoint {address:#04x} type={transfer_type} packet_size={packet_size}"
+                    ));
+                }
+            };
+            if target.replace(file).is_some() {
+                return invalid(format!("duplicate USB endpoint {address:#04x}"));
+            }
+        }
         Ok(Self {
-            ep0,
-            ccid_out,
-            ccid_in,
-            ccid_interrupt,
-            ccid_notification_pending: false,
+            fido_out: required_endpoint(fido_out, "FIDO OUT")?,
+            fido_in: required_endpoint(fido_in, "FIDO IN")?,
+            ccid_out: required_endpoint(ccid_out, "CCID OUT")?,
+            ccid_in: required_endpoint(ccid_in, "CCID IN")?,
+            ccid_interrupt: required_endpoint(ccid_interrupt, "CCID interrupt IN")?,
         })
     }
 
-    fn serve(
+    fn start(
         self,
         serial: u32,
-        hid: File,
         fido: FidoAuthenticator,
         ccid: crate::ccid::Device,
         storage: &WorkerStorage,
-    ) -> io::Result<()> {
+        keepalive: &crate::keepalive::Scheduler,
+    ) -> io::Result<SyncSender<()>> {
         let Self {
-            mut ep0,
+            fido_out,
+            fido_in,
             ccid_out,
             ccid_in,
             mut ccid_interrupt,
-            mut ccid_notification_pending,
         } = self;
-        let (completion_tx, completion_rx) = mpsc::channel();
-        let keepalive = crate::keepalive::Scheduler::start()?;
+        let (notification_tx, notification_rx) = mpsc::sync_channel(1);
 
-        // FunctionFS endpoint reads remain synchronous after enable even when
-        // opened O_NONBLOCK, so keep the bulk OUT endpoint in its own thread.
-        let ccid_completion = completion_tx.clone();
+        thread::Builder::new()
+            .name("ccid-notify".to_owned())
+            .spawn(move || {
+                while notification_rx.recv().is_ok() {
+                    if let Err(error) = write_transfer(&mut ccid_interrupt, &[0x50, 0x03]) {
+                        if !endpoint_is_gone(&error) {
+                            diagnostics::log(
+                                Level::Info,
+                                "ccid",
+                                "notification_failed",
+                                format_args!("{error}"),
+                            );
+                            STOP_REQUESTED.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    } else {
+                        diagnostics::log(
+                            Level::Debug,
+                            "ccid",
+                            "slot_change_notification",
+                            format_args!("slot=0 present=true changed=true"),
+                        );
+                    }
+                }
+            })?;
+
         thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
             move || {
-                let _ = ccid_completion.send((
-                    "CCID",
-                    serve_ccid(ccid_out, ccid_in, ccid, &state_path, clock),
-                ));
+                if let Err(error) = serve_ccid(ccid_out, ccid_in, ccid, &state_path, clock) {
+                    diagnostics::log(
+                        Level::Info,
+                        "ccid",
+                        "transport_failed",
+                        format_args!("{error}"),
+                    );
+                    STOP_REQUESTED.store(true, Ordering::Relaxed);
+                }
             }
         })?;
 
@@ -220,58 +294,165 @@ impl Endpoints {
             let touch_socket = storage.touch_socket.clone();
             let clock = keepalive.handle();
             move || {
-                let _ = completion_tx.send((
-                    "FIDO HID",
-                    serve_hid(hid, fido, serial, &state_path, &touch_socket, clock),
-                ));
+                if let Err(error) = serve_hid(
+                    fido_out,
+                    fido_in,
+                    fido,
+                    serial,
+                    &state_path,
+                    &touch_socket,
+                    clock,
+                ) {
+                    diagnostics::log(
+                        Level::Info,
+                        "ctaphid",
+                        "transport_failed",
+                        format_args!("{error}"),
+                    );
+                    STOP_REQUESTED.store(true, Ordering::Relaxed);
+                }
             }
         })?;
+        Ok(notification_tx)
+    }
+}
 
-        while !STOP_REQUESTED.load(Ordering::Relaxed) {
-            drain_events(&mut ep0, &mut ccid_notification_pending)?;
-            let mut progressed = false;
+#[cfg(target_os = "linux")]
+fn required_endpoint(file: Option<File>, name: &str) -> io::Result<File> {
+    file.ok_or_else(|| data_error(format!("missing {name} endpoint")))
+}
 
-            if ccid_notification_pending {
-                match ccid_interrupt.write(&[0x50, 0x03]) {
-                    Ok(2) => {
-                        progressed = true;
-                        ccid_notification_pending = false;
-                        diagnostics::log(
-                            Level::Debug,
-                            "ccid",
-                            "slot_change_notification",
-                            format_args!("slot=0 present=true changed=true"),
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) if transient_endpoint_error(&error) => {}
-                    Err(error) => return Err(error),
-                }
+#[cfg(target_os = "linux")]
+fn serve_control(
+    control: Channel<'static>,
+    generation: u32,
+    ccid_notifications: SyncSender<()>,
+) -> io::Result<()> {
+    loop {
+        let record = match control.receive() {
+            Ok(record) => record,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                STOP_REQUESTED.store(true, Ordering::Relaxed);
+                return Ok(());
             }
-
-            match completion_rx.try_recv() {
-                Ok((transport, Ok(()))) => {
-                    return Err(io::Error::other(format!(
-                        "{transport} endpoint worker exited unexpectedly"
-                    )));
-                }
-                Ok((transport, Err(error))) => {
-                    return Err(with_context(
-                        error,
-                        &format!("{transport} endpoint worker failed"),
-                    ));
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    return Err(io::Error::other("CCID endpoint worker disconnected"));
-                }
-            }
-
-            if !progressed {
-                wait_for_main_activity(&ep0, &ccid_interrupt, ccid_notification_pending)?;
-            }
+            Err(error) => return Err(error),
+        };
+        if record.generation != generation || !record.files.is_empty() {
+            return invalid("supervisor sent a mismatched runtime record");
         }
-        Ok(())
+        match record.kind {
+            Kind::UsbBusEvent if record.request_id == 0 => {
+                let (event, activation) = UsbBusEvent::decode(&record.body)?;
+                diagnostics::log(
+                    Level::Info,
+                    "usb",
+                    "bus_event",
+                    format_args!("event={event:?} activation={activation}"),
+                );
+                if event == UsbBusEvent::Enable {
+                    match ccid_notifications.try_send(()) {
+                        Ok(()) | Err(TrySendError::Full(())) => {}
+                        Err(TrySendError::Disconnected(())) => {
+                            return Err(io::Error::other("CCID notification endpoint stopped"));
+                        }
+                    }
+                }
+            }
+            Kind::UsbControlRequest if record.request_id != 0 => {
+                let response = respond_to_control_request(&record.body)?;
+                control.send(&Record::new(
+                    Kind::UsbControlResponse,
+                    generation,
+                    record.request_id,
+                    response,
+                ))?;
+            }
+            Kind::Quiesce if record.body.is_empty() => {
+                STOP_REQUESTED.store(true, Ordering::Relaxed);
+                control.send(&Record::new(
+                    Kind::Quiesced,
+                    generation,
+                    record.request_id,
+                    Vec::new(),
+                ))?;
+                return Ok(());
+            }
+            Kind::ConfigurationRejected => {
+                return invalid(format!(
+                    "supervisor rejected USB personality: {}",
+                    String::from_utf8_lossy(&record.body)
+                ));
+            }
+            _ => return invalid(format!("unexpected runtime record {:?}", record.kind)),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
+    let setup: &[u8; 8] = request
+        .get(..8)
+        .ok_or_else(|| data_error("truncated USB control request"))?
+        .try_into()
+        .unwrap();
+    let request_type = setup[0];
+    let request_code = setup[1];
+    let value = u16::from_le_bytes(setup[2..4].try_into().unwrap());
+    let index = u16::from_le_bytes(setup[4..6].try_into().unwrap());
+    let length = u16::from_le_bytes(setup[6..8].try_into().unwrap()) as usize;
+    let output = &request[8..];
+    if request_type & 0x80 == 0 {
+        if output.len() != length {
+            return invalid("USB control OUT data length differs from wLength");
+        }
+    } else if !output.is_empty() {
+        return invalid("USB control IN request carries OUT data");
+    }
+
+    let answer: Option<Vec<u8>> = match (request_type, request_code, value, index) {
+        (0x81, 0x06, 0x2200, interface)
+            if interface == crate::usb_identity::FIDO_INTERFACE as u16 =>
+        {
+            Some(crate::usb_identity::FIDO_REPORT_DESCRIPTOR.to_vec())
+        }
+        (0x81, 0x06, 0x2100, interface)
+            if interface == crate::usb_identity::FIDO_INTERFACE as u16 =>
+        {
+            Some(crate::usb_identity::FIDO_HID_DESCRIPTOR.to_vec())
+        }
+        (0xa1, 0x02, _, interface) if interface == crate::usb_identity::FIDO_INTERFACE as u16 => {
+            Some(vec![0])
+        }
+        (0xa1, 0x03, _, interface) if interface == crate::usb_identity::FIDO_INTERFACE as u16 => {
+            Some(vec![1])
+        }
+        (0x21, 0x0a | 0x0b, _, interface)
+            if interface == crate::usb_identity::FIDO_INTERFACE as u16 && output.is_empty() =>
+        {
+            return Ok(vec![1]);
+        }
+        (0x21, 0x01, _, interface)
+            if interface == crate::usb_identity::CCID_INTERFACE as u16 && output.is_empty() =>
+        {
+            return Ok(vec![1]);
+        }
+        (0xa1, 0x02, _, interface) if interface == crate::usb_identity::CCID_INTERFACE as u16 => {
+            Some(4_000_u32.to_le_bytes().to_vec())
+        }
+        (0xa1, 0x03, _, interface) if interface == crate::usb_identity::CCID_INTERFACE as u16 => {
+            Some(307_200_u32.to_le_bytes().to_vec())
+        }
+        _ => None,
+    };
+    match answer {
+        Some(mut bytes) => {
+            bytes.truncate(length);
+            let mut response = Vec::with_capacity(1 + bytes.len());
+            response.push(2);
+            response.extend_from_slice(&bytes);
+            Ok(response)
+        }
+        None => Ok(vec![0]),
     }
 }
 
@@ -286,22 +467,21 @@ fn serve_ccid(
     let mut request = [0_u8; MAX_TRANSFER];
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match output.read(&mut request) {
-            Ok(0) => wait_for_descriptor(&output, POLLIN, IDLE_ENDPOINT_WAIT_MS)?,
+            Ok(0) => {}
             Ok(length) => {
                 let replies =
                     ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
-                        write_nonblocking(&mut input, keepalive)
+                        write_transfer(&mut input, keepalive)
                     })?;
                 if ccid.take_piv_persistent_change() {
                     persist_piv_state(&ccid, state_path)?;
                 }
                 for reply in replies {
-                    write_nonblocking(&mut input, &reply)?;
+                    write_transfer(&mut input, &reply)?;
                 }
             }
-            Err(error) if transient_endpoint_error(&error) => {
-                wait_for_descriptor(&output, POLLIN, IDLE_ENDPOINT_WAIT_MS)?;
-            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if endpoint_is_gone(&error) => thread::sleep(ENDPOINT_RETRY_DELAY),
             Err(error) => return Err(error),
         }
     }
@@ -310,21 +490,33 @@ fn serve_ccid(
 
 #[cfg(target_os = "linux")]
 fn serve_hid(
-    mut hid: File,
+    output: File,
+    mut input: File,
     mut fido: FidoAuthenticator,
     serial: u32,
     state_path: &Path,
     touch_socket: &Path,
     clock: crate::keepalive::Handle,
 ) -> io::Result<()> {
-    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+    let reports = start_hid_reader(output)?;
     let mut ctaphid = crate::ctaphid::Device::new(
         virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
     );
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        match hid.read(&mut report) {
-            Ok(0) => {}
-            Ok(length) if length != report.len() => {
+        let report = match reports.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => return Err(error),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) if STOP_REQUESTED.load(Ordering::Relaxed) => {
+                return Ok(())
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("FIDO OUT reader stopped"))
+            }
+        };
+        match report.len() {
+            0 => {}
+            length if length != crate::ctaphid::REPORT_SIZE => {
                 diagnostics::log(
                     Level::Info,
                     "ctaphid",
@@ -332,7 +524,8 @@ fn serve_hid(
                     format_args!("reason=invalid_length length={length}"),
                 );
             }
-            Ok(_) => {
+            _ => {
+                let report: [u8; crate::ctaphid::REPORT_SIZE] = report.try_into().unwrap();
                 diagnostics::log(
                     Level::Debug,
                     "ctaphid",
@@ -384,9 +577,9 @@ fn serve_hid(
                         );
                     }
                     let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                        match wait_for_touch(&mut hid, channel, touch_socket, &clock) {
+                        match wait_for_touch(&mut input, &reports, channel, touch_socket, &clock) {
                             Ok(true) => match exchange_fido_with_keepalives(
-                                &mut hid, &mut fido, request, channel, true, &clock,
+                                &mut input, &reports, &mut fido, request, channel, true, &clock,
                             ) {
                                 Ok(response) => response,
                                 Err(error) => {
@@ -402,7 +595,7 @@ fn serve_hid(
                         }
                     } else {
                         match exchange_fido_with_keepalives(
-                            &mut hid, &mut fido, request, channel, false, &clock,
+                            &mut input, &reports, &mut fido, request, channel, false, &clock,
                         ) {
                             Ok(response) => response,
                             Err(error) => {
@@ -440,20 +633,46 @@ fn serve_hid(
                     return Err(error);
                 }
                 for reply in replies {
-                    hid.write_all(&reply)?;
+                    write_transfer(&mut input, &reply)?;
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if endpoint_is_gone(&error) => return Ok(()),
-            Err(error) => return Err(error),
         }
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
+fn start_hid_reader(mut output: File) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("fido-out".to_owned())
+        .spawn(move || {
+            let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
+            while !STOP_REQUESTED.load(Ordering::Relaxed) {
+                match output.read(&mut report) {
+                    Ok(length) => {
+                        if sender.send(Ok(report[..length].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) if endpoint_is_gone(&error) => {
+                        thread::sleep(ENDPOINT_RETRY_DELAY);
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(target_os = "linux")]
 fn exchange_fido_with_keepalives(
-    hid: &mut File,
+    input: &mut File,
+    reports: &Receiver<io::Result<Vec<u8>>>,
     fido: &mut FidoAuthenticator,
     request: &[u8],
     channel: u32,
@@ -477,7 +696,6 @@ fn exchange_fido_with_keepalives(
             let _ = result_tx.send((staged, response));
         })?;
 
-    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
     let mut processing_keepalives = 0_u64;
     loop {
         match result_rx.try_recv() {
@@ -502,10 +720,12 @@ fn exchange_fido_with_keepalives(
             }
         }
 
-        if input_ready(hid)? {
-            match hid.read(&mut report) {
-                Ok(length) if length == report.len() => {
-                    if crate::ctaphid::is_cancel(&report, channel) {
+        if let Some(report) = try_receive_hid_report(reports)? {
+            match report.len() {
+                crate::ctaphid::REPORT_SIZE => {
+                    let report: &[u8; crate::ctaphid::REPORT_SIZE] =
+                        report.as_slice().try_into().unwrap();
+                    if crate::ctaphid::is_cancel(report, channel) {
                         diagnostics::log(
                             Level::Info,
                             "ctaphid",
@@ -528,16 +748,12 @@ fn exchange_fido_with_keepalives(
                         ),
                     );
                 }
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "HID closed")),
-                Ok(length) => diagnostics::log(
+                length => diagnostics::log(
                     Level::Info,
                     "ctaphid",
                     "report_rejected",
                     format_args!("reason=invalid_length length={length}"),
                 ),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) if endpoint_is_gone(&error) => return Err(error),
-                Err(error) => return Err(error),
             }
         }
 
@@ -550,10 +766,10 @@ fn exchange_fido_with_keepalives(
                     format_args!("channel={channel:08x}"),
                 );
             }
-            hid.write_all(&crate::ctaphid::keepalive(
-                channel,
-                crate::ctaphid::KeepaliveStatus::Processing,
-            ))?;
+            write_transfer(
+                &mut *input,
+                &crate::ctaphid::keepalive(channel, crate::ctaphid::KeepaliveStatus::Processing),
+            )?;
             processing_keepalives += 1;
         }
         thread::sleep(HID_COMMAND_POLL_INTERVAL);
@@ -594,7 +810,8 @@ impl Drop for TouchSocket {
 
 #[cfg(target_os = "linux")]
 fn wait_for_touch(
-    hid: &mut File,
+    input: &mut File,
+    reports: &Receiver<io::Result<Vec<u8>>>,
     channel: u32,
     touch_socket: &Path,
     clock: &crate::keepalive::Handle,
@@ -608,7 +825,6 @@ fn wait_for_touch(
     );
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
     let mut signal = [0_u8; 1];
-    let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
 
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         match touch.socket.recv(&mut signal) {
@@ -627,10 +843,12 @@ fn wait_for_touch(
             Err(error) => return Err(with_context(error, "receive touch notification")),
         }
 
-        if input_ready(hid)? {
-            match hid.read(&mut report) {
-                Ok(length) if length == report.len() => {
-                    if crate::ctaphid::is_cancel(&report, channel) {
+        if let Some(report) = try_receive_hid_report(reports)? {
+            match report.len() {
+                crate::ctaphid::REPORT_SIZE => {
+                    let report: &[u8; crate::ctaphid::REPORT_SIZE] =
+                        report.as_slice().try_into().unwrap();
+                    if crate::ctaphid::is_cancel(report, channel) {
                         diagnostics::log(
                             Level::Info,
                             "fido",
@@ -650,24 +868,23 @@ fn wait_for_touch(
                         ),
                     );
                 }
-                Ok(0) => return Ok(false),
-                Ok(length) => diagnostics::log(
+                length => diagnostics::log(
                     Level::Info,
                     "ctaphid",
                     "report_rejected",
                     format_args!("reason=invalid_length length={length}"),
                 ),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) if endpoint_is_gone(&error) => return Ok(false),
-                Err(error) => return Err(error),
             }
         }
 
         if keepalives.tick_due() {
-            hid.write_all(&crate::ctaphid::keepalive(
-                channel,
-                crate::ctaphid::KeepaliveStatus::UserPresenceNeeded,
-            ))?;
+            write_transfer(
+                &mut *input,
+                &crate::ctaphid::keepalive(
+                    channel,
+                    crate::ctaphid::KeepaliveStatus::UserPresenceNeeded,
+                ),
+            )?;
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -675,68 +892,13 @@ fn wait_for_touch(
 }
 
 #[cfg(target_os = "linux")]
-fn input_ready(file: &File) -> io::Result<bool> {
-    let mut descriptor = PollFd {
-        fd: file.as_raw_fd(),
-        events: POLLIN,
-        revents: 0,
-    };
-    // SAFETY: `descriptor` points to one valid pollfd for the duration of the call.
-    let result = unsafe { poll(&mut descriptor, 1, 0) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            return Ok(false);
-        }
-        return Err(error);
-    }
-    Ok(result > 0 && descriptor.revents != 0)
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_main_activity(
-    ep0: &File,
-    ccid_interrupt: &File,
-    ccid_notification_pending: bool,
-) -> io::Result<()> {
-    let mut descriptors = [
-        PollFd {
-            fd: ep0.as_raw_fd(),
-            events: POLLIN,
-            revents: 0,
-        },
-        PollFd {
-            fd: ccid_interrupt.as_raw_fd(),
-            events: POLLOUT,
-            revents: 0,
-        },
-    ];
-    let count = if ccid_notification_pending { 2 } else { 1 };
-    wait_for_poll(&mut descriptors, count, IDLE_ENDPOINT_WAIT_MS)
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_descriptor(file: &File, events: i16, timeout_ms: i32) -> io::Result<()> {
-    let mut descriptor = [PollFd {
-        fd: file.as_raw_fd(),
-        events,
-        revents: 0,
-    }];
-    wait_for_poll(&mut descriptor, 1, timeout_ms)
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_poll(descriptors: &mut [PollFd], count: usize, timeout_ms: i32) -> io::Result<()> {
-    // SAFETY: `descriptors` contains at least `count` initialized pollfd values.
-    let result = unsafe { poll(descriptors.as_mut_ptr(), count, timeout_ms) };
-    if result >= 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::Interrupted {
-        Ok(())
-    } else {
-        Err(error)
+fn try_receive_hid_report(reports: &Receiver<io::Result<Vec<u8>>>) -> io::Result<Option<Vec<u8>>> {
+    match reports.try_recv() {
+        Ok(Ok(report)) => Ok(Some(report)),
+        Ok(Err(error)) => Err(error),
+        Err(TryRecvError::Empty) => Ok(None),
+        Err(TryRecvError::Disconnected) if STOP_REQUESTED.load(Ordering::Relaxed) => Ok(None),
+        Err(TryRecvError::Disconnected) => Err(io::Error::other("FIDO OUT reader stopped")),
     }
 }
 
@@ -888,88 +1050,24 @@ fn ctap_status_name(status: u8) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn drain_events(ep0: &mut File, ccid_notification_pending: &mut bool) -> io::Result<()> {
-    let mut events = [0_u8; 12 * 8];
+fn write_transfer(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     loop {
-        match ep0.read(&mut events) {
-            Ok(0) => return Ok(()),
-            Ok(length) => {
-                for event in events[..length].chunks_exact(12) {
-                    let event_type = event[8];
-                    diagnostics::log(
-                        Level::Debug,
-                        "functionfs",
-                        "event",
-                        format_args!("type={} name={}", event_type, event_name(event_type)),
-                    );
-                    match event_type {
-                        2 => *ccid_notification_pending = true,
-                        4 => log_setup_request(event),
-                        _ => {}
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if endpoint_is_gone(&error) => return Ok(()),
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn log_setup_request(event: &[u8]) {
-    let request_type = event[0];
-    let request = event[1];
-    let value = u16::from_le_bytes([event[2], event[3]]);
-    let index = u16::from_le_bytes([event[4], event[5]]);
-    let length = u16::from_le_bytes([event[6], event[7]]);
-    diagnostics::log(
-        Level::Info,
-        "functionfs",
-        "unhandled_setup_request",
-        format_args!(
-            "request_type={request_type:02x} request={request:02x} value={value:04x} index={index:04x} length={length}"
-        ),
-    );
-}
-
-#[cfg(target_os = "linux")]
-fn event_name(event_type: u8) -> &'static str {
-    match event_type {
-        0 => "bind",
-        1 => "unbind",
-        2 => "enable",
-        3 => "disable",
-        4 => "setup",
-        5 => "suspend",
-        6 => "resume",
-        _ => "unknown",
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn write_nonblocking(file: &mut File, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() && !STOP_REQUESTED.load(Ordering::Relaxed) {
         match file.write(bytes) {
-            Ok(0) => thread::sleep(Duration::from_millis(5)),
-            Ok(length) => bytes = &bytes[length..],
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
+            Ok(length) if length == bytes.len() => return Ok(()),
+            Ok(length) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    format!(
+                        "FunctionFS accepted {length} of {} bytes in one transfer",
+                        bytes.len()
+                    ),
+                ));
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if endpoint_is_gone(&error) => return Ok(()),
             Err(error) => return Err(error),
         }
     }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn transient_endpoint_error(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        || error.kind() == io::ErrorKind::Interrupted
-        || endpoint_is_gone(error)
 }
 
 #[cfg(target_os = "linux")]
@@ -977,142 +1075,17 @@ fn endpoint_is_gone(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(19 | 32 | 108))
 }
 
-#[cfg(test)]
-fn descriptors() -> Vec<u8> {
-    const FUNCTIONFS_DESCRIPTORS_MAGIC_V2: u32 = 3;
-    const FUNCTIONFS_HAS_FS_DESC: u32 = 1;
-    const FUNCTIONFS_HAS_HS_DESC: u32 = 2;
-
-    let fs = descriptor_set(64, 32);
-    let hs = descriptor_set(512, 9);
-    let length = 20 + fs.len() + hs.len();
-    let mut descriptors = Vec::with_capacity(length);
-    push_u32_le(&mut descriptors, FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
-    push_u32_le(&mut descriptors, length as u32);
-    push_u32_le(
-        &mut descriptors,
-        FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC,
-    );
-    push_u32_le(&mut descriptors, 5);
-    push_u32_le(&mut descriptors, 5);
-    descriptors.extend_from_slice(&fs);
-    descriptors.extend_from_slice(&hs);
-    descriptors
+#[cfg(target_os = "linux")]
+fn invalid<T>(message: impl Into<String>) -> io::Result<T> {
+    Err(data_error(message))
 }
 
-#[cfg(test)]
-fn descriptor_set(bulk_max_packet_size: u16, interrupt_interval: u8) -> Vec<u8> {
-    let mut descriptors = vec![9, 4, 0, 0, 3, 0x0b, 0, 0, 0];
-    descriptors.extend_from_slice(&ccid_functional_descriptor());
-    descriptors.extend_from_slice(&[7, 5, 0x01, 2]); // bulk OUT
-    descriptors.extend_from_slice(&bulk_max_packet_size.to_le_bytes());
-    descriptors.extend_from_slice(&[0, 7, 5, 0x81, 2]); // bulk IN
-    descriptors.extend_from_slice(&bulk_max_packet_size.to_le_bytes());
-    descriptors.extend_from_slice(&[
-        0,
-        7,
-        5,
-        0x82,
-        3,
-        8,
-        0,
-        interrupt_interval, // interrupt IN
-    ]);
-    descriptors
-}
-
-#[cfg(test)]
-fn ccid_functional_descriptor() -> Vec<u8> {
-    let mut descriptor = vec![
-        0x36, 0x21, // length and CCID descriptor type
-        0x00, 0x01, // CCID 1.00, matching the allowlisted YubiKey identity
-        0x00, // one slot
-        0x07, // 5 V, 3 V, and 1.8 V
-    ];
-    descriptor.extend_from_slice(&2_u32.to_le_bytes()); // T=1
-    descriptor.extend_from_slice(&4000_u32.to_le_bytes());
-    descriptor.extend_from_slice(&4000_u32.to_le_bytes());
-    descriptor.push(0);
-    descriptor.extend_from_slice(&307_200_u32.to_le_bytes());
-    descriptor.extend_from_slice(&307_200_u32.to_le_bytes());
-    descriptor.push(0);
-    descriptor.extend_from_slice(&3062_u32.to_le_bytes());
-    descriptor.extend_from_slice(&0_u32.to_le_bytes());
-    descriptor.extend_from_slice(&0_u32.to_le_bytes());
-    descriptor.extend_from_slice(&0x0004_00fe_u32.to_le_bytes());
-    descriptor.extend_from_slice(&(crate::ccid::MAX_CCID_MESSAGE_LENGTH as u32).to_le_bytes());
-    descriptor.extend_from_slice(&[0xff, 0xff, 0, 0, 0, 1]);
-    debug_assert_eq!(descriptor.len(), 0x36);
-    descriptor
-}
-
-#[cfg(test)]
-fn push_u32_le(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_le_bytes());
+#[cfg(target_os = "linux")]
+fn data_error(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 #[cfg(target_os = "linux")]
 fn with_context(error: io::Error, operation: &str) -> io::Error {
     io::Error::new(error.kind(), format!("{operation}: {error}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn descriptors_have_matching_v2_length_and_counts() {
-        let descriptors = descriptors();
-        assert_eq!(descriptors.len(), 188);
-        assert_eq!(
-            u32::from_le_bytes(descriptors[4..8].try_into().unwrap()) as usize,
-            descriptors.len()
-        );
-        assert_eq!(
-            u32::from_le_bytes(descriptors[8..12].try_into().unwrap()),
-            3
-        );
-        assert_eq!(
-            u32::from_le_bytes(descriptors[12..16].try_into().unwrap()),
-            5
-        );
-        assert_eq!(
-            u32::from_le_bytes(descriptors[16..20].try_into().unwrap()),
-            5
-        );
-    }
-
-    #[test]
-    fn descriptor_set_is_one_ccid_interface() {
-        let descriptors = descriptor_set(64, 32);
-        assert_eq!(&descriptors[..9], &[9, 4, 0, 0, 3, 0x0b, 0, 0, 0]);
-        assert_eq!(descriptors.len(), 84);
-        assert!(descriptors.windows(2).any(|value| value == [0x36, 0x21]));
-        assert_eq!(
-            descriptors
-                .windows(2)
-                .filter(|value| *value == [9, 4])
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn ccid_descriptor_has_specified_length() {
-        assert_eq!(ccid_functional_descriptor().len(), 0x36);
-    }
-
-    #[test]
-    fn ccid_endpoints_have_the_real_facing_shape() {
-        let descriptors = descriptor_set(64, 32);
-        assert!(descriptors
-            .windows(7)
-            .any(|value| value == [7, 5, 0x01, 2, 64, 0, 0]));
-        assert!(descriptors
-            .windows(7)
-            .any(|value| value == [7, 5, 0x81, 2, 64, 0, 0]));
-        assert!(descriptors
-            .windows(7)
-            .any(|value| value == [7, 5, 0x82, 3, 8, 0, 32]));
-    }
 }

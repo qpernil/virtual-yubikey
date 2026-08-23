@@ -16,6 +16,7 @@ resolver = "2"
 
 [dependencies]
 libc = "0.2.189"
+usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
 [[bin]]

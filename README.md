@@ -14,7 +14,7 @@ Privileged ConfigFS, FunctionFS mount, UDC, and process-lifecycle operations
 belong to the separate
 [`usb-gadget-supervisor`](https://github.com/qpernil/usb-gadget-supervisor)
 project. This repository owns only its independent protocol implementation,
-state, USB descriptor assets, and declarative device profile.
+state, worker-owned USB personality, and declarative launch profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
@@ -59,12 +59,13 @@ Implementation provenance and public sources are recorded in
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
-| `functionfs.rs` | Unprivileged CCID endpoint transport and FunctionFS runtime events |
+| `functionfs.rs` | Worker startup, supervisor control handling, and direct FunctionFS FIDO/CCID transports |
 | `ctaphid.rs` | CTAPHID channels, packet reassembly, command routing and response fragmentation |
 | `ccid.rs` | CCID framing, reader state, and smart-card activation |
 | `smartcard.rs` | Diagnostics adapter between CCID and `virtual-yubikey-core` |
 | `worker_protocol.rs` | Versioned lifecycle and `SCM_RIGHTS` resource channel shared with the supervisor |
-| `profiles/` | Root-installed USB identity, HID, and FunctionFS descriptor data |
+| `usb_identity.rs` | Complete typed USB personality published by the worker as CBOR |
+| `profiles/` | Root-installed worker launch and resource boundary |
 
 For a visual explanation of Raspberry Pi USB gadget mode, its direct endpoint
 data paths, the supervisor's privilege boundary, and the Virtual YubiKey,
@@ -210,18 +211,23 @@ cargo build --release --locked --manifest-path usb-gadget-supervisor/Cargo.toml
 ```
 
 The worker is not launched directly. The generic supervisor reads the
-root-owned schema-1 profile, mounts FunctionFS root-only, validates and
-publishes the CCID descriptors, and opens the resulting endpoints. It transfers
-`ep0`, CCID OUT, CCID IN, and CCID interrupt IN to the worker over a private
-`SOCK_SEQPACKET` socket using `SCM_RIGHTS`. After binding the UDC it opens and
-transfers the FIDO HID descriptor. The worker opens no USB path and needs no
-USB-node ownership change. USB payloads flow directly between those kernel file
-descriptors and the unprivileged worker; the supervisor never proxies CTAP,
-CCID, APDU, PIN, or key data.
+root-owned schema-1 launch profile and starts the worker with a private
+`SOCK_SEQPACKET` control channel on FD 3. The worker publishes its complete
+FIDO HID plus CCID `UsbPersonality` as typed CBOR. The supervisor validates and
+logs it, creates the ConfigFS/FunctionFS generation, and transfers the five
+actual data-endpoint files with `SCM_RIGHTS`.
+
+The main worker thread owns that control channel and handles USB setup and bus
+lifecycle records. A CCID thread blocks directly on CCID OUT and writes CCID
+IN. FIDO has a blocking OUT reader so cancellation reports remain observable
+while its application thread is processing a command or waiting for touch.
+There is no data framing, proxy, acknowledgement, or polling loop between the
+worker and FunctionFS. The supervisor never handles CTAP, CCID, APDU, PIN, or
+key data.
 
 Profiles can also declare root-opened local character devices and exact GPIO
-line groups. The supervisor appends their descriptors or line-request handles
-to the pre-bind `SCM_RIGHTS` packet in profile order. Future SSD1306/GPIO
+line groups. The supervisor sends their named handles in the initial
+`SCM_RIGHTS` resource record. Future display/GPIO
 support will use that mechanism, while every I2C
 transaction, framebuffer operation, button debounce, LED animation, and touch
 decision remains in this worker rather than the privileged supervisor. The
@@ -319,10 +325,10 @@ sudo systemctl enable --now \
   usb-gadget-supervisor@virtual-yubikey.service
 ```
 
-That is the entire device-specific installation: one profile containing its
-HID and FunctionFS descriptor blobs. The worker and touch helper run directly from
-`target/release`. A normal update is `git pull`, rebuild, and restart; reinstall
-the profile only when it changes.
+That is the entire device-specific installation: one small profile containing
+the worker launch and resource boundary. The worker owns its USB personality;
+the worker and touch helper run directly from `target/release`. A normal update
+is `git pull`, rebuild, and restart; reinstall the profile only when it changes.
 
 The supervisor rejects a profile that is not a regular root-owned file. It
 accepts a worker owned by root or its configured unprivileged user, but rejects

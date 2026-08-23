@@ -1,4 +1,32 @@
-//! USB identity derived from the set of physically exposed interfaces.
+//! Worker-owned USB identity and descriptor bundle.
+
+use usb_gadget_worker::{StringDescriptor, UsbPersonality, UsbSpeed};
+
+pub(crate) const FIDO_INTERFACE: u8 = 0;
+pub(crate) const CCID_INTERFACE: u8 = 1;
+pub(crate) const FIDO_OUT: u8 = 0x03;
+pub(crate) const FIDO_IN: u8 = 0x83;
+pub(crate) const CCID_OUT: u8 = 0x01;
+pub(crate) const CCID_IN: u8 = 0x81;
+pub(crate) const CCID_INTERRUPT_IN: u8 = 0x82;
+
+pub(crate) const FIDO_REPORT_DESCRIPTOR: [u8; 34] = [
+    0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08,
+    0x95, 0x40, 0x81, 0x02, 0x09, 0x21, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x40, 0x91,
+    0x02, 0xc0,
+];
+
+pub(crate) const FIDO_HID_DESCRIPTOR: [u8; 9] = [
+    9,
+    0x21,
+    0x11,
+    0x01, // HID 1.11
+    0,
+    1,
+    0x22,
+    FIDO_REPORT_DESCRIPTOR.len() as u8,
+    0,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UsbInterfaces {
@@ -63,6 +91,105 @@ impl UsbIdentity {
 
 pub(crate) const USB_IDENTITY: UsbIdentity = UsbIdentity::yubikey_5_8(UsbInterfaces::fido_ccid());
 
+pub(crate) fn personality() -> UsbPersonality {
+    let identity = USB_IDENTITY;
+    let vendor = UsbIdentity::VENDOR_ID.to_le_bytes();
+    let product = identity.product_id().to_le_bytes();
+    let release = identity.bcd_device().to_le_bytes();
+    let device = vec![
+        18, 1, 0x00, 0x02, 0, 0, 0, 64, vendor[0], vendor[1], product[0], product[1], release[0],
+        release[1], 1, 2, 0, 1,
+    ];
+    UsbPersonality::new(UsbSpeed::FullSpeed, device, configuration_descriptor())
+        .with_string(StringDescriptor::new(0, 0, [4, 3, 0x09, 0x04]))
+        .with_string(StringDescriptor::new(
+            1,
+            0x0409,
+            string_descriptor("Virtual USB Gadget"),
+        ))
+        .with_string(StringDescriptor::new(
+            2,
+            0x0409,
+            string_descriptor(identity.product()),
+        ))
+}
+
+fn configuration_descriptor() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&[9, 4, FIDO_INTERFACE, 0, 2, 0x03, 0, 0, 0]);
+    body.extend_from_slice(&FIDO_HID_DESCRIPTOR);
+    endpoint(&mut body, FIDO_IN, 0x03, 64, 5);
+    endpoint(&mut body, FIDO_OUT, 0x03, 64, 5);
+
+    body.extend_from_slice(&[9, 4, CCID_INTERFACE, 0, 3, 0x0b, 0, 0, 0]);
+    body.extend_from_slice(&ccid_functional_descriptor());
+    endpoint(&mut body, CCID_OUT, 0x02, 64, 0);
+    endpoint(&mut body, CCID_IN, 0x02, 64, 0);
+    endpoint(&mut body, CCID_INTERRUPT_IN, 0x03, 8, 32);
+
+    let total_length = u16::try_from(9 + body.len()).expect("USB configuration is too large");
+    let mut configuration = vec![
+        9,
+        2,
+        total_length as u8,
+        (total_length >> 8) as u8,
+        2,
+        1,
+        0,
+        0x80,
+        15,
+    ];
+    configuration.extend_from_slice(&body);
+    configuration
+}
+
+fn endpoint(output: &mut Vec<u8>, address: u8, attributes: u8, size: u16, interval: u8) {
+    output.extend_from_slice(&[
+        7,
+        5,
+        address,
+        attributes,
+        size as u8,
+        (size >> 8) as u8,
+        interval,
+    ]);
+}
+
+fn ccid_functional_descriptor() -> Vec<u8> {
+    let mut descriptor = vec![
+        0x36, 0x21, 0x00, 0x01, // length, type, CCID 1.00
+        0x00, // one slot
+        0x07, // 5 V, 3 V, and 1.8 V
+    ];
+    descriptor.extend_from_slice(&2_u32.to_le_bytes()); // T=1
+    descriptor.extend_from_slice(&4000_u32.to_le_bytes());
+    descriptor.extend_from_slice(&4000_u32.to_le_bytes());
+    descriptor.push(0);
+    descriptor.extend_from_slice(&307_200_u32.to_le_bytes());
+    descriptor.extend_from_slice(&307_200_u32.to_le_bytes());
+    descriptor.push(0);
+    descriptor.extend_from_slice(&3062_u32.to_le_bytes());
+    descriptor.extend_from_slice(&0_u32.to_le_bytes());
+    descriptor.extend_from_slice(&0_u32.to_le_bytes());
+    descriptor.extend_from_slice(&0x0004_00fe_u32.to_le_bytes());
+    descriptor.extend_from_slice(&(crate::ccid::MAX_CCID_MESSAGE_LENGTH as u32).to_le_bytes());
+    descriptor.extend_from_slice(&[0xff, 0xff, 0, 0, 0, 1]);
+    debug_assert_eq!(descriptor.len(), 0x36);
+    descriptor
+}
+
+fn string_descriptor(value: &str) -> Vec<u8> {
+    let words = value.encode_utf16().collect::<Vec<_>>();
+    let length = 2 + words.len() * 2;
+    let mut descriptor = Vec::with_capacity(length);
+    descriptor.push(u8::try_from(length).expect("USB string is too long"));
+    descriptor.push(3);
+    for word in words {
+        descriptor.extend_from_slice(&word.to_le_bytes());
+    }
+    descriptor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +202,6 @@ mod tests {
         assert_eq!(USB_IDENTITY.product_id(), 0x0406);
         assert_eq!(USB_IDENTITY.product(), "Virtual Yubico YubiKey FIDO+CCID");
         assert_eq!(USB_IDENTITY.bcd_device(), 0x0580);
-
         let composite = UsbIdentity::yubikey_5_8(UsbInterfaces {
             otp: true,
             fido: true,
@@ -86,65 +212,40 @@ mod tests {
     }
 
     #[test]
-    fn installed_profile_preserves_the_worker_usb_contract() {
+    fn worker_publishes_the_complete_composite_personality() {
+        let personality = personality();
+        assert_eq!(personality.device_descriptor.len(), 18);
+        assert_eq!(personality.configuration_descriptor.len(), 125);
+        assert_eq!(personality.configuration_descriptor[4], 2);
+        assert_eq!(personality.configuration_descriptor[8], 15);
+        for address in [FIDO_IN, FIDO_OUT, CCID_OUT, CCID_IN, CCID_INTERRUPT_IN] {
+            assert!(personality
+                .configuration_descriptor
+                .windows(3)
+                .any(|bytes| bytes == [7, 5, address]));
+        }
+        assert!(personality.microsoft_os_1.is_none());
+        assert!(personality.webusb.is_none());
+    }
+
+    #[test]
+    fn installed_profile_contains_only_the_launch_boundary() {
         let profile: toml::Value = toml::from_str(PROFILE).unwrap();
-        let usb = profile.get("usb").unwrap();
-        let worker = profile.get("worker").unwrap();
+        assert_eq!(profile.get("schema").unwrap().as_integer(), Some(1));
         assert_eq!(
-            worker.get("command").unwrap().as_str(),
+            profile.get("functionfs_mount").unwrap().as_str(),
+            Some("/dev/ffs-virtual-yubikey")
+        );
+        assert!(profile.get("usb").is_none());
+        assert!(profile.get("functions").is_none());
+        assert_eq!(
+            profile
+                .get("worker")
+                .unwrap()
+                .get("command")
+                .unwrap()
+                .as_str(),
             Some("/absolute/path/to/virtual-yubikey-worker")
-        );
-        assert_eq!(usb.get("vendor_id").unwrap().as_integer(), Some(0x1050));
-        assert_eq!(
-            usb.get("manufacturer").unwrap().as_str(),
-            Some("Virtual USB Gadget")
-        );
-        assert_eq!(usb.get("bcd_usb").unwrap().as_integer(), Some(0x0200));
-        assert_eq!(
-            usb.get("product_id").unwrap().as_integer(),
-            Some(USB_IDENTITY.product_id() as i64)
-        );
-        assert_eq!(
-            usb.get("bcd_device").unwrap().as_integer(),
-            Some(USB_IDENTITY.bcd_device() as i64)
-        );
-        assert_eq!(
-            usb.get("product").unwrap().as_str(),
-            Some(USB_IDENTITY.product())
-        );
-        assert_eq!(usb.get("max_speed").unwrap().as_str(), Some("full-speed"));
-        assert_eq!(usb.get("device_class").unwrap().as_integer(), Some(0));
-        assert_eq!(usb.get("device_subclass").unwrap().as_integer(), Some(0));
-        assert_eq!(usb.get("device_protocol").unwrap().as_integer(), Some(0));
-        assert_eq!(usb.get("max_power_ma").unwrap().as_integer(), Some(30));
-        assert!(usb.get("serial").is_none());
-
-        let functions = profile.get("functions").unwrap().as_array().unwrap();
-        assert_eq!(functions.len(), 2);
-        assert_eq!(functions[0].get("type").unwrap().as_str(), Some("hid"));
-        assert_eq!(functions[0].get("name").unwrap().as_str(), Some("fido"));
-        assert!(functions[0].get("report_descriptor").is_none());
-        assert_eq!(
-            functions[1].get("type").unwrap().as_str(),
-            Some("functionfs")
-        );
-        assert_eq!(functions[1].get("name").unwrap().as_str(), Some("ccid"));
-
-        let descriptor = functions[0]
-            .get("report_descriptor_hex")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .split_whitespace()
-            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            descriptor,
-            vec![
-                0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0x00, 0x26, 0xff, 0x00,
-                0x75, 0x08, 0x95, 0x40, 0x81, 0x02, 0x09, 0x21, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75,
-                0x08, 0x95, 0x40, 0x91, 0x02, 0xc0,
-            ]
         );
     }
 }

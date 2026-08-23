@@ -216,7 +216,9 @@ impl AppletConfiguration {
     pub const fn yubikey_5_8_preview_sign() -> Self {
         Self {
             management: true,
-            openpgp: true,
+            // The OpenPGP implementation is currently only a transport test
+            // fixture. Do not advertise or select it on the real USB profile.
+            openpgp: false,
             piv: true,
             fido2: true,
         }
@@ -747,6 +749,12 @@ fn push_tlv(output: &mut Vec<u8>, tag: u8, value: &[u8]) {
 mod tests {
     use super::*;
 
+    fn openpgp_test_profile(serial: u32) -> DeviceProfile {
+        let mut profile = DeviceProfile::yubikey_5_8_ccid(serial);
+        profile.applets.openpgp = true;
+        profile
+    }
+
     fn select(aid: &[u8]) -> Vec<u8> {
         [
             vec![0, INS_SELECT, 0x04, 0, aid.len() as u8],
@@ -765,8 +773,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 2, 28]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 2, 28]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 2, 20]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 2, 20]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }
@@ -786,7 +794,7 @@ mod tests {
             device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x06]),
             Some(Applet::Fido2)
         );
-        assert_eq!(device.applet_for_aid(&OPENPGP_AID), Some(Applet::OpenPgp));
+        assert_eq!(device.applet_for_aid(&OPENPGP_AID), None);
         assert_eq!(device.applet_for_aid(&[0xa0, 0x00, 0x00]), None);
         assert_eq!(device.applet_for_aid(&[]), None);
         assert_eq!(
@@ -813,7 +821,7 @@ mod tests {
 
     #[test]
     fn openpgp_get_challenge_honors_extended_le_up_to_its_buffer() {
-        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        let mut device = VirtualYubiKey::new(openpgp_test_profile(1));
         assert_eq!(device.transmit(&select(&OPENPGP_AID)), [0x90, 0x00]);
         assert_eq!(device.selected_applet(), Some(Applet::OpenPgp));
 

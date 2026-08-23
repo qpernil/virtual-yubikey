@@ -20,6 +20,13 @@ impl Card {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_profile(profile: DeviceProfile) -> Self {
+        Self {
+            device: VirtualYubiKey::new(profile),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn from_piv_persistent_state(
         serial: u32,
@@ -268,6 +275,12 @@ mod tests {
             [0x6a, 0x82]
         );
         assert_eq!(card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04, 0]), [0x69, 0x99]);
+    }
+
+    #[test]
+    fn production_profile_does_not_expose_the_openpgp_fixture() {
+        let mut card = Card::new(1);
+        assert_eq!(card.transmit(&select(&OPENPGP_AID)), [0x6a, 0x82]);
     }
 
     #[test]

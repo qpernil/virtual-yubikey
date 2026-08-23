@@ -1,4 +1,4 @@
-//! Fixed-size lifecycle protocol and descriptor transfer from the supervisor.
+//! Versioned worker-control records and `SCM_RIGHTS` endpoint transfer.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -9,13 +9,15 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 #[cfg(test)]
 use std::os::unix::net::UnixStream;
 
-pub(crate) const STATE_DIRECTORY_ENV: &str = "USB_GADGET_STATE_DIRECTORY";
-pub(crate) const RUNTIME_DIRECTORY_ENV: &str = "USB_GADGET_RUNTIME_DIRECTORY";
+pub(crate) const STATE_DIRECTORY_ENV: &str = "STATE_DIRECTORY";
+pub(crate) const RUNTIME_DIRECTORY_ENV: &str = "RUNTIME_DIRECTORY";
 const CONTROL_FD: i32 = 3;
-
 const MAGIC: [u8; 4] = *b"UGSP";
 const VERSION: u8 = 1;
-const PACKET_LENGTH: usize = 8;
+const HEADER_LENGTH: usize = 20;
+const MAX_BODY_LENGTH: usize = 1024 * 1024;
+const MAX_DESCRIPTORS: usize = 32;
+
 #[cfg(target_os = "linux")]
 const RECEIVE_DESCRIPTOR_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
 #[cfg(not(target_os = "linux"))]
@@ -23,11 +25,37 @@ const RECEIVE_DESCRIPTOR_FLAGS: libc::c_int = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-pub(crate) enum Message {
-    PrebindResources = 0x01,
-    PostbindResources = 0x02,
-    Prepared = 0x81,
+pub(crate) enum Kind {
+    InitialResources = 0x01,
+    UsbEndpoints = 0x02,
+    UsbBusEvent = 0x03,
+    UsbControlRequest = 0x04,
+    Quiesce = 0x11,
+    ConfigurationRejected = 0x12,
+    Configure = 0x80,
+    UsbControlResponse = 0x81,
     Serving = 0x82,
+    Quiesced = 0x84,
+}
+
+pub(crate) struct Record {
+    pub(crate) kind: Kind,
+    pub(crate) generation: u32,
+    pub(crate) request_id: u32,
+    pub(crate) body: Vec<u8>,
+    pub(crate) files: Vec<File>,
+}
+
+impl Record {
+    pub(crate) fn new(kind: Kind, generation: u32, request_id: u32, body: Vec<u8>) -> Self {
+        Self {
+            kind,
+            generation,
+            request_id,
+            body,
+            files: Vec::new(),
+        }
+    }
 }
 
 pub(crate) struct Channel<'descriptor> {
@@ -37,16 +65,32 @@ pub(crate) struct Channel<'descriptor> {
 impl Channel<'static> {
     pub(crate) fn from_fixed_descriptor() -> Self {
         Self {
-            // SAFETY: the supervisor installs FD 3 before exec, and the worker
-            // deliberately retains that inherited descriptor until process exit.
+            // SAFETY: the supervisor installs FD 3 before exec and retains the
+            // peer for the lifetime of this worker incarnation.
             descriptor: unsafe { BorrowedFd::borrow_raw(CONTROL_FD) },
         }
     }
 }
 
 impl Channel<'_> {
-    pub(crate) fn send(&mut self, message: Message) -> io::Result<()> {
-        let packet = message.encode(0);
+    pub(crate) fn send(&self, record: &Record) -> io::Result<()> {
+        if !record.files.is_empty() {
+            return invalid("workers cannot attach descriptors to this record");
+        }
+        let body_length = u32::try_from(record.body.len())
+            .map_err(|_| data_error("worker-control body is too large"))?;
+        if record.body.len() > MAX_BODY_LENGTH {
+            return invalid("worker-control body is too large");
+        }
+        let mut packet = Vec::with_capacity(HEADER_LENGTH + record.body.len());
+        packet.extend_from_slice(&MAGIC);
+        packet.push(VERSION);
+        packet.push(record.kind as u8);
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&record.generation.to_be_bytes());
+        packet.extend_from_slice(&record.request_id.to_be_bytes());
+        packet.extend_from_slice(&body_length.to_be_bytes());
+        packet.extend_from_slice(&record.body);
         let length = unsafe {
             libc::send(
                 self.descriptor.as_raw_fd(),
@@ -61,39 +105,31 @@ impl Channel<'_> {
         if length as usize != packet.len() {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
-                "worker-control packet was not sent atomically",
+                "worker-control record was not sent atomically",
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn receive_files(
-        &mut self,
-        expected_message: Message,
-        expected_count: usize,
-    ) -> io::Result<Vec<File>> {
-        let control_length = if expected_count == 0 {
-            0
-        } else {
+    pub(crate) fn receive(&self) -> io::Result<Record> {
+        let mut packet = vec![0_u8; HEADER_LENGTH + MAX_BODY_LENGTH + 1];
+        let mut control = vec![
+            0_u8;
             unsafe {
                 libc::CMSG_SPACE(
-                    (expected_count * std::mem::size_of::<libc::c_int>()) as libc::c_uint,
+                    (MAX_DESCRIPTORS * std::mem::size_of::<libc::c_int>()) as libc::c_uint,
                 ) as usize
             }
-        };
-        let mut control = vec![0_u8; control_length];
-        let mut record = [0_u8; PACKET_LENGTH + 1];
+        ];
         let mut iovec = libc::iovec {
-            iov_base: record.as_mut_ptr().cast::<c_void>(),
-            iov_len: record.len(),
+            iov_base: packet.as_mut_ptr().cast::<c_void>(),
+            iov_len: packet.len(),
         };
         let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
         header.msg_iov = &mut iovec;
         header.msg_iovlen = 1;
-        if !control.is_empty() {
-            header.msg_control = control.as_mut_ptr().cast::<c_void>();
-            header.msg_controllen = control.len() as _;
-        }
+        header.msg_control = control.as_mut_ptr().cast::<c_void>();
+        header.msg_controllen = control.len() as _;
         let length = unsafe {
             libc::recvmsg(
                 self.descriptor.as_raw_fd(),
@@ -110,16 +146,24 @@ impl Channel<'_> {
                 "worker-control channel closed",
             ));
         }
-        if length as usize != PACKET_LENGTH
-            || header.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
+        if header.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
+            || (length as usize) < HEADER_LENGTH
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated or incorrectly sized worker-control record",
-            ));
+            return invalid("truncated worker-control record");
         }
-        let (message, declared_count) =
-            Message::decode(record[..PACKET_LENGTH].try_into().unwrap())?;
+        packet.truncate(length as usize);
+        if packet[..4] != MAGIC || packet[4] != VERSION {
+            return invalid("invalid worker-control header");
+        }
+        let kind = Kind::from_byte(packet[5])?;
+        let declared_files = u16::from_be_bytes(packet[6..8].try_into().unwrap()) as usize;
+        let generation = u32::from_be_bytes(packet[8..12].try_into().unwrap());
+        let request_id = u32::from_be_bytes(packet[12..16].try_into().unwrap());
+        let body_length = u32::from_be_bytes(packet[16..20].try_into().unwrap()) as usize;
+        if body_length > MAX_BODY_LENGTH || packet.len() != HEADER_LENGTH + body_length {
+            return invalid("worker-control body length does not match its record");
+        }
+
         let mut descriptors = Vec::<OwnedFd>::new();
         unsafe {
             let mut ancillary = libc::CMSG_FIRSTHDR(&header);
@@ -127,20 +171,14 @@ impl Channel<'_> {
                 if (*ancillary).cmsg_level != libc::SOL_SOCKET
                     || (*ancillary).cmsg_type != libc::SCM_RIGHTS
                 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "unexpected ancillary worker-control data",
-                    ));
+                    return invalid("unexpected ancillary worker-control data");
                 }
                 let base = libc::CMSG_LEN(0) as usize;
                 let ancillary_length = (*ancillary).cmsg_len as usize;
                 if ancillary_length < base
                     || (ancillary_length - base) % std::mem::size_of::<libc::c_int>() != 0
                 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "malformed SCM_RIGHTS payload",
-                    ));
+                    return invalid("malformed SCM_RIGHTS payload");
                 }
                 let count = (ancillary_length - base) / std::mem::size_of::<libc::c_int>();
                 let source = libc::CMSG_DATA(ancillary).cast::<libc::c_int>();
@@ -150,89 +188,87 @@ impl Channel<'_> {
                 ancillary = libc::CMSG_NXTHDR(&header, ancillary);
             }
         }
-        if message != expected_message
-            || declared_count as usize != expected_count
-            || descriptors.len() != expected_count
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "expected {expected_message:?} with {expected_count} descriptors; received {message:?} declaring {declared_count} with {} descriptors",
-                    descriptors.len()
-                ),
-            ));
+        if descriptors.len() != declared_files || descriptors.len() > MAX_DESCRIPTORS {
+            return invalid("worker-control descriptor count does not match its record");
         }
         #[cfg(not(target_os = "linux"))]
-        {
-            for descriptor in &descriptors {
-                if unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) }
-                    != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
+        for descriptor in &descriptors {
+            if unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0
+            {
+                return Err(io::Error::last_os_error());
             }
         }
-        Ok(descriptors.into_iter().map(File::from).collect())
-    }
-
-    pub(crate) fn receive(&mut self) -> io::Result<(Message, u16)> {
-        let mut record = [0_u8; PACKET_LENGTH + 1];
-        let length = unsafe {
-            libc::recv(
-                self.descriptor.as_raw_fd(),
-                record.as_mut_ptr().cast::<c_void>(),
-                record.len(),
-                0,
-            )
-        };
-        if length < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if length == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "worker-control channel closed",
-            ));
-        }
-        if length as usize != PACKET_LENGTH {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("worker-control record has invalid length {length}"),
-            ));
-        }
-        Message::decode(record[..PACKET_LENGTH].try_into().unwrap())
+        Ok(Record {
+            kind,
+            generation,
+            request_id,
+            body: packet.split_off(HEADER_LENGTH),
+            files: descriptors.into_iter().map(File::from).collect(),
+        })
     }
 }
 
-impl Message {
-    fn encode(self, descriptor_count: u16) -> [u8; PACKET_LENGTH] {
-        let count = descriptor_count.to_be_bytes();
-        [
-            MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION, self as u8, count[0], count[1],
-        ]
-    }
-
-    fn decode(packet: [u8; PACKET_LENGTH]) -> io::Result<(Self, u16)> {
-        if packet[..4] != MAGIC || packet[4] != VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid worker-control packet header",
-            ));
+impl Kind {
+    fn from_byte(value: u8) -> io::Result<Self> {
+        match value {
+            0x01 => Ok(Self::InitialResources),
+            0x02 => Ok(Self::UsbEndpoints),
+            0x03 => Ok(Self::UsbBusEvent),
+            0x04 => Ok(Self::UsbControlRequest),
+            0x11 => Ok(Self::Quiesce),
+            0x12 => Ok(Self::ConfigurationRejected),
+            0x80 => Ok(Self::Configure),
+            0x81 => Ok(Self::UsbControlResponse),
+            0x82 => Ok(Self::Serving),
+            0x84 => Ok(Self::Quiesced),
+            _ => invalid(format!("unknown worker-control kind 0x{value:02x}")),
         }
-        let message = match packet[5] {
-            0x01 => Self::PrebindResources,
-            0x02 => Self::PostbindResources,
-            0x81 => Self::Prepared,
-            0x82 => Self::Serving,
-            kind => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unknown worker-control message 0x{kind:02x}"),
-                ));
-            }
-        };
-        Ok((message, u16::from_be_bytes([packet[6], packet[7]])))
     }
+}
+
+pub(crate) fn validate_initial_resources(record: Record) -> io::Result<Vec<(String, File)>> {
+    if record.kind != Kind::InitialResources || record.generation != 0 || record.request_id != 0 {
+        return invalid("expected initial worker resources");
+    }
+    if record.body.len() < 2 {
+        return invalid("invalid initial resource-name table");
+    }
+    let count = u16::from_be_bytes(record.body[..2].try_into().unwrap()) as usize;
+    if count != record.files.len() {
+        return invalid("initial resource names and descriptors differ");
+    }
+    let mut offset = 2;
+    let mut names = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = record
+            .body
+            .get(offset..offset + 2)
+            .ok_or_else(|| data_error("truncated initial resource name"))?;
+        offset += 2;
+        let length = u16::from_be_bytes(length.try_into().unwrap()) as usize;
+        let bytes = record
+            .body
+            .get(offset..offset + length)
+            .ok_or_else(|| data_error("truncated initial resource name"))?;
+        offset += length;
+        names.push(
+            std::str::from_utf8(bytes)
+                .map_err(|_| data_error("initial resource name is not UTF-8"))?
+                .to_owned(),
+        );
+    }
+    if offset != record.body.len() {
+        return invalid("initial resource-name table has trailing data");
+    }
+    Ok(names.into_iter().zip(record.files).collect())
+}
+
+fn invalid<T>(message: impl Into<String>) -> io::Result<T> {
+    Err(data_error(message))
+}
+
+fn data_error(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 #[cfg(test)]
@@ -241,15 +277,13 @@ mod tests {
 
     fn seqpacket_pair() -> (UnixStream, UnixStream) {
         let mut descriptors = [-1; 2];
-        // Darwin supports SCM_RIGHTS but not AF_UNIX/SOCK_SEQPACKET. A local
-        // datagram pair exercises the same ancillary-data semantics there.
         let socket_type = if cfg!(target_os = "linux") {
             libc::SOCK_SEQPACKET
         } else {
             libc::SOCK_DGRAM
         };
         assert_eq!(
-            unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, descriptors.as_mut_ptr(),) },
+            unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, descriptors.as_mut_ptr()) },
             0
         );
         unsafe {
@@ -260,17 +294,21 @@ mod tests {
         }
     }
 
-    fn send_file(socket: &UnixStream, message: Message, file: &File) {
-        let packet = message.encode(1);
+    fn send_file(socket: &UnixStream, record: &Record, file: &File) {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&MAGIC);
+        packet.extend_from_slice(&[VERSION, record.kind as u8]);
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&record.generation.to_be_bytes());
+        packet.extend_from_slice(&record.request_id.to_be_bytes());
+        packet.extend_from_slice(&(record.body.len() as u32).to_be_bytes());
+        packet.extend_from_slice(&record.body);
         let mut iovec = libc::iovec {
-            iov_base: packet.as_ptr().cast::<c_void>().cast_mut(),
+            iov_base: packet.as_mut_ptr().cast::<c_void>(),
             iov_len: packet.len(),
         };
         let mut control =
-            vec![
-                0_u8;
-                unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize }
-            ];
+            vec![0_u8; unsafe { libc::CMSG_SPACE(std::mem::size_of::<i32>() as _) as usize }];
         let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
         header.msg_iov = &mut iovec;
         header.msg_iovlen = 1;
@@ -280,44 +318,50 @@ mod tests {
             let ancillary = libc::CMSG_FIRSTHDR(&header);
             (*ancillary).cmsg_level = libc::SOL_SOCKET;
             (*ancillary).cmsg_type = libc::SCM_RIGHTS;
-            (*ancillary).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _;
-            *libc::CMSG_DATA(ancillary).cast::<libc::c_int>() = file.as_raw_fd();
+            (*ancillary).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as _) as _;
+            *libc::CMSG_DATA(ancillary).cast::<i32>() = file.as_raw_fd();
         }
         assert_eq!(
             unsafe { libc::sendmsg(socket.as_raw_fd(), &header, 0) },
-            PACKET_LENGTH as isize
+            packet.len() as isize
         );
     }
 
     #[test]
-    fn matches_the_supervisor_wire_fixture() {
+    fn sends_the_current_twenty_byte_header() {
+        let (sender, receiver) = seqpacket_pair();
+        let channel = Channel {
+            descriptor: sender.as_fd(),
+        };
+        channel
+            .send(&Record::new(Kind::Serving, 7, 9, vec![1, 2]))
+            .unwrap();
+        let mut packet = [0_u8; 22];
         assert_eq!(
-            Message::Prepared.encode(0),
-            [b'U', b'G', b'S', b'P', 1, 0x81, 0, 0]
+            unsafe { libc::recv(receiver.as_raw_fd(), packet.as_mut_ptr().cast(), 22, 0) },
+            22
         );
-        assert_eq!(
-            Message::decode([b'U', b'G', b'S', b'P', 1, 0x02, 0, 1]).unwrap(),
-            (Message::PostbindResources, 1)
-        );
+        assert_eq!(&packet[..8], b"UGSP\x01\x82\0\0");
+        assert_eq!(&packet[8..12], &7_u32.to_be_bytes());
+        assert_eq!(&packet[12..16], &9_u32.to_be_bytes());
+        assert_eq!(&packet[16..20], &2_u32.to_be_bytes());
+        assert_eq!(&packet[20..], &[1, 2]);
     }
 
     #[test]
-    fn receives_a_real_scm_rights_descriptor_and_marks_it_close_on_exec() {
+    fn receives_current_records_and_real_descriptors() {
         let (sender, receiver) = seqpacket_pair();
         let source = File::open("/dev/null").unwrap();
-        send_file(&sender, Message::PostbindResources, &source);
-
-        let mut channel = Channel {
+        let record = Record::new(Kind::UsbEndpoints, 4, 11, vec![0, 1, 3, 0, 64]);
+        send_file(&sender, &record, &source);
+        let channel = Channel {
             descriptor: receiver.as_fd(),
         };
-        let received = channel
-            .receive_files(Message::PostbindResources, 1)
-            .unwrap();
-        assert_eq!(received.len(), 1);
-        assert_ne!(received[0].as_raw_fd(), source.as_raw_fd());
-        assert_ne!(
-            unsafe { libc::fcntl(received[0].as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
-            0
-        );
+        let received = channel.receive().unwrap();
+        assert_eq!(received.kind, Kind::UsbEndpoints);
+        assert_eq!(received.generation, 4);
+        assert_eq!(received.request_id, 11);
+        assert_eq!(received.files.len(), 1);
+        assert_ne!(received.files[0].as_raw_fd(), source.as_raw_fd());
     }
 }

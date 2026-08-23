@@ -11,7 +11,7 @@ mod functionfs;
 mod keepalive;
 #[cfg(any(target_os = "linux", test))]
 mod smartcard;
-#[cfg(test)]
+#[cfg(any(target_os = "linux", test))]
 mod usb_identity;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[cfg(any(target_os = "linux", test))]
