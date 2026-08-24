@@ -1,8 +1,12 @@
-//! Physical ST7789 status display for the virtual YubiKey worker.
+//! Physical status display for the virtual YubiKey worker.
 
-const FRAME_SIZE: usize = 240 * 240 * 2;
-const IDLE_FRAME: &[u8; FRAME_SIZE] = include_bytes!("../assets/yubikey-idle.rgb565");
-const ACTIVE_FRAME: &[u8; FRAME_SIZE] = include_bytes!("../assets/yubikey-active.rgb565");
+const COLOR_FRAME_SIZE: usize = 240 * 240 * 2;
+const OLED_FRAME_SIZE: usize = 128 * 64 / 8;
+const IDLE_FRAME: &[u8; COLOR_FRAME_SIZE] = include_bytes!("../assets/yubikey-idle.rgb565");
+const ACTIVE_FRAME: &[u8; COLOR_FRAME_SIZE] = include_bytes!("../assets/yubikey-active.rgb565");
+const OLED_IDLE_FRAME: &[u8; OLED_FRAME_SIZE] = include_bytes!("../assets/yubikey-oled-idle.mono1");
+const OLED_ACTIVE_FRAME: &[u8; OLED_FRAME_SIZE] =
+    include_bytes!("../assets/yubikey-oled-active.mono1");
 
 #[cfg(target_os = "linux")]
 use crate::diagnostics::{self, Level};
@@ -78,13 +82,17 @@ pub(crate) struct Controller {
 
 #[cfg(target_os = "linux")]
 impl Controller {
-    pub(crate) fn start(bus: File, control: File) -> io::Result<Self> {
+    pub(crate) fn start(
+        bus: File,
+        control: File,
+        kind: crate::cli::DisplayKind,
+    ) -> io::Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let activity_pending = Arc::new(AtomicBool::new(false));
         let display_activity_pending = activity_pending.clone();
         let thread = thread::Builder::new()
             .name("yubikey-display".to_owned())
-            .spawn(move || display_loop(bus, control, receiver, display_activity_pending))?;
+            .spawn(move || display_loop(bus, control, kind, receiver, display_activity_pending))?;
         Ok(Self {
             sender,
             activity_pending,
@@ -150,10 +158,11 @@ fn display_stopped() -> io::Error {
 fn display_loop(
     bus: File,
     control: File,
+    kind: crate::cli::DisplayKind,
     receiver: Receiver<Command>,
     activity_pending: Arc<AtomicBool>,
 ) {
-    let mut hardware = Hardware::new(bus, control);
+    let mut hardware = Hardware::new(bus, control, kind);
     let mut bound = false;
     let mut suspended = false;
     let mut lit = false;
@@ -261,16 +270,18 @@ fn display_loop(
 struct Hardware {
     bus: File,
     control: File,
+    kind: crate::cli::DisplayKind,
     display: Option<Display>,
     error_reported: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl Hardware {
-    fn new(bus: File, control: File) -> Self {
+    fn new(bus: File, control: File, kind: crate::cli::DisplayKind) -> Self {
         Self {
             bus,
             control,
+            kind,
             display: None,
             error_reported: false,
         }
@@ -279,8 +290,12 @@ impl Hardware {
     fn render(&mut self, active: bool) {
         let recovered = self.error_reported;
         if self.display.is_none() {
+            let backend = match self.kind {
+                crate::cli::DisplayKind::St7789Spi => Backend::St7789Spi,
+                crate::cli::DisplayKind::Sh1106Spi => Backend::Sh1106Spi,
+            };
             match Display::from_raw_fds(
-                Backend::St7789Spi,
+                backend,
                 self.bus.as_raw_fd(),
                 Some(self.control.as_raw_fd()),
             ) {
@@ -290,7 +305,7 @@ impl Hardware {
                         Level::Info,
                         "display",
                         if recovered { "recovered" } else { "ready" },
-                        format_args!("backend=st7789-spi"),
+                        format_args!("backend={}", self.kind.name()),
                     );
                     self.error_reported = false;
                 }
@@ -300,7 +315,12 @@ impl Hardware {
                 }
             }
         }
-        let frame = if active { ACTIVE_FRAME } else { IDLE_FRAME };
+        let frame: &[u8] = match (self.kind, active) {
+            (crate::cli::DisplayKind::St7789Spi, false) => IDLE_FRAME,
+            (crate::cli::DisplayKind::St7789Spi, true) => ACTIVE_FRAME,
+            (crate::cli::DisplayKind::Sh1106Spi, false) => OLED_IDLE_FRAME,
+            (crate::cli::DisplayKind::Sh1106Spi, true) => OLED_ACTIVE_FRAME,
+        };
         if let Err(error) = self.display.as_mut().unwrap().write_native_frame(frame) {
             self.report_error("frame_write", &error);
         }
@@ -315,7 +335,7 @@ impl Hardware {
                 Level::Info,
                 "display",
                 "off",
-                format_args!("backend=st7789-spi reason={reason:?}"),
+                format_args!("backend={} reason={reason:?}", self.kind.name()),
             ),
             Err(error) => self.report_error("shutdown", &error),
         }
@@ -327,7 +347,10 @@ impl Hardware {
                 Level::Info,
                 "display",
                 "failed",
-                format_args!("backend=st7789-spi operation={operation} error={error:?}"),
+                format_args!(
+                    "backend={} operation={operation} error={error:?}",
+                    self.kind.name()
+                ),
             );
         }
         self.error_reported = true;
@@ -341,8 +364,8 @@ mod tests {
 
     #[test]
     fn display_frames_are_native_st7789_images() {
-        assert_eq!(IDLE_FRAME.len(), FRAME_SIZE);
-        assert_eq!(ACTIVE_FRAME.len(), FRAME_SIZE);
+        assert_eq!(IDLE_FRAME.len(), COLOR_FRAME_SIZE);
+        assert_eq!(ACTIVE_FRAME.len(), COLOR_FRAME_SIZE);
         assert_ne!(IDLE_FRAME, ACTIVE_FRAME);
         let mut changed = 0;
         for (index, (idle, active)) in IDLE_FRAME
@@ -360,5 +383,12 @@ mod tests {
             assert!((84..=121).contains(&y));
         }
         assert!((100..1_000).contains(&changed));
+    }
+
+    #[test]
+    fn oled_frames_are_native_monochrome_images() {
+        assert_eq!(OLED_IDLE_FRAME.len(), OLED_FRAME_SIZE);
+        assert_eq!(OLED_ACTIVE_FRAME.len(), OLED_FRAME_SIZE);
+        assert_ne!(OLED_IDLE_FRAME, OLED_ACTIVE_FRAME);
     }
 }
