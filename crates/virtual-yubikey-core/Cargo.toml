@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 software-key-core = { path = "../../../software-key-core" }
-aes = "0.8.4"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
