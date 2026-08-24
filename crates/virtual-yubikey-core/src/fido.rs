@@ -143,16 +143,19 @@ impl CredentialPrivateKey {
             SoftwarePublicKey::Ec {
                 curve,
                 uncompressed,
-            } => encode_ec2(
-                self.algorithm.cose_identifier(),
-                match curve {
+            } => {
+                let cose_curve = match curve {
                     EcCurve::P256 => 1,
                     EcCurve::P384 => 2,
                     EcCurve::P521 => 3,
                     EcCurve::Secp256k1 => 8,
-                },
-                &uncompressed,
-            ),
+                    EcCurve::P224
+                    | EcCurve::BrainpoolP256
+                    | EcCurve::BrainpoolP384
+                    | EcCurve::BrainpoolP512 => return Err(CKR_DEVICE_ERROR.into()),
+                };
+                encode_ec2(self.algorithm.cose_identifier(), cose_curve, &uncompressed)
+            }
             SoftwarePublicKey::Ed25519(public) => {
                 encode_okp(self.algorithm.cose_identifier(), 6, &public)
             }
@@ -200,6 +203,10 @@ impl CredentialPrivateKey {
             | SoftwareSigningAlgorithm::RsaPkcs1Sha256
             | SoftwareSigningAlgorithm::RsaPkcs1Sha384
             | SoftwareSigningAlgorithm::RsaPkcs1Sha512 => Ok(signature.into_bytes()),
+            SoftwareSigningAlgorithm::EcdsaP224Sha224
+            | SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256
+            | SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384
+            | SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512 => Err(CKR_DEVICE_ERROR.into()),
         }
     }
 }

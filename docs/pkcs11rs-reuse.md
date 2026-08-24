@@ -34,6 +34,9 @@ core retains ISO 7816 FIDO routing for unit tests and possible future NFC work.
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
 | `software-key-core::software_key_agreement` | Raw ECDH for any compatible RustCrypto short-Weierstrass curve, persistent X25519 keys, public projection, serialization, contributory key agreement, and shared-secret handling |
+| `software-key-core::software_symmetric` | AES block, ECB/CBC, CMAC, CCM, KWP, and Yubico OTP AEAD operations |
+| `software-key-core::secure_channel` | SCP03-style KDF, cryptograms and padding plus X9.63 and Yubico password KDFs; callers retain sessions, counters, and framing |
+| `software-key-core::arkg` | ARKG-P256 public derivation, authenticated tickets, and matching private-scalar derivation; previewSign retains COSE/CBOR and device seed state |
 | `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
 | `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
 | `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
@@ -48,7 +51,7 @@ virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adap
 The core does not depend on either top-level application. This avoids a cycle
 and keeps standalone Pi builds reproducible.
 
-The reusable signing modules contain no COSE, CTAP, USB, PKCS #11 mechanism,
+The reusable crypto modules contain no COSE, CTAP, USB, PKCS #11 mechanism,
 object, authorization, or error-code types. FIDO maps COSE identifiers and DER
 signature encoding around them. `pkcs11rs` maps mechanisms, attributes, and
 `CKR_*` results around the same raw operations.
