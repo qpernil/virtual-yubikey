@@ -21,6 +21,7 @@ virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 display-backends = { path = "../display-backends" }
+gpiocdev-uapi = "0.7.0"
 
 [[bin]]
 name = "virtual-yubikey-worker"

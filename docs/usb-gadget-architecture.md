@@ -420,15 +420,19 @@ exists only for the lifetime of the current FIDO presence wait. Closing a wait
 destroys its socket and queued datagrams. Presses made while idle or while a
 previous request was active can therefore never approve a later operation.
 
-A fresh KEY3 press is delivered privately to the main worker thread. The worker
-publishes an empty personality with a new request identifier; it does not
+KEY3 is represented by its sampled current logical level. GPIO edges merely
+wake the main worker, and multiple wakes may coalesce without losing the final
+pressed/released state. The worker publishes an empty personality with a new
+request identifier; it does not
 manipulate the display directly. The supervisor unbinds, asks the worker to
 quiesce, and waits with no configured USB generation. Quiescing turns the
 display off as part of that lifecycle transition. Release makes the worker
 publish its complete personality; the supervisor creates and binds that
 generation immediately, without imposing the 250 ms floor used by atomic
 replacement. Endpoint threads are joined before the worker accepts the new
-endpoint files. `Serving` alone leaves the display dark; the idle image returns
+endpoint files. A canceled endpoint helper parks until a newer `Enable`
+activation or quiescence, preventing it from retrying a disabled FunctionFS
+endpoint during that join. `Serving` alone leaves the display dark; the idle image returns
 on the new generation's `Bind` event. `Disable` leaves it on because the device
 remains physically present. The host observes a detach for exactly the physical
 hold interval while the worker, initial resource handles, and persistent
