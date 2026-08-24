@@ -230,13 +230,17 @@ There is no data framing, proxy, acknowledgement, or polling loop between the
 worker and FunctionFS. The supervisor never handles CTAP, CCID, APDU, PIN, or
 key data.
 
-The profile also declares the ST7789 SPI device, its exact data/command, reset,
-and backlight GPIO lines, joystick-center GPIO13 for touch, and KEY3 GPIO16 for
-USB reconnect as separate active-low inputs with both-edge events. The
+The color profile declares the ST7789 SPI device and its exact data/command,
+reset, and backlight GPIO lines. The OLED profile declares the same SPI device
+with the data/command and reset lines required by the 128x64 SH1106. Both
+profiles declare joystick-center GPIO13 for touch and KEY3 GPIO16 for USB
+reconnect as separate active-low inputs with both-edge events. The
 supervisor opens those capabilities as root and sends their named handles in
 the initial `SCM_RIGHTS` resource record.
-The worker renders an included vertical YubiKey image as a native 240x240
-RGB565 frame. Accepted FIDO and CCID traffic toggles the green cut-out details
+The worker selects already-native frames from the profile's `--display` value:
+the original vertical 240x240 RGB565 YubiKey image for `st7789-spi`, or the
+complete horizontal 128x64 one-bit dithered image for `sh1106-spi`. No image
+conversion occurs on the Pi. Accepted FIDO and CCID traffic toggles the cut-out details
 on a dedicated, coalescing display thread; 90 ms without new activity returns
 the image to its idle state. While any application is blocked waiting for
 physical presence, the same cut-outs blink until touch, cancellation, or failure
@@ -279,6 +283,7 @@ profile supplies the worker serial and log level; its direct options are:
 ```text
 --serial DECIMAL       Management serial (default 12345678)
 --log-level LEVEL      off, info, debug, or trace
+--display BACKEND      st7789-spi (default) or sh1106-spi
 ```
 
 Trace logging includes complete protocol payloads and may expose PINs or
@@ -347,7 +352,10 @@ with YubiKey-specific extensions matched to the
 ## Install as a service
 
 Install the generic supervisor once as described in its README, then build this
-repository in place. Copy the neutral profile to a temporary file and set its
+repository in place. Choose `profiles/virtual-yubikey.toml` for the 240x240
+ST7789 color display or `profiles/virtual-yubikey-sh1106-spi.toml` for the
+128x64 SH1106 monochrome OLED. Copy the selected neutral profile to a temporary
+file and set its
 `command` and `run_as` fields to the worker's absolute path and dedicated
 unprivileged service account; do not put machine-local paths into the checked-in
 template.

@@ -7,6 +7,34 @@ pub(crate) const DEFAULT_SERIAL: u32 = 12_345_678;
 pub(crate) struct Options {
     pub(crate) serial: u32,
     pub(crate) log_level: Level,
+    pub(crate) display: DisplayKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DisplayKind {
+    St7789Spi,
+    Sh1106Spi,
+}
+
+impl DisplayKind {
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::St7789Spi => "st7789-spi",
+            Self::Sh1106Spi => "sh1106-spi",
+        }
+    }
+
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "st7789-spi" => Ok(Self::St7789Spi),
+            "sh1106-spi" => Ok(Self::Sh1106Spi),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid display {value:?}; use st7789-spi or sh1106-spi"),
+            )),
+        }
+    }
 }
 
 pub(crate) fn parse<I>(arguments: I) -> io::Result<Options>
@@ -15,6 +43,7 @@ where
 {
     let mut serial = DEFAULT_SERIAL;
     let mut log_level = Level::Info;
+    let mut display = DisplayKind::St7789Spi;
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
@@ -41,17 +70,27 @@ where
                     )
                 })?;
             }
+            "--display" => {
+                let value = arguments.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--display needs a value")
+                })?;
+                display = DisplayKind::parse(&value)?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: virtual-yubikey-worker [--serial DECIMAL] [--log-level LEVEL]\n\
+                    "Usage: virtual-yubikey-worker [--serial DECIMAL] [--log-level LEVEL] [--display BACKEND]\n\
                      \n\
                      This unprivileged binary is started by usb-gadget-supervisor. Its\n\
                      control socket is fixed at FD 3 and resource descriptors arrive through\n\
                      the versioned supervisor protocol. It refuses to run as root.\n\
+                     BACKEND is st7789-spi (default) or sh1106-spi.\n\
                      LEVEL is off, info (default), debug, or trace. Trace includes payloads\n\
                      and may expose secrets once stateful commands are implemented."
                 );
                 std::process::exit(0);
+            }
+            value if value.starts_with("--display=") => {
+                display = DisplayKind::parse(&value["--display=".len()..])?;
             }
             _ => {
                 return Err(io::Error::new(
@@ -62,7 +101,11 @@ where
         }
     }
 
-    Ok(Options { serial, log_level })
+    Ok(Options {
+        serial,
+        log_level,
+        display,
+    })
 }
 
 #[cfg(test)]
@@ -82,6 +125,7 @@ mod tests {
             Options {
                 serial: 24_681_357,
                 log_level: Level::Info,
+                display: DisplayKind::St7789Spi,
             }
         );
     }
@@ -90,5 +134,11 @@ mod tests {
     fn parses_debug_log_level() {
         let options = parse(["--log-level".to_owned(), "debug".to_owned()]).unwrap();
         assert_eq!(options.log_level, Level::Debug);
+    }
+
+    #[test]
+    fn parses_oled_display() {
+        let options = parse(["--display=sh1106-spi".to_owned()]).unwrap();
+        assert_eq!(options.display, DisplayKind::Sh1106Spi);
     }
 }

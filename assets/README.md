@@ -19,3 +19,27 @@ RGB565 ST7789 frames:
 The checked-in Ruby converter builds both native frames from the 240x240 BGRA
 bitmap produced by `sips`. The worker includes the native frames directly, so
 the deployed Pi does not decode or transform images at runtime.
+
+`yubikey-oled-source.png` is a grayscale, horizontal reframe of the same
+complete product, prepared for the 128x64 SH1106 SPI OLED. The corresponding
+`yubikey-oled-idle` and `yubikey-oled-active` previews contain only black and
+white pixels. Their `.mono1` files are 1,024-byte native one-bit frames in the
+page and bit order expected by `display-backends`. A 4x4 Bayer pattern converts
+source tones into spatial dithering; the OLED itself receives no grayscale.
+As on the color display, only the lowercase-y and NFC-arc cut-outs change
+between idle and active.
+
+Rebuild the OLED assets on macOS with:
+
+```sh
+sips -s format bmp -z 64 128 assets/yubikey-oled-source.png \
+  --out /tmp/yubikey-oled-128.bmp
+ruby scripts/build_yubikey_oled_assets.rb \
+  /tmp/yubikey-oled-128.bmp \
+  assets/yubikey-oled-idle.mono1 assets/yubikey-oled-active.mono1 \
+  /tmp/yubikey-oled-idle.pgm /tmp/yubikey-oled-active.pgm
+sips -s format png /tmp/yubikey-oled-idle.pgm \
+  --out assets/yubikey-oled-idle.png
+sips -s format png /tmp/yubikey-oled-active.pgm \
+  --out assets/yubikey-oled-active.png
+```

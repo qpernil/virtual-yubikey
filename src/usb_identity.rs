@@ -195,6 +195,7 @@ mod tests {
     use super::*;
 
     const PROFILE: &str = include_str!("../profiles/virtual-yubikey.toml");
+    const OLED_PROFILE: &str = include_str!("../profiles/virtual-yubikey-sh1106-spi.toml");
 
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
@@ -293,5 +294,25 @@ mod tests {
                 .as_str(),
             Some("/absolute/path/to/virtual-yubikey-worker")
         );
+    }
+
+    #[test]
+    fn oled_profile_selects_sh1106_and_its_two_control_lines() {
+        let profile: toml::Value = toml::from_str(OLED_PROFILE).unwrap();
+        let worker = profile.get("worker").unwrap();
+        let arguments = worker.get("arguments").unwrap().as_array().unwrap();
+        assert!(arguments
+            .iter()
+            .any(|argument| argument.as_str() == Some("--display=sh1106-spi")));
+
+        let resources = profile.get("resources").unwrap().as_array().unwrap();
+        let controls = resources
+            .iter()
+            .find(|resource| resource.get("name").unwrap().as_str() == Some("display-control"))
+            .unwrap();
+        let offsets = controls.get("offsets").unwrap().as_array().unwrap();
+        assert_eq!(offsets.len(), 2);
+        assert_eq!(offsets[0].as_integer(), Some(24));
+        assert_eq!(offsets[1].as_integer(), Some(25));
     }
 }

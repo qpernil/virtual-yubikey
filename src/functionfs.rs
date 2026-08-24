@@ -68,7 +68,7 @@ impl UserPresenceCommand {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
+pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -83,8 +83,11 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     STOP_REQUESTED.store(false, Ordering::Relaxed);
     let control = Channel::from_fixed_descriptor();
     let resources = InitialResources::parse(validate_initial_resources(control.receive()?)?)?;
-    let display =
-        crate::display::Controller::start(resources.display_spi, resources.display_control)?;
+    let display = crate::display::Controller::start(
+        resources.display_spi,
+        resources.display_control,
+        display_kind,
+    )?;
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
