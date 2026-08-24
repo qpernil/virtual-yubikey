@@ -15,6 +15,8 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixDatagram;
@@ -25,12 +27,14 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(target_os = "linux")]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::{
     thread,
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
-use usb_gadget_worker::UsbBusEvent;
+use usb_gadget_worker::{EndpointLifecycle, UsbBusEvent};
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
 
@@ -42,8 +46,6 @@ const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
-#[cfg(target_os = "linux")]
-const ENDPOINT_RETRY_DELAY: Duration = Duration::from_millis(50);
 #[cfg(target_os = "linux")]
 pub(crate) const USER_PRESENCE_TOUCH: u8 = b'T';
 
@@ -97,12 +99,32 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
     )?;
     let personality = crate::usb_identity::personality().to_cbor()?;
     let mut configure_request = 1;
-    control.send(&Record::new(
-        Kind::Configure,
-        0,
-        configure_request,
-        personality.clone(),
-    ))?;
+    if buttons.reconnect_pressed() {
+        diagnostics::log(
+            Level::Info,
+            "usb",
+            "absent_at_startup",
+            format_args!("input=key3 pressed=true"),
+        );
+        control.send(&Record::new(
+            Kind::Configure,
+            0,
+            configure_request,
+            Vec::new(),
+        ))?;
+        if !wait_for_reinsert(&control, 0, &buttons, &personality, &mut configure_request)? {
+            let button_result = buttons.shutdown();
+            let display_result = display.shutdown();
+            return button_result.and(display_result);
+        }
+    } else {
+        control.send(&Record::new(
+            Kind::Configure,
+            0,
+            configure_request,
+            personality.clone(),
+        ))?;
+    }
     let keepalive = crate::keepalive::Scheduler::start()?;
     let activity = display.activity();
     let result = (|| loop {
@@ -122,10 +144,20 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
         let generation = endpoints_record.generation;
         let endpoints = Endpoints::from_record(endpoints_record)?;
         STOP_REQUESTED.store(false, Ordering::Relaxed);
+        let lifecycle = Arc::new(EndpointLifecycle::new());
         let fido = load_fido_state(serial, &storage.fido_state)?;
         let ccid = load_piv_state(serial, &storage.piv_state)?;
-        let endpoint_runtime =
-            endpoints.start(serial, fido, ccid, &storage, &keepalive, &activity)?;
+        let endpoint_runtime = endpoints.start(
+            fido,
+            ccid,
+            EndpointServices {
+                serial,
+                storage: &storage,
+                keepalive: &keepalive,
+                display_activity: &activity,
+                lifecycle: Arc::clone(&lifecycle),
+            },
+        )?;
         control.send(&Record::new(
             Kind::Serving,
             generation,
@@ -146,9 +178,12 @@ pub(crate) fn run_worker(serial: u32) -> io::Result<()> {
             &display,
             &buttons,
             &mut configure_request,
+            &lifecycle,
         );
+        lifecycle.stop();
+        let runtime_result = endpoint_runtime.shutdown();
         let outcome = control_result?;
-        endpoint_runtime.shutdown()?;
+        runtime_result?;
         match outcome {
             ControlOutcome::Quiesce {
                 request_id,
@@ -257,12 +292,22 @@ struct WorkerStorage {
 }
 
 #[cfg(target_os = "linux")]
+struct EndpointServices<'a> {
+    serial: u32,
+    storage: &'a WorkerStorage,
+    keepalive: &'a crate::keepalive::Scheduler,
+    display_activity: &'a crate::display::Activity,
+    lifecycle: Arc<EndpointLifecycle>,
+}
+
+#[cfg(target_os = "linux")]
 struct HidRuntime {
     serial: u32,
     state_path: PathBuf,
     touch_socket: PathBuf,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
+    lifecycle: Arc<EndpointLifecycle>,
 }
 
 #[cfg(target_os = "linux")]
@@ -305,6 +350,7 @@ impl Endpoints {
         let mut ccid_in = None;
         let mut ccid_interrupt = None;
         for (entry, file) in record.body[2..].chunks_exact(4).zip(record.files) {
+            set_nonblocking(&file)?;
             let address = entry[0];
             let transfer_type = entry[1];
             let packet_size = u16::from_be_bytes(entry[2..4].try_into().unwrap());
@@ -347,13 +393,17 @@ impl Endpoints {
 
     fn start(
         self,
-        serial: u32,
         fido: FidoAuthenticator,
         ccid: crate::ccid::Device,
-        storage: &WorkerStorage,
-        keepalive: &crate::keepalive::Scheduler,
-        display_activity: &crate::display::Activity,
+        services: EndpointServices<'_>,
     ) -> io::Result<EndpointRuntime> {
+        let EndpointServices {
+            serial,
+            storage,
+            keepalive,
+            display_activity,
+            lifecycle,
+        } = services;
         let Self {
             fido_out,
             fido_in,
@@ -368,7 +418,7 @@ impl Endpoints {
             .spawn(move || {
                 while notification_rx.recv().is_ok() {
                     if let Err(error) = write_transfer(&mut ccid_interrupt, &[0x50, 0x03]) {
-                        if !endpoint_is_gone(&error) {
+                        if !endpoint_is_unavailable(&error) {
                             diagnostics::log(
                                 Level::Info,
                                 "ccid",
@@ -393,6 +443,7 @@ impl Endpoints {
             let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
+            let lifecycle = Arc::clone(&lifecycle);
             move || {
                 if let Err(error) = serve_ccid(
                     ccid_out,
@@ -401,6 +452,7 @@ impl Endpoints {
                     &state_path,
                     clock,
                     display_activity,
+                    lifecycle,
                 ) {
                     diagnostics::log(
                         Level::Info,
@@ -420,6 +472,7 @@ impl Endpoints {
                 touch_socket: storage.touch_socket.clone(),
                 clock: keepalive.handle(),
                 display_activity: display_activity.clone(),
+                lifecycle,
             };
             move || {
                 if let Err(error) = serve_hid(fido_out, fido_in, fido, runtime) {
@@ -459,6 +512,7 @@ fn serve_control(
     display: &crate::display::Controller,
     buttons: &crate::buttons::Controller,
     configure_request: &mut u32,
+    lifecycle: &EndpointLifecycle,
 ) -> io::Result<ControlOutcome> {
     let mut unconfiguration_pending = false;
     loop {
@@ -525,6 +579,9 @@ fn serve_control(
                         "bus_event",
                         format_args!("event={event:?} activation={activation}"),
                     );
+                    if event == UsbBusEvent::Enable {
+                        lifecycle.activate(activation);
+                    }
                     if event == UsbBusEvent::Bind {
                         display.bind()?;
                     } else if event == UsbBusEvent::Unbind {
@@ -553,6 +610,7 @@ fn serve_control(
                 }
                 Kind::Quiesce if record.body.is_empty() => {
                     STOP_REQUESTED.store(true, Ordering::Relaxed);
+                    lifecycle.stop();
                     display.unbind()?;
                     return if record.request_id == 0 {
                         Ok(ControlOutcome::Quiesce {
@@ -574,7 +632,7 @@ fn serve_control(
 
         if poll_fds[1].revents & libc::POLLIN != 0
             && !unconfiguration_pending
-            && buttons.take_reconnect_transition()? == Some(true)
+            && buttons.take_reconnect_state()?
         {
             let request_id = configure_request
                 .checked_add(1)
@@ -642,9 +700,7 @@ fn wait_for_reinsert(
                 )),
             };
         }
-        if poll_fds[1].revents & libc::POLLIN != 0
-            && buttons.take_reconnect_transition()? == Some(false)
-        {
+        if poll_fds[1].revents & libc::POLLIN != 0 && !buttons.take_reconnect_state()? {
             let request_id = configure_request
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("USB configuration request overflow"))?;
@@ -748,27 +804,35 @@ fn serve_ccid(
     state_path: &Path,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
+    lifecycle: Arc<EndpointLifecycle>,
 ) -> io::Result<()> {
     let mut request = [0_u8; MAX_TRANSFER];
-    while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        match output.read(&mut request) {
-            Ok(0) => {}
-            Ok(length) => {
-                display_activity.pulse();
-                let replies =
-                    ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
-                        write_transfer(&mut input, keepalive)
-                    })?;
-                if ccid.take_piv_persistent_change() {
-                    persist_piv_state(&ccid, state_path)?;
-                }
-                for reply in replies {
-                    write_transfer(&mut input, &reply)?;
-                }
+    let mut activation = 0;
+    while let Some(next_activation) = lifecycle.wait_for_activation_after(activation) {
+        activation = next_activation;
+        loop {
+            if STOP_REQUESTED.load(Ordering::Relaxed) {
+                return Ok(());
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if endpoint_is_gone(&error) => thread::sleep(ENDPOINT_RETRY_DELAY),
-            Err(error) => return Err(error),
+            match output.read(&mut request) {
+                Ok(0) => {}
+                Ok(length) => {
+                    display_activity.pulse();
+                    let replies =
+                        ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
+                            write_transfer(&mut input, keepalive)
+                        })?;
+                    if ccid.take_piv_persistent_change() {
+                        persist_piv_state(&ccid, state_path)?;
+                    }
+                    for reply in replies {
+                        write_transfer(&mut input, &reply)?;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if endpoint_is_unavailable(&error) => break,
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
@@ -787,8 +851,9 @@ fn serve_hid(
         touch_socket,
         clock,
         display_activity,
+        lifecycle,
     } = runtime;
-    let reports = HidReader::start(output)?;
+    let reports = HidReader::start(output, lifecycle)?;
     let result = (|| {
         let receiver = reports.receiver();
         let mut ctaphid = crate::ctaphid::Device::new(
@@ -955,26 +1020,31 @@ struct HidReader {
 
 #[cfg(target_os = "linux")]
 impl HidReader {
-    fn start(mut output: File) -> io::Result<Self> {
+    fn start(mut output: File, lifecycle: Arc<EndpointLifecycle>) -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("fido-out".to_owned())
             .spawn(move || {
                 let mut report = [0_u8; crate::ctaphid::REPORT_SIZE];
-                while !STOP_REQUESTED.load(Ordering::Relaxed) {
-                    match output.read(&mut report) {
-                        Ok(length) => {
-                            if sender.send(Ok(report[..length].to_vec())).is_err() {
-                                break;
+                let mut activation = 0;
+                while let Some(next_activation) = lifecycle.wait_for_activation_after(activation) {
+                    activation = next_activation;
+                    loop {
+                        if STOP_REQUESTED.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        match output.read(&mut report) {
+                            Ok(length) => {
+                                if sender.send(Ok(report[..length].to_vec())).is_err() {
+                                    return;
+                                }
                             }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) if endpoint_is_gone(&error) => {
-                            thread::sleep(ENDPOINT_RETRY_DELAY);
-                        }
-                        Err(error) => {
-                            let _ = sender.send(Err(error));
-                            break;
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) if endpoint_is_unavailable(&error) => break,
+                            Err(error) => {
+                                let _ = sender.send(Err(error));
+                                return;
+                            }
                         }
                     }
                 }
@@ -1391,15 +1461,29 @@ fn write_transfer(file: &mut File, bytes: &[u8]) -> io::Result<()> {
                 ));
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if endpoint_is_gone(&error) => return Ok(()),
+            Err(error) if endpoint_is_unavailable(&error) => return Ok(()),
             Err(error) => return Err(error),
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn endpoint_is_gone(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(19 | 32 | 108))
+fn endpoint_is_unavailable(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(11 | 19 | 32 | 108))
+}
+
+#[cfg(target_os = "linux")]
+fn set_nonblocking(file: &File) -> io::Result<()> {
+    // FunctionFS continues to block for an enabled transfer. O_NONBLOCK only
+    // prevents a new operation from sleeping while its endpoint is disabled.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

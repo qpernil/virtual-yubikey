@@ -221,6 +221,11 @@ The main worker thread owns that control channel and handles USB setup and bus
 lifecycle records. A CCID thread blocks directly on CCID OUT and writes CCID
 IN. FIDO has a blocking OUT reader so cancellation reports remain observable
 while its application thread is processing a command or waiting for touch.
+Each endpoint helper waits for the supervisor's first `Enable` activation. If
+FunctionFS cancels an operation on disable or unbind, the helper parks until a
+strictly newer activation or quiescence instead of retrying a disabled
+endpoint. This keeps shutdown joins deterministic without placing the
+supervisor in the data path.
 There is no data framing, proxy, acknowledgement, or polling loop between the
 worker and FunctionFS. The supervisor never handles CTAP, CCID, APDU, PIN, or
 key data.
@@ -244,6 +249,10 @@ worker powered but absent from USB. Releasing KEY3 republishes the complete
 personality immediately, and the same worker restores the idle image when the
 new generation is bound. To the host and observer this is a spring-loaded eject
 and insertion without a process restart or an added reconnect delay.
+Reconnect notifications are coalesced wakes around the sampled current KEY3
+level, not a replay of edge history. Holding KEY3 at worker startup therefore
+keeps USB absent, and a dropped wake cannot leave the device detached after
+the physical button has been released.
 Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial

@@ -1328,6 +1328,7 @@ name = "virtual-yubikey"
 version = "0.1.0"
 dependencies = [
  "display-backends",
+ "gpiocdev-uapi",
  "libc",
  "toml",
  "usb-gadget-worker",
