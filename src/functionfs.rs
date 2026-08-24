@@ -820,7 +820,7 @@ fn serve_ccid(
             match output.read(&mut request) {
                 Ok(0) => {}
                 Ok(length) => {
-                    display_activity.pulse();
+                    let _activity = display_activity.begin();
                     let replies =
                         ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
                             write_transfer(&mut input, keepalive)
@@ -874,9 +874,6 @@ fn serve_hid(
                     return Err(io::Error::other("FIDO OUT reader stopped"))
                 }
             };
-            if !report.is_empty() {
-                display_activity.pulse();
-            }
             match report.len() {
                 0 => {}
                 length if length != crate::ctaphid::REPORT_SIZE => {
