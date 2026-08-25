@@ -1,15 +1,13 @@
-# Implementation provenance
+# Source and compatibility boundary
 
 Virtual YubiKey is an independent, AI-assisted compatibility implementation.
-It was developed with OpenAI Codex under Per Nilsson's direction in August
-2026. The implementation work used public standards, public vendor
-documentation, ordinary host APIs, and black-box interoperability tests.
+Its implementation sources are public standards, public vendor documentation,
+ordinary host APIs, and black-box interoperability tests.
 
 No Yubico firmware, proprietary source code, internal documentation,
 cryptographic keys, attestation certificates, or other confidential material
-is included in or required to build this repository. Per Nilsson is a former
-Yubico employee; no non-public Yubico material was supplied to Codex or used as
-an implementation source for this project.
+is included in, required to build, or accepted as an implementation source for
+this repository.
 
 The principal public implementation references are:
 
@@ -27,11 +25,11 @@ front product image as recorded in `assets/README.md`. The image is kept as an
 external brand asset with its own terms, not as an implementation source or as
 code licensed by this repository.
 
-Compatibility was validated through normal, documented host applications and
+Compatibility validation uses normal, documented host applications and
 protocol exchanges with software including browsers, PC/SC, `ykman`,
-`yubico-piv-tool`, and Yubico Authenticator. Observed protocol facts and test
-transcripts were converted into independently written Rust code and regression
-tests; vendor source code was not copied.
+`yubico-piv-tool`, and Yubico Authenticator. Independently observed protocol
+facts and test transcripts become independently written Rust code and
+regression tests; vendor source code is not copied.
 
-This document records implementation history, not a claim that the project has
-completed a formally supervised two-team clean-room process.
+This policy describes the project's source boundary and does not claim a
+formally supervised two-team clean-room process.
