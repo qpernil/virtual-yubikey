@@ -252,7 +252,7 @@ write visible without retaining a replay queue. Several commands that arrive
 faster than the panel can represent coalesce into one current burst.
 
 Command start produces a visible edge after the previous state has remained
-visible for at least 8 ms. While the command remains active, the LED follows the
+visible for at least 10 ms. While the command remains active, the LED follows the
 measured 100 ms busy cadence: 67 ms on and 33 ms off. When the command finishes,
 the YubiKey enters one slow on period lasting 1.5 seconds and then remains off.
 A new command cancels that idle period and immediately returns to the busy
