@@ -107,7 +107,7 @@ randomness, trust policy, persistence, transport, and error mapping.
 
 ### PIV
 
-- The core now implements discovery and metadata, persistent objects and
+- The core implements discovery and metadata, persistent objects and
   certificates, PIN/PUK and management-key authentication, retry configuration
   and reset, RSA and P-256/P-384 key generation/import, move/delete, signing,
   raw RSA private operations, ECDH, Ed25519 message signing, and X25519 key
