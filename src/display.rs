@@ -34,8 +34,6 @@ const BUSY_CADENCE: Cadence = Cadence::new(Duration::from_millis(67), Duration::
 const PRESENCE_CADENCE: Cadence =
     Cadence::new(Duration::from_millis(384), Duration::from_millis(384));
 #[cfg(target_os = "linux")]
-const IDLE_ON_PERIOD: Duration = Duration::from_millis(1_500);
-#[cfg(target_os = "linux")]
 const MINIMUM_EDGE: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "linux")]
@@ -70,11 +68,7 @@ impl Controller {
     ) -> io::Result<Self> {
         let hardware = Arc::new(Mutex::new(Hardware::new(bus, control, kind)));
         let indicator = IndicatorController::start(
-            Policy::new(
-                BUSY_CADENCE,
-                IdlePolicy::OneShotOn(IDLE_ON_PERIOD),
-                MINIMUM_EDGE,
-            ),
+            Policy::new(BUSY_CADENCE, IdlePolicy::Off, MINIMUM_EDGE),
             HardwareRenderer {
                 hardware: Arc::clone(&hardware),
             },
@@ -284,7 +278,6 @@ mod tests {
         assert_eq!(BUSY_CADENCE.off, Duration::from_millis(33));
         assert_eq!(PRESENCE_CADENCE.on, Duration::from_millis(384));
         assert_eq!(PRESENCE_CADENCE.off, Duration::from_millis(384));
-        assert_eq!(IDLE_ON_PERIOD, Duration::from_millis(1_500));
         assert_eq!(MINIMUM_EDGE, Duration::from_millis(10));
     }
 }
