@@ -34,7 +34,7 @@ const BUSY_CADENCE: Cadence = Cadence::new(Duration::from_millis(67), Duration::
 const PRESENCE_CADENCE: Cadence =
     Cadence::new(Duration::from_millis(384), Duration::from_millis(384));
 #[cfg(target_os = "linux")]
-const MINIMUM_EDGE: Duration = Duration::from_millis(10);
+const MINIMUM_EDGE: Duration = Duration::from_millis(5);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -278,6 +278,6 @@ mod tests {
         assert_eq!(BUSY_CADENCE.off, Duration::from_millis(33));
         assert_eq!(PRESENCE_CADENCE.on, Duration::from_millis(384));
         assert_eq!(PRESENCE_CADENCE.off, Duration::from_millis(384));
-        assert_eq!(MINIMUM_EDGE, Duration::from_millis(10));
+        assert_eq!(MINIMUM_EDGE, Duration::from_millis(5));
     }
 }
