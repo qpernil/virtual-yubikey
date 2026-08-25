@@ -252,12 +252,13 @@ write visible. If more short commands arrive while a pulse is already visible,
 the scheduler retains one additional pulse; further commands coalesce rather
 than building a delayed replay queue.
 
-Command start produces a visible edge after the previous state has remained
-visible for at least 5 ms. While the command remains active, the LED follows the
-measured 100 ms busy cadence: 67 ms on and 33 ms off. When the command finishes,
-the YubiKey returns to off as soon as the 5 ms visibility floor permits. The
-worker does not fabricate a USB-insertion flash: normal immediate CCID probing
-is ordinary application activity.
+Command start produces an edge at least 8 ms after the previous edge began.
+Renderer time is part of that interval rather than an added delay, so a slower
+display naturally becomes the rate limit. While the command remains active, the
+LED follows the measured 100 ms busy cadence: 67 ms on and 33 ms off. When the
+command finishes, the YubiKey returns to off as soon as the edge interval
+permits. The worker does not fabricate a USB-insertion flash: normal immediate
+CCID probing is ordinary application activity.
 
 While any application is blocked waiting for physical presence, the same
 cut-outs blink until touch, cancellation, or failure ends the wait. Every

@@ -400,11 +400,12 @@ therefore has no knowledge of the artwork, backend, or physical display power.
 The command epoch preserves one visible transition when a complete command fits
 inside a synchronous frame write. Commands arriving while that pulse is visible
 may retain one additional pulse; further commands coalesce instead of
-accumulating delayed animations. Each state remains visible for at least 5 ms.
-Sustained command processing uses a 67 ms on, 33 ms off cadence. On completion
-the YubiKey returns to off after the current and, if present, single pending
-pulse. General FIDO HID traffic does not drive this application-activity
-indicator.
+accumulating delayed animations. Edges begin at least 8 ms apart, with renderer
+time included in that interval rather than added to it; a slower backend
+naturally limits the cadence. Sustained command processing uses a 67 ms on,
+33 ms off cadence. On completion the YubiKey returns to off after the current
+and, if present, single pending pulse. General FIDO HID traffic does not drive
+this application-activity indicator.
 
 A scoped physical-presence override blinks for as long as an application is
 blocked waiting for touch. It uses the measured YubiKey 5 NFC cadence for every
