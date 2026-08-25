@@ -36,7 +36,7 @@ const PRESENCE_CADENCE: Cadence =
 #[cfg(target_os = "linux")]
 const IDLE_ON_PERIOD: Duration = Duration::from_millis(1_500);
 #[cfg(target_os = "linux")]
-const MINIMUM_EDGE: Duration = Duration::from_millis(8);
+const MINIMUM_EDGE: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -285,6 +285,6 @@ mod tests {
         assert_eq!(PRESENCE_CADENCE.on, Duration::from_millis(384));
         assert_eq!(PRESENCE_CADENCE.off, Duration::from_millis(384));
         assert_eq!(IDLE_ON_PERIOD, Duration::from_millis(1_500));
-        assert_eq!(MINIMUM_EDGE, Duration::from_millis(8));
+        assert_eq!(MINIMUM_EDGE, Duration::from_millis(10));
     }
 }
