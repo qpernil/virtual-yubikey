@@ -1,4 +1,5 @@
-use std::io;
+use std::{io, time::Duration};
+use usb_gadget_worker::PersistenceMode;
 
 use crate::diagnostics::Level;
 pub(crate) const DEFAULT_SERIAL: u32 = 12_345_678;
@@ -8,6 +9,7 @@ pub(crate) struct Options {
     pub(crate) serial: u32,
     pub(crate) log_level: Level,
     pub(crate) display: DisplayKind,
+    pub(crate) persistence: PersistenceMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +46,7 @@ where
     let mut serial = DEFAULT_SERIAL;
     let mut log_level = Level::Info;
     let mut display = DisplayKind::St7789Spi;
+    let mut persistence = PersistenceMode::Batched(Duration::from_millis(500));
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
@@ -78,12 +81,13 @@ where
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: virtual-yubikey-worker [--serial DECIMAL] [--log-level LEVEL] [--display BACKEND]\n\
+                    "Usage: virtual-yubikey-worker [--serial DECIMAL] [--log-level LEVEL] [--display BACKEND] [--persistence MODE]\n\
                      \n\
                      This unprivileged binary is started by usb-gadget-supervisor. Its\n\
                      control socket is fixed at FD 3 and resource descriptors arrive through\n\
                      the versioned supervisor protocol. It refuses to run as root.\n\
                      BACKEND is st7789-spi (default) or sh1106-spi.\n\
+                     MODE is batched (default, 500 ms) or immediate.\n\
                      LEVEL is off, info (default), debug, or trace. Trace includes payloads\n\
                      and may expose secrets once stateful commands are implemented."
                 );
@@ -91,6 +95,15 @@ where
             }
             value if value.starts_with("--display=") => {
                 display = DisplayKind::parse(&value["--display=".len()..])?;
+            }
+            "--persistence" => {
+                let value = arguments.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--persistence needs a value")
+                })?;
+                persistence = parse_persistence(&value)?;
+            }
+            value if value.starts_with("--persistence=") => {
+                persistence = parse_persistence(&value["--persistence=".len()..])?;
             }
             _ => {
                 return Err(io::Error::new(
@@ -105,7 +118,19 @@ where
         serial,
         log_level,
         display,
+        persistence,
     })
+}
+
+fn parse_persistence(value: &str) -> io::Result<PersistenceMode> {
+    match value {
+        "batched" => Ok(PersistenceMode::Batched(Duration::from_millis(500))),
+        "immediate" => Ok(PersistenceMode::Immediate),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid persistence mode {value:?}; use batched or immediate"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +151,7 @@ mod tests {
                 serial: 24_681_357,
                 log_level: Level::Info,
                 display: DisplayKind::St7789Spi,
+                persistence: PersistenceMode::Batched(Duration::from_millis(500)),
             }
         );
     }
@@ -140,5 +166,11 @@ mod tests {
     fn parses_oled_display() {
         let options = parse(["--display=sh1106-spi".to_owned()]).unwrap();
         assert_eq!(options.display, DisplayKind::Sh1106Spi);
+    }
+
+    #[test]
+    fn parses_immediate_persistence() {
+        let options = parse(["--persistence=immediate".to_owned()]).unwrap();
+        assert_eq!(options.persistence, PersistenceMode::Immediate);
     }
 }

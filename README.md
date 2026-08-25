@@ -280,12 +280,15 @@ Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
-`/var/lib/virtual-yubikey/fido-12345678.cbor`. A missing file means a new empty
-authenticator; an invalid existing file is a startup error and is never silently
-replaced. State replacement is atomic and synchronized before a successful
-mutating CTAP response is returned. The file is mode `0600`, but contains
-unencrypted test PIN and private-key material and must not be treated as secure
-hardware storage.
+`/var/lib/virtual-yubikey/fido-12345678.cbor` and
+`/var/lib/virtual-yubikey/piv-12345678.cbor`. Missing files are initialized from
+factory state before USB is served; invalid existing files are startup errors
+and are never silently replaced. Both applets use the shared supervisor-worker
+persistence engine. By default it batches changes for up to 500 ms, atomically
+replaces mode-`0600` files, and flushes pending state on USB ejection and worker
+shutdown. `--persistence immediate` instead synchronizes each durable change
+before its successful response is written. The files contain unencrypted test
+PIN and private-key material and must not be treated as secure hardware storage.
 
 Persistent authenticator state uses CBOR schema version 2. Unsupported or
 invalid state is a startup error and is never silently replaced; resetting to
@@ -303,6 +306,7 @@ profile supplies the worker serial and log level; its direct options are:
 --serial DECIMAL       Management serial (default 12345678)
 --log-level LEVEL      off, info, debug, or trace
 --display BACKEND      st7789-spi (default) or sh1106-spi
+--persistence MODE     batched (default, 500 ms) or immediate
 ```
 
 Trace logging includes complete protocol payloads and may expose PINs or

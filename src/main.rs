@@ -43,7 +43,7 @@ fn run() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         install_signal_handlers()?;
-        functionfs::run_worker(options.serial, options.display)
+        functionfs::run_worker(options.serial, options.display, options.persistence)
     }
 
     #[cfg(not(target_os = "linux"))]
