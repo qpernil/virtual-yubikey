@@ -248,8 +248,9 @@ appropriate pair of complete color or monochrome frames; panel selection,
 artwork, logging, and display power remain worker concerns. Each CCID command
 increments a monotonic activity epoch and marks the single command slot active.
 The epoch makes a command that starts and finishes during a synchronous frame
-write visible without retaining a replay queue. Several commands that arrive
-faster than the panel can represent coalesce into one current burst.
+write visible. If more short commands arrive while a pulse is already visible,
+the scheduler retains one additional pulse; further commands coalesce rather
+than building a delayed replay queue.
 
 Command start produces a visible edge after the previous state has remained
 visible for at least 5 ms. While the command remains active, the LED follows the
