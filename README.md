@@ -240,34 +240,37 @@ the initial `SCM_RIGHTS` resource record.
 The worker selects already-native frames from the profile's `--display` value:
 the original vertical 240x240 RGB565 YubiKey image for `st7789-spi`, or the
 complete horizontal 128x64 one-bit dithered image for `sh1106-spi`. No image
-conversion occurs on the Pi. Every CCID application operation contributes one
-atomic toggle of the single global LED state. The display renders the latest
-state after the current on- or off-state has remained visible for at least 8 ms.
-Toggles that arrive during a synchronous frame write coalesce to their final
-parity and are never replayed later. If work stays active, the same global state
-toggles at the measured busy cadence: 67 ms on and 33 ms off. When work drains,
-the scheduler simply normalizes the state to off after the visibility floor.
-There is no terminal hang animation. The worker does not fabricate a USB-insertion
-flash: the host's normal immediate CCID probing toggles the state through
-ordinary activity.
+conversion occurs on the Pi.
 
-Activity guards count current overlapping work. Wake-ups sample the atomic
-global state, while a separate activity latch ensures a completed burst still
-passes through finalization when an even number of coalesced toggles cancel out.
-All blink modes act on the
-same LED bit, following the `virtual-yubihsm` model; only their schedules differ.
-Unlike the YubiHSM, the YubiKey has no periodic idle blink. While any application is blocked waiting for
-physical presence, the same cut-outs blink until touch, cancellation, or failure
-ends the wait. Every application uses the same measured YubiKey 5 NFC cadence:
-a 384 ms half-period, or approximately 1.30 blinks per second. PIV and OpenPGP
-will reuse this state when those application paths implement touch. General
-FIDO HID report traffic does not drive the activity indication. USB
-suspend and worker shutdown clear the panel and turn off its backlight. Holding
-KEY3 turns the display off and publishes an empty personality, leaving the
-worker powered but absent from USB. Releasing KEY3 republishes the complete
-personality immediately, and the same worker restores the idle image when the
-new generation is bound. To the host and observer this is a spring-loaded eject
-and insertion without a process restart or an added reconnect delay.
+The common `display_backends::indicator` scheduler drives a worker-supplied
+renderer through one logical LED bit. The YubiKey renderer maps that bit to the
+appropriate pair of complete color or monochrome frames; panel selection,
+artwork, logging, and display power remain worker concerns. Each CCID command
+increments a monotonic activity epoch and marks the single command slot active.
+The epoch makes a command that starts and finishes during a synchronous frame
+write visible without retaining a replay queue. Several commands that arrive
+faster than the panel can represent coalesce into one current burst.
+
+Command start produces a visible edge after the previous state has remained
+visible for at least 8 ms. While the command remains active, the LED follows the
+measured 100 ms busy cadence: 67 ms on and 33 ms off. When the command finishes,
+the YubiKey enters one slow on period lasting 1.5 seconds and then remains off.
+A new command cancels that idle period and immediately returns to the busy
+cadence. The worker does not fabricate a USB-insertion flash: normal immediate
+CCID probing is ordinary application activity.
+
+While any application is blocked waiting for physical presence, the same
+cut-outs blink until touch, cancellation, or failure ends the wait. Every
+application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
+approximately 1.30 blinks per second. PIV and OpenPGP will reuse this state when
+those application paths implement touch. General FIDO HID report traffic does
+not drive the activity indication. USB suspend and worker shutdown clear the
+panel and turn off its backlight. Holding KEY3 turns the display off and
+publishes an empty personality, leaving the worker powered but absent from USB.
+Releasing KEY3 republishes the complete personality immediately, and the same
+worker restores the idle image when the new generation is bound. To the host
+and observer this is a spring-loaded eject and insertion without a process
+restart or an added reconnect delay.
 Reconnect notifications are coalesced wakes around the sampled current KEY3
 level, not a replay of edge history. Holding KEY3 at worker startup therefore
 keeps USB absent, and a dropped wake cannot leave the device detached after

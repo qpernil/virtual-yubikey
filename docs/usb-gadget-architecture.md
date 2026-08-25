@@ -390,22 +390,26 @@ This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
 
-Non-empty FIDO HID OUT reports and CCID bulk OUT transfers send non-blocking
-activity hints to a dedicated local-display thread. That thread alternates two
-pre-encoded native ST7789 frames so the YubiKey's cut-out y and NFC arcs blink
-green during USB traffic. An atomic pending flag deliberately coalesces
-activity hints before they enter the non-blocking display command channel:
-display SPI work can never
-delay either USB application, while sustained traffic may still blink as
-enthusiastically as the panel can accept complete frames. USB suspend and worker
-exit clear the display and turn off its backlight.
+Each CCID command updates a shared command-active flag and increments a
+monotonic activity epoch. The device-neutral indicator scheduler in
+`display-backends` samples that state from its dedicated thread and invokes a
+YubiKey renderer through a single `set_indicator(bool)` trait method. The
+renderer selects between two complete, pre-encoded native frames. The scheduler
+therefore has no knowledge of the artwork, backend, or physical display power.
 
-A separate reference-counted physical-presence state blinks for as long as any
-application is blocked waiting for touch. It uses the measured YubiKey 5 NFC
-cadence for every application: a 384 ms half-period, approximately 1.30 blinks
-per second. PIV and OpenPGP can reuse the same scoped state when their touch
-paths are implemented, without teaching the display which protocol requested
-presence.
+The command epoch preserves one visible transition when a complete command fits
+inside a synchronous frame write. Further commands coalesce into the current
+burst instead of accumulating delayed animations. Sustained command processing
+uses a 67 ms on, 33 ms off cadence. On completion the YubiKey retains one slow
+1.5-second on period and then remains off. General FIDO HID traffic does not
+drive this application-activity indicator.
+
+A scoped physical-presence override blinks for as long as an application is
+blocked waiting for touch. It uses the measured YubiKey 5 NFC cadence for every
+application: a 384 ms half-period, approximately 1.30 blinks per second. PIV and
+OpenPGP can reuse the same state when their touch paths are implemented, without
+teaching the scheduler which protocol requested presence. USB suspend and
+worker exit independently clear the display and turn off its backlight.
 
 The ST7789 and buttons share a HAT but not an I/O path. Display frames use SPI;
 GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. Separate
