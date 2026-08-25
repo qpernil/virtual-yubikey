@@ -400,8 +400,8 @@ therefore has no knowledge of the artwork, backend, or physical display power.
 The command epoch preserves one visible transition when a complete command fits
 inside a synchronous frame write. Further commands coalesce into the current
 burst instead of accumulating delayed animations. Each state remains visible
-for at least 10 ms. Sustained command processing uses a 67 ms on, 33 ms off
-cadence. On completion the YubiKey returns to off as soon as the 10 ms visibility
+for at least 5 ms. Sustained command processing uses a 67 ms on, 33 ms off
+cadence. On completion the YubiKey returns to off as soon as the 5 ms visibility
 floor permits. General FIDO HID traffic does not drive this application-activity
 indicator.
 

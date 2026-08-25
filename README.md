@@ -252,9 +252,9 @@ write visible without retaining a replay queue. Several commands that arrive
 faster than the panel can represent coalesce into one current burst.
 
 Command start produces a visible edge after the previous state has remained
-visible for at least 10 ms. While the command remains active, the LED follows the
+visible for at least 5 ms. While the command remains active, the LED follows the
 measured 100 ms busy cadence: 67 ms on and 33 ms off. When the command finishes,
-the YubiKey returns to off as soon as the 10 ms visibility floor permits. The
+the YubiKey returns to off as soon as the 5 ms visibility floor permits. The
 worker does not fabricate a USB-insertion flash: normal immediate CCID probing
 is ordinary application activity.
 
