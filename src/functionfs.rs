@@ -11,13 +11,13 @@ use crate::STOP_REQUESTED;
 #[cfg(target_os = "linux")]
 use std::env;
 #[cfg(target_os = "linux")]
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixDatagram;
 #[cfg(target_os = "linux")]
@@ -34,7 +34,10 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
-use usb_gadget_worker::{EndpointLifecycle, UsbBusEvent};
+use usb_gadget_worker::{
+    replace_file_atomically, EndpointLifecycle, MutationReceipt, PersistenceMode, StatePersistence,
+    StatePersistenceHandle, UsbBusEvent,
+};
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
 
@@ -68,7 +71,11 @@ impl UserPresenceCommand {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> io::Result<()> {
+pub(crate) fn run_worker(
+    serial: u32,
+    display_kind: crate::cli::DisplayKind,
+    persistence_mode: PersistenceMode,
+) -> io::Result<()> {
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -95,6 +102,22 @@ pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> 
         piv_state: state_directory.join(format!("piv-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
+    let fido_persistence = StatePersistence::start(
+        load_fido_state(serial, &storage.fido_state)?,
+        storage.fido_state.clone(),
+        persistence_mode,
+        encode_fido_state,
+        || STOP_REQUESTED.store(true, Ordering::Relaxed),
+    )?;
+    let fido = fido_persistence.handle();
+    let piv_persistence = StatePersistence::start(
+        load_piv_state(serial, &storage.piv_state)?,
+        storage.piv_state.clone(),
+        persistence_mode,
+        encode_piv_state,
+        || STOP_REQUESTED.store(true, Ordering::Relaxed),
+    )?;
+    let piv = piv_persistence.handle();
     let buttons = crate::buttons::Controller::start(
         resources.touch_button,
         resources.reconnect_button,
@@ -148,11 +171,9 @@ pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> 
         let endpoints = Endpoints::from_record(endpoints_record)?;
         STOP_REQUESTED.store(false, Ordering::Relaxed);
         let lifecycle = Arc::new(EndpointLifecycle::new());
-        let fido = load_fido_state(serial, &storage.fido_state)?;
-        let ccid = load_piv_state(serial, &storage.piv_state)?;
         let endpoint_runtime = endpoints.start(
-            fido,
-            ccid,
+            fido.clone(),
+            piv.clone(),
             EndpointServices {
                 serial,
                 storage: &storage,
@@ -185,8 +206,12 @@ pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> 
         );
         lifecycle.stop();
         let runtime_result = endpoint_runtime.shutdown();
+        let fido_flush_result = fido_persistence.flush();
+        let piv_flush_result = piv_persistence.flush();
         let outcome = control_result?;
         runtime_result?;
+        fido_flush_result?;
+        piv_flush_result?;
         match outcome {
             ControlOutcome::Quiesce {
                 request_id,
@@ -216,9 +241,15 @@ pub(crate) fn run_worker(serial: u32, display_kind: crate::cli::DisplayKind) -> 
         }
     })();
     drop(keepalive);
+    let fido_persistence_result = fido_persistence.shutdown();
+    let piv_persistence_result = piv_persistence.shutdown();
     let button_result = buttons.shutdown();
     let display_result = display.shutdown();
-    result.and(button_result).and(display_result)
+    result
+        .and(fido_persistence_result)
+        .and(piv_persistence_result)
+        .and(button_result)
+        .and(display_result)
 }
 
 #[cfg(target_os = "linux")]
@@ -306,7 +337,6 @@ struct EndpointServices<'a> {
 #[cfg(target_os = "linux")]
 struct HidRuntime {
     serial: u32,
-    state_path: PathBuf,
     touch_socket: PathBuf,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
@@ -396,8 +426,8 @@ impl Endpoints {
 
     fn start(
         self,
-        fido: FidoAuthenticator,
-        ccid: crate::ccid::Device,
+        fido: StatePersistenceHandle<FidoAuthenticator>,
+        ccid: StatePersistenceHandle<crate::ccid::Device>,
         services: EndpointServices<'_>,
     ) -> io::Result<EndpointRuntime> {
         let EndpointServices {
@@ -443,20 +473,13 @@ impl Endpoints {
             })?;
 
         let ccid_thread = thread::Builder::new().name("ccid-usb".to_owned()).spawn({
-            let state_path = storage.piv_state.clone();
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
             let lifecycle = Arc::clone(&lifecycle);
             move || {
-                if let Err(error) = serve_ccid(
-                    ccid_out,
-                    ccid_in,
-                    ccid,
-                    &state_path,
-                    clock,
-                    display_activity,
-                    lifecycle,
-                ) {
+                if let Err(error) =
+                    serve_ccid(ccid_out, ccid_in, ccid, clock, display_activity, lifecycle)
+                {
                     diagnostics::log(
                         Level::Info,
                         "ccid",
@@ -471,7 +494,6 @@ impl Endpoints {
         let fido_thread = thread::Builder::new().name("fido-hid".to_owned()).spawn({
             let runtime = HidRuntime {
                 serial,
-                state_path: storage.fido_state.clone(),
                 touch_socket: storage.touch_socket.clone(),
                 clock: keepalive.handle(),
                 display_activity: display_activity.clone(),
@@ -803,8 +825,7 @@ fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
 fn serve_ccid(
     mut output: File,
     mut input: File,
-    mut ccid: crate::ccid::Device,
-    state_path: &Path,
+    ccid: StatePersistenceHandle<crate::ccid::Device>,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
     lifecycle: Arc<EndpointLifecycle>,
@@ -821,12 +842,24 @@ fn serve_ccid(
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
-                    let replies =
-                        ccid.receive_with_keepalives(&request[..length], &clock, |keepalive| {
-                            write_transfer(&mut input, keepalive)
-                        })?;
-                    if ccid.take_piv_persistent_change() {
-                        persist_piv_state(&ccid, state_path)?;
+                    let (replies, mutation) = {
+                        let mut state = ccid
+                            .state()
+                            .lock()
+                            .map_err(|_| io::Error::other("PIV state lock poisoned"))?;
+                        let replies = state.receive_with_keepalives(
+                            &request[..length],
+                            &clock,
+                            |keepalive| write_transfer(&mut input, keepalive),
+                        )?;
+                        let mutation = state
+                            .take_piv_persistent_change()
+                            .then(|| ccid.record_mutation())
+                            .transpose()?;
+                        (replies, mutation)
+                    };
+                    if let Some(mutation) = mutation {
+                        mutation.wait()?;
                     }
                     for reply in replies {
                         write_transfer(&mut input, &reply)?;
@@ -845,12 +878,11 @@ fn serve_ccid(
 fn serve_hid(
     output: File,
     mut input: File,
-    mut fido: FidoAuthenticator,
+    fido: StatePersistenceHandle<FidoAuthenticator>,
     runtime: HidRuntime,
 ) -> io::Result<()> {
     let HidRuntime {
         serial,
-        state_path,
         touch_socket,
         clock,
         display_activity,
@@ -896,7 +928,7 @@ fn serve_hid(
                             report[4]
                         ),
                     );
-                    let mut persistence_error = None;
+                    let mut mutation = None;
                     let mut command_error = None;
                     let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
                     let replies = ctaphid.receive(&report, |request| {
@@ -925,7 +957,14 @@ fn serve_hid(
                                 format_args!("algorithms={algorithms:?}"),
                             );
                         }
-                        if let Some(algorithm) = fido.selected_make_credential_algorithm(request) {
+                        let selected_algorithm = match fido.state().lock() {
+                            Ok(state) => state.selected_make_credential_algorithm(request),
+                            Err(_) => {
+                                command_error = Some(io::Error::other("FIDO state lock poisoned"));
+                                return vec![0x7f];
+                            }
+                        };
+                        if let Some(algorithm) = selected_algorithm {
                             diagnostics::log(
                                 Level::Info,
                                 "ctap2",
@@ -946,10 +985,13 @@ fn serve_hid(
                                 &clock,
                                 &display_activity,
                             ) {
-                                Ok(true) => match exchange_fido_with_keepalives(
-                                    &mut input, receiver, &mut fido, request, channel, true, &clock,
+                                Ok(true) => match exchange_persistent_fido_with_keepalives(
+                                    &fido, &mut input, receiver, request, channel, true, &clock,
                                 ) {
-                                    Ok(response) => response,
+                                    Ok((response, receipt)) => {
+                                        mutation = receipt;
+                                        response
+                                    }
                                     Err(error) => {
                                         command_error = Some(error);
                                         vec![0x7f]
@@ -962,21 +1004,19 @@ fn serve_hid(
                                 }
                             }
                         } else {
-                            match exchange_fido_with_keepalives(
-                                &mut input, receiver, &mut fido, request, channel, false, &clock,
+                            match exchange_persistent_fido_with_keepalives(
+                                &fido, &mut input, receiver, request, channel, false, &clock,
                             ) {
-                                Ok(response) => response,
+                                Ok((response, receipt)) => {
+                                    mutation = receipt;
+                                    response
+                                }
                                 Err(error) => {
                                     command_error = Some(error);
                                     vec![0x7f]
                                 }
                             }
                         };
-                        if fido.take_persistent_change() {
-                            if let Err(error) = persist_fido_state(&fido, &state_path) {
-                                persistence_error = Some(error);
-                            }
-                        }
                         let status = response.first().copied().unwrap_or_default();
                         diagnostics::log(
                             Level::Info,
@@ -994,8 +1034,8 @@ fn serve_hid(
                         );
                         response
                     });
-                    if let Some(error) = persistence_error {
-                        return Err(error);
+                    if let Some(mutation) = mutation {
+                        mutation.wait()?;
                     }
                     if let Some(error) = command_error {
                         return Err(error);
@@ -1062,6 +1102,36 @@ impl HidReader {
             .join()
             .map_err(|_| io::Error::other("FIDO OUT reader thread panicked"))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_persistent_fido_with_keepalives(
+    fido: &StatePersistenceHandle<FidoAuthenticator>,
+    input: &mut File,
+    reports: &Receiver<io::Result<Vec<u8>>>,
+    request: &[u8],
+    channel: u32,
+    follows_user_presence: bool,
+    clock: &crate::keepalive::Handle,
+) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
+    let mut state = fido
+        .state()
+        .lock()
+        .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
+    let response = exchange_fido_with_keepalives(
+        input,
+        reports,
+        &mut state,
+        request,
+        channel,
+        follows_user_presence,
+        clock,
+    )?;
+    let mutation = state
+        .take_persistent_change()
+        .then(|| fido.record_mutation())
+        .transpose()?;
+    Ok((response, mutation))
 }
 
 #[cfg(target_os = "linux")]
@@ -1314,18 +1384,20 @@ fn load_fido_state(serial: u32, path: &Path) -> io::Result<FidoAuthenticator> {
             )
         }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Ok(FidoAuthenticator::for_serial(serial))
+            let fido = FidoAuthenticator::for_serial(serial);
+            let encoded = encode_fido_state(&fido)?;
+            replace_file_atomically(path, &encoded)
+                .map_err(|error| with_context(error, "create initial persistent FIDO state"))?;
+            Ok(fido)
         }
         Err(error) => Err(with_context(error, "read persistent FIDO state")),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn persist_fido_state(fido: &FidoAuthenticator, path: &Path) -> io::Result<()> {
-    let encoded = fido
-        .persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent FIDO state: {error}")))?;
-    persist_state(&encoded, path, "FIDO")
+fn encode_fido_state(fido: &FidoAuthenticator) -> io::Result<Vec<u8>> {
+    fido.persistent_state()
+        .map_err(|error| io::Error::other(format!("encode persistent FIDO state: {error}")))
 }
 
 #[cfg(target_os = "linux")]
@@ -1353,55 +1425,20 @@ fn load_piv_state(serial: u32, path: &Path) -> io::Result<crate::ccid::Device> {
                 "state_loaded",
                 format_args!("source=factory"),
             );
-            Ok(crate::ccid::Device::new(serial))
+            let ccid = crate::ccid::Device::new(serial);
+            let encoded = encode_piv_state(&ccid)?;
+            replace_file_atomically(path, &encoded)
+                .map_err(|error| with_context(error, "create initial persistent PIV state"))?;
+            Ok(ccid)
         }
         Err(error) => Err(with_context(error, "read persistent PIV state")),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn persist_piv_state(ccid: &crate::ccid::Device, path: &Path) -> io::Result<()> {
-    let encoded = ccid
-        .piv_persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))?;
-    persist_state(&encoded, path, "PIV")?;
-    diagnostics::log(
-        Level::Info,
-        "piv",
-        "state_persisted",
-        format_args!("bytes={}", encoded.len()),
-    );
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn persist_state(encoded: &[u8], path: &Path, application: &str) -> io::Result<()> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|error| with_context(error, &format!("create temporary {application} state")))?;
-    file.write_all(encoded)
-        .map_err(|error| with_context(error, &format!("write temporary {application} state")))?;
-    file.sync_all()
-        .map_err(|error| with_context(error, &format!("sync temporary {application} state")))?;
-    drop(file);
-    fs::rename(&temporary, path)
-        .map_err(|error| with_context(error, &format!("replace persistent {application} state")))?;
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::other(format!(
-            "persistent {application} state has no parent directory"
-        ))
-    })?;
-    File::open(parent)?.sync_all().map_err(|error| {
-        with_context(
-            error,
-            &format!("sync persistent {application} state directory"),
-        )
-    })
+fn encode_piv_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
+    ccid.piv_persistent_state()
+        .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))
 }
 
 #[cfg(target_os = "linux")]
