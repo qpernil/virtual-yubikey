@@ -531,7 +531,7 @@ impl PivApplet {
             return Err("persistent PIV state management key has the wrong length");
         }
         let management_touch_policy = management_touch_policy
-            .filter(|policy| valid_touch_policy(*policy))
+            .filter(|policy| valid_management_touch_policy(*policy))
             .ok_or("persistent PIV state has no valid management touch policy")?;
         Ok(Self {
             serial,
@@ -693,6 +693,12 @@ impl PivApplet {
             INS_VERIFY if command.p1 == 0 && command.p2 == REFERENCE_PIN => {
                 self.verify_pin(command.data)
             }
+            INS_VERIFY
+                if command.p1 == 0xff && command.p2 == REFERENCE_PIN && command.data.is_empty() =>
+            {
+                self.pin_verified = false;
+                ResponseApdu::success(Vec::new())
+            }
             INS_CHANGE_REFERENCE if command.p1 == 0 => {
                 self.change_reference(command.p2, command.data)
             }
@@ -732,7 +738,9 @@ impl PivApplet {
             REFERENCE_MANAGEMENT_KEY => {
                 push_tlv(&mut data, 0x01, &[self.management_algorithm as u8]);
                 push_tlv(&mut data, 0x02, &[0, self.management_touch_policy]);
-                push_tlv(&mut data, 0x05, &[1]);
+                let is_default = self.management_algorithm == ManagementAlgorithm::Aes192
+                    && self.management_key.as_slice() == FACTORY_MANAGEMENT_KEY;
+                push_tlv(&mut data, 0x05, &[u8::from(is_default)]);
             }
             slot if valid_key_slot(slot) => {
                 let Some(key) = self.keys.get(&slot) else {
@@ -1076,11 +1084,6 @@ impl PivApplet {
                     TOUCH_POLICY_ALWAYS => {
                         return PivExchange::PresenceRequired(UserPresencePolicy::Always)
                     }
-                    TOUCH_POLICY_CACHED => {
-                        return PivExchange::PresenceRequired(UserPresencePolicy::Cached(
-                            PIV_TOUCH_CACHE_DURATION,
-                        ))
-                    }
                     _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
                 }
             }
@@ -1248,8 +1251,11 @@ impl PivApplet {
     }
 
     fn set_management_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
-        if command.p1 != 0xff || !matches!(command.p2, 0xfd..=0xff) {
+        if command.p1 != 0xff {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        if !matches!(command.p2, 0xfe | 0xff) {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
         if !self.management_authenticated {
             return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
@@ -1278,7 +1284,6 @@ impl PivApplet {
         self.management_touch_policy = match command.p2 {
             0xff => TOUCH_POLICY_NEVER,
             0xfe => TOUCH_POLICY_ALWAYS,
-            0xfd => TOUCH_POLICY_CACHED,
             _ => unreachable!(),
         };
         self.management_challenge = None;
@@ -1439,6 +1444,10 @@ fn valid_touch_policy(policy: u8) -> bool {
     matches!(policy, 1..=3)
 }
 
+fn valid_management_touch_policy(policy: u8) -> bool {
+    matches!(policy, TOUCH_POLICY_NEVER | TOUCH_POLICY_ALWAYS)
+}
+
 fn unique_byte_field(fields: &[(u32, &[u8])], tag: u32) -> Option<u8> {
     let [value] = unique_field(fields, tag)? else {
         return None;
@@ -1450,7 +1459,6 @@ fn optional_policy(fields: &[(u32, &[u8])], tag: u32, default: u8) -> Option<u8>
     match fields.iter().filter(|(field, _)| *field == tag).count() {
         0 => Some(default),
         1 => match unique_byte_field(fields, tag)? {
-            0 => Some(default),
             policy
                 if (tag == 0xaa && valid_pin_policy(policy))
                     || (tag == 0xab && valid_touch_policy(policy)) =>
@@ -1944,6 +1952,54 @@ mod tests {
             decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x86),
             Some(p384_point)
         );
+    }
+
+    #[test]
+    fn omitted_policy_tlvs_use_slot_defaults_and_explicit_policy_zero_is_invalid() {
+        let mut piv = PivApplet::new(22, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let request = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]));
+        for (slot, expected_pin) in [
+            (0x9a, PIN_POLICY_ONCE),
+            (0x9c, PIN_POLICY_ALWAYS),
+            (0x9d, PIN_POLICY_ONCE),
+            (0x9e, PIN_POLICY_NEVER),
+            (0x82, PIN_POLICY_ONCE),
+        ] {
+            assert_eq!(
+                piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, slot, &request))
+                    .status,
+                0x9000
+            );
+            assert_eq!(piv.keys[&slot].pin_policy, expected_pin);
+            assert_eq!(piv.keys[&slot].touch_policy, TOUCH_POLICY_NEVER);
+        }
+
+        for (slot, policy_tag) in [(0x83, 0xaa), (0x84, 0xab)] {
+            let explicit_default = encode_tlv(
+                0xac,
+                &[
+                    encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]),
+                    encode_tlv(policy_tag, &[0]),
+                ]
+                .concat(),
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    slot,
+                    &explicit_default,
+                ))
+                .status,
+                STATUS_INCORRECT_DATA
+            );
+            assert!(!piv.keys.contains_key(&slot));
+        }
     }
 
     #[test]
@@ -2558,6 +2614,57 @@ mod tests {
     }
 
     #[test]
+    fn pin_deauthentication_clears_pin_once_but_not_management_authentication() {
+        let mut piv = PivApplet::new(21, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]));
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x82, &generate))
+                .status,
+            0x9000
+        );
+        assert_eq!(piv.keys[&0x82].pin_policy, PIN_POLICY_ONCE);
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+
+        let request = signing_request(&[0x31; 32]);
+        let sign = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x82,
+            &request,
+        );
+        assert_eq!(piv.transmit(&sign).status, 0x9000);
+        assert_eq!(piv.transmit(&sign).status, 0x9000);
+        assert!(piv.pin_verified);
+        assert!(piv.management_authenticated);
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0xff, REFERENCE_PIN, &[]))
+                .status,
+            0x9000
+        );
+        assert!(!piv.pin_verified);
+        assert!(piv.management_authenticated);
+        assert_eq!(piv.transmit(&sign).status, STATUS_SECURITY_NOT_SATISFIED);
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        assert_eq!(piv.transmit(&sign).status, 0x9000);
+        assert_eq!(piv.transmit(&sign).status, 0x9000);
+    }
+
+    #[test]
     fn sets_retry_limits_only_after_both_required_authentications() {
         let mut piv = PivApplet::new(17, [5, 8, 0]);
         assert_eq!(
@@ -2661,6 +2768,11 @@ mod tests {
         assert_eq!(
             piv.transmit(&command(INS_SET_MANAGEMENT_KEY, 0xff, 0xfd, &set_key))
                 .status,
+            STATUS_INCORRECT_DATA
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_SET_MANAGEMENT_KEY, 0xff, 0xfe, &set_key))
+                .status,
             0x9000
         );
         assert!(piv.take_persistent_change());
@@ -2672,8 +2784,9 @@ mod tests {
         );
         assert_eq!(
             unique_field(&metadata, 0x02),
-            Some(&[0, TOUCH_POLICY_CACHED][..])
+            Some(&[0, TOUCH_POLICY_ALWAYS][..])
         );
+        assert_eq!(unique_field(&metadata, 0x05), Some(&[0][..]));
 
         piv.reset_connection();
         let witness = encode_tlv(0x7c, &encode_tlv(0x80, &[]));
@@ -2685,8 +2798,7 @@ mod tests {
         );
         assert!(matches!(
             piv.exchange(&authenticate, PresenceAuthorization::Absent),
-            PivExchange::PresenceRequired(UserPresencePolicy::Cached(duration))
-                if duration == PIV_TOUCH_CACHE_DURATION
+            PivExchange::PresenceRequired(UserPresencePolicy::Always)
         ));
         assert_eq!(
             complete(piv.exchange(&authenticate, PresenceAuthorization::Granted)).status,
@@ -2699,7 +2811,11 @@ mod tests {
             restored.transmit(&command(INS_GET_METADATA, 0, REFERENCE_MANAGEMENT_KEY, &[]));
         assert_eq!(
             unique_field(&decode_tlvs(&metadata.data).unwrap(), 0x02),
-            Some(&[0, TOUCH_POLICY_CACHED][..])
+            Some(&[0, TOUCH_POLICY_ALWAYS][..])
+        );
+        assert_eq!(
+            unique_field(&decode_tlvs(&metadata.data).unwrap(), 0x05),
+            Some(&[0][..])
         );
     }
 

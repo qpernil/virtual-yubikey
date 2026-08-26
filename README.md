@@ -334,12 +334,21 @@ virtual-yubikey-touch
 
 PIV private-key operations honor the key policy stored at generation or import:
 `Never` proceeds immediately, `Always` requires a fresh touch, and `Cached`
-reuses a PIV touch for 15 seconds. The management-key policy is likewise stored,
-reported by metadata, persisted, and enforced when management authentication
-begins. Its `0xff`, `0xfe`, and `0xfd` encodings select `Never`, `Always`, and
-`Cached`. The cache uses monotonic time and is scoped to PIV, so a FIDO touch
-cannot authorize a PIV operation. PIV waits use ordinary CCID time-extension
-frames while the shared presence service waits for the same joystick or helper.
+reuses a PIV touch for 15 seconds across all PIV key slots. When policy TLVs are
+omitted, touch defaults to `Never`; PIN defaults to `Always` for 9C, `Never` for
+9E, and `Once` for the other private-key slots. An explicit zero-valued PIN or
+touch policy is invalid rather than another encoding of omission. PIN `Once` remains
+verified for the card session with no timer; `VERIFY FF/80` clears that PIN
+state without clearing management-key authentication.
+
+The management-key touch policy is likewise stored, reported by metadata,
+persisted, and enforced when management authentication begins, but it supports
+only `Never` (`0xff`) and `Always` (`0xfe`); the candidate `Cached` encoding
+`0xfd` is rejected. A successful management authentication continues to
+authorize administrative commands for the connection. The touch cache uses
+monotonic time and is scoped to PIV, so a FIDO touch cannot authorize a PIV
+operation. PIV waits use ordinary CCID time-extension frames while the shared
+presence service waits for the same joystick or helper.
 
 Holding display-HAT KEY3 requests a physical-style USB ejection. The worker
 sends an empty `Configure` record and remains ejected until release; it then
