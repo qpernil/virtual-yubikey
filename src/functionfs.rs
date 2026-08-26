@@ -35,8 +35,8 @@ use std::{
 };
 #[cfg(target_os = "linux")]
 use usb_gadget_worker::{
-    replace_file_atomically, EndpointLifecycle, MutationReceipt, PersistenceMode, StatePersistence,
-    StatePersistenceHandle, UsbBusEvent,
+    replace_file_atomically, EndpointLifecycle, MutationReceipt, PersistenceMode, StateLock,
+    StatePersistence, StatePersistenceHandle, UsbBusEvent,
 };
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
@@ -90,12 +90,13 @@ pub(crate) fn run_worker(
     STOP_REQUESTED.store(false, Ordering::Relaxed);
     let control = Channel::from_fixed_descriptor();
     let resources = InitialResources::parse(validate_initial_resources(control.receive()?)?)?;
+    let state_directory = required_path(STATE_DIRECTORY_ENV)?;
+    let _state_lock = StateLock::acquire(state_directory.join(format!("yubikey-{serial}.lock")))?;
     let display = crate::display::Controller::start(
         resources.display_spi,
         resources.display_control,
         display_kind,
     )?;
-    let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
         fido_state: state_directory.join(format!("fido-{serial}.cbor")),
