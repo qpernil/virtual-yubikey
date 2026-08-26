@@ -4,19 +4,18 @@ use crate::{
     crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
     FidoConfiguration, FidoCredentialAlgorithm,
 };
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use minicbor::Encoder;
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
-use sha2::{Digest, Sha256};
 #[cfg(test)]
 use software_key_core::post_quantum;
-use software_key_core::software_signing::{
-    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
-};
+use software_key_core::software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningKey};
 use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
+
+fn sha256(data: &[u8]) -> Vec<u8> {
+    software_key_core::digest::HashAlgorithm::Sha256.digest(data)
+}
 
 const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
 const AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
@@ -169,44 +168,17 @@ impl CredentialPrivateKey {
     }
 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+        let algorithm = self.algorithm.software_signing_algorithm();
         let signature = self
             .key
-            .sign_message(self.algorithm.software_signing_algorithm(), message)
+            .sign_message(algorithm, message)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        match self.algorithm.software_signing_algorithm() {
-            SoftwareSigningAlgorithm::EcdsaP256Sha256 => {
-                p256::ecdsa::Signature::from_slice(signature.as_bytes())
-                    .map(|signature| signature.to_der().as_bytes().to_vec())
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
-            }
-            SoftwareSigningAlgorithm::EcdsaP384Sha384 => {
-                p384::ecdsa::Signature::from_slice(signature.as_bytes())
-                    .map(|signature| signature.to_der().as_bytes().to_vec())
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
-            }
-            SoftwareSigningAlgorithm::EcdsaP521Sha512 => {
-                p521::ecdsa::Signature::from_slice(signature.as_bytes())
-                    .map(|signature| signature.to_der().as_bytes().to_vec())
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
-            }
-            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => {
-                k256::ecdsa::Signature::from_slice(signature.as_bytes())
-                    .map(|signature| signature.to_der().as_bytes().to_vec())
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
-            }
-            SoftwareSigningAlgorithm::Ed25519 | SoftwareSigningAlgorithm::MlDsa(_) => {
-                Ok(signature.into_bytes())
-            }
-            SoftwareSigningAlgorithm::RsaPssSha256
-            | SoftwareSigningAlgorithm::RsaPssSha384
-            | SoftwareSigningAlgorithm::RsaPssSha512
-            | SoftwareSigningAlgorithm::RsaPkcs1Sha256
-            | SoftwareSigningAlgorithm::RsaPkcs1Sha384
-            | SoftwareSigningAlgorithm::RsaPkcs1Sha512 => Ok(signature.into_bytes()),
-            SoftwareSigningAlgorithm::EcdsaP224Sha224
-            | SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256
-            | SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384
-            | SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512 => Err(CKR_DEVICE_ERROR.into()),
+        if let Some(curve) = algorithm.ec_curve() {
+            signature
+                .to_ecdsa_der(curve)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+        } else {
+            Ok(signature.into_bytes())
         }
     }
 }
@@ -1084,7 +1056,7 @@ fn credential_management_rp_response(
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(4)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bytes(&Sha256::digest(credential.rp_id.as_bytes()))
+        .bytes(&sha256(credential.rp_id.as_bytes()))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     if let Some(total) = total {
         Encoder::new(&mut response)
@@ -1299,7 +1271,7 @@ fn authenticator_credential_management(
                 .enumerate()
                 .filter(|(_, credential)| {
                     credential.discoverable
-                        && rp_id_hash == Sha256::digest(credential.rp_id.as_bytes()).as_slice()
+                        && rp_id_hash == sha256(credential.rp_id.as_bytes()).as_slice()
                 })
                 .map(|(index, _)| index)
                 .collect();
@@ -1475,7 +1447,7 @@ fn authenticator_data(
     counter: u32,
     user_verified: bool,
 ) -> Result<Vec<u8>, Error> {
-    let mut data = Sha256::digest(rp_id.as_bytes()).to_vec();
+    let mut data = sha256(rp_id.as_bytes());
     let mut flags = 0x41;
     if user_verified {
         flags |= 0x04;
@@ -1752,7 +1724,7 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
             .bytes(&signature)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        let mut auth_data = Sha256::digest(credential.rp_id.as_bytes()).to_vec();
+        let mut auth_data = sha256(credential.rp_id.as_bytes());
         auth_data.push(0x85);
         auth_data.extend_from_slice(&1_u32.to_be_bytes());
         auth_data.extend_from_slice(&extensions);
@@ -1817,7 +1789,7 @@ fn standard_assertion_response(
     let include_user = credential.discoverable;
     let user_fields = if state.assertion_user_verified { 3 } else { 1 };
     credential.counter = credential.counter.saturating_add(1);
-    let mut auth_data = Sha256::digest(credential.rp_id.as_bytes()).to_vec();
+    let mut auth_data = sha256(credential.rp_id.as_bytes());
     auth_data.push(if state.assertion_user_verified {
         0x05
     } else {
@@ -1995,10 +1967,18 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
 }
 
 fn encrypted_device_identifier(state: &FidoState) -> Result<Vec<u8>, Error> {
-    let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), state.pin_uv_auth_token.as_ref());
     let mut key = Zeroizing::new([0u8; 16]);
-    hkdf.expand(b"encIdentifier", key.as_mut())
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let derived = software_key_core::digest::hkdf(
+        software_key_core::digest::HashAlgorithm::Sha256,
+        true,
+        true,
+        state.pin_uv_auth_token.as_ref(),
+        Some(&[0u8; 32]),
+        b"encIdentifier",
+        key.len(),
+    )
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    key.copy_from_slice(&derived);
     let mut iv = [0u8; AES_BLOCK_SIZE];
     getrandom::fill(&mut iv).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     let ciphertext = aes_cbc(
@@ -2282,16 +2262,31 @@ fn shared_secret(
     let peer = peer.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
     let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
     match protocol {
-        1 => Ok(Zeroizing::new(
-            Sha256::digest(z.raw_secret_bytes()).to_vec(),
-        )),
+        1 => Ok(Zeroizing::new(sha256(z.raw_secret_bytes()))),
         2 => {
-            let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.raw_secret_bytes().as_ref());
             let mut output = Zeroizing::new(vec![0u8; 64]);
-            hkdf.expand(b"CTAP2 HMAC key", &mut output[..32])
-                .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
-            hkdf.expand(b"CTAP2 AES key", &mut output[32..])
-                .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
+            let hmac_key = software_key_core::digest::hkdf(
+                software_key_core::digest::HashAlgorithm::Sha256,
+                true,
+                true,
+                z.raw_secret_bytes().as_ref(),
+                Some(&[0u8; 32]),
+                b"CTAP2 HMAC key",
+                32,
+            )
+            .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
+            let aes_key = software_key_core::digest::hkdf(
+                software_key_core::digest::HashAlgorithm::Sha256,
+                true,
+                true,
+                z.raw_secret_bytes().as_ref(),
+                Some(&[0u8; 32]),
+                b"CTAP2 AES key",
+                32,
+            )
+            .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
+            output[..32].copy_from_slice(&hmac_key);
+            output[32..].copy_from_slice(&aes_key);
             Ok(output)
         }
         _ => Err(CTAP2_ERR_MISSING_PARAMETER),
@@ -2378,11 +2373,13 @@ fn authenticate(protocol: u8, key: &[u8], message: &[u8], supplied: Option<&[u8]
     let Some(supplied) = supplied else {
         return false;
     };
-    let Ok(mut mac) = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(key) else {
+    let Ok(output) = software_key_core::digest::hmac(
+        software_key_core::digest::HashAlgorithm::Sha256,
+        key,
+        message,
+    ) else {
         return false;
     };
-    mac.update(message);
-    let output = mac.finalize().into_bytes();
     let expected = match protocol {
         1 => &output[..16],
         2 => output.as_slice(),
@@ -2408,7 +2405,7 @@ fn pin_hash_matches(protocol: u8, shared: &[u8], encrypted: &[u8], pin: &[u8]) -
     let Ok(mut supplied) = decrypt(protocol, shared, encrypted) else {
         return false;
     };
-    let expected = Sha256::digest(pin);
+    let expected = sha256(pin);
     let matches = supplied.len() == 16 && bool::from(supplied.as_slice().ct_eq(&expected[..16]));
     supplied.zeroize();
     matches
@@ -2460,9 +2457,19 @@ mod tests {
         let encrypted = encrypted_device_identifier(&state).unwrap();
         assert_eq!(encrypted.len(), AES_BLOCK_SIZE * 2);
 
-        let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), state.pin_uv_auth_token.as_ref());
         let mut key = [0u8; 16];
-        hkdf.expand(b"encIdentifier", &mut key).unwrap();
+        key.copy_from_slice(
+            &software_key_core::digest::hkdf(
+                software_key_core::digest::HashAlgorithm::Sha256,
+                true,
+                true,
+                state.pin_uv_auth_token.as_ref(),
+                Some(&[0u8; 32]),
+                b"encIdentifier",
+                16,
+            )
+            .unwrap(),
+        );
         let decrypted = aes_cbc(
             &key,
             &encrypted[..AES_BLOCK_SIZE],
@@ -2766,7 +2773,7 @@ mod tests {
             .unwrap()
             .u8(1)
             .unwrap()
-            .bytes(&Sha256::digest(b"one.example"))
+            .bytes(&sha256(b"one.example"))
             .unwrap();
         assert_eq!(
             exchange(&mut state, &management_request(4, Some(&parameters)))[0],
@@ -2889,7 +2896,7 @@ mod tests {
             .bytes(CONTEXT)
             .unwrap();
 
-        let digest: [u8; 32] = Sha256::digest(b"virtual-yubikey previewSign").into();
+        let digest: [u8; 32] = sha256(b"virtual-yubikey previewSign").try_into().unwrap();
         let mut assertion = vec![AUTHENTICATOR_GET_ASSERTION];
         Encoder::new(&mut assertion)
             .map(6)
@@ -2957,9 +2964,12 @@ mod tests {
     }
 
     fn pin_auth(message: &[u8]) -> Vec<u8> {
-        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&[0x5a; 32]).unwrap();
-        mac.update(message);
-        mac.finalize().into_bytes().to_vec()
+        software_key_core::digest::hmac(
+            software_key_core::digest::HashAlgorithm::Sha256,
+            &[0x5a; 32],
+            message,
+        )
+        .unwrap()
     }
 
     fn create_standard_credential(state: &mut FidoState, rp_id: &str, marker: u8) -> Vec<u8> {
