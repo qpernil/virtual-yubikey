@@ -6,8 +6,10 @@
 
 mod crypto;
 mod fido;
+mod hsmauth;
 mod openpgp;
 mod piv;
+mod presence;
 mod preview_sign;
 use software_key_core::{
     post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
@@ -16,6 +18,7 @@ use std::time::Duration;
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+pub use hsmauth::HSMAUTH_AID;
 pub use openpgp::OPENPGP_AID;
 pub use piv::PIV_AID;
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
@@ -209,10 +212,12 @@ const CAPABILITY_CCID: u16 = 0x0004;
 const CAPABILITY_FIDO2: u16 = 0x0200;
 const CAPABILITY_OPENPGP: u16 = 0x0008;
 const CAPABILITY_PIV: u16 = 0x0010;
+const CAPABILITY_HSMAUTH: u16 = 0x0100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
     Management,
+    HsmAuth,
     OpenPgp,
     Piv,
     Fido2,
@@ -222,6 +227,7 @@ impl Applet {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Management => "management",
+            Self::HsmAuth => "hsmauth",
             Self::OpenPgp => "openpgp",
             Self::Piv => "piv",
             Self::Fido2 => "fido2",
@@ -232,6 +238,7 @@ impl Applet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AppletConfiguration {
     pub management: bool,
+    pub hsmauth: bool,
     pub openpgp: bool,
     pub piv: bool,
     pub fido2: bool,
@@ -241,6 +248,7 @@ impl AppletConfiguration {
     pub const fn yubikey_5_8_preview_sign() -> Self {
         Self {
             management: true,
+            hsmauth: true,
             // The OpenPGP implementation is currently only a transport test
             // fixture. Do not advertise or select it on the real USB profile.
             openpgp: false,
@@ -252,6 +260,7 @@ impl AppletConfiguration {
     pub const fn contains(self, applet: Applet) -> bool {
         match applet {
             Applet::Management => self.management,
+            Applet::HsmAuth => self.hsmauth,
             Applet::OpenPgp => self.openpgp,
             Applet::Piv => self.piv,
             Applet::Fido2 => self.fido2,
@@ -259,15 +268,16 @@ impl AppletConfiguration {
     }
 
     pub const fn usb_capabilities(self) -> u16 {
-        let ccid = if self.management || self.openpgp || self.piv || self.fido2 {
+        let ccid = if self.management || self.hsmauth || self.openpgp || self.piv || self.fido2 {
             CAPABILITY_CCID
         } else {
             0
         };
         let openpgp = if self.openpgp { CAPABILITY_OPENPGP } else { 0 };
         let piv = if self.piv { CAPABILITY_PIV } else { 0 };
+        let hsmauth = if self.hsmauth { CAPABILITY_HSMAUTH } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | openpgp | piv | fido2
+        ccid | openpgp | piv | hsmauth | fido2
     }
 }
 
@@ -477,10 +487,57 @@ impl Default for FidoAuthenticator {
 pub struct VirtualYubiKey {
     profile: DeviceProfile,
     selected: Option<Applet>,
-    chained_command: Vec<u8>,
+    chained_command: Option<ChainedCommand>,
+    presence_command: Option<PresenceCommand>,
     pending_response: Vec<u8>,
     piv: piv::PivApplet,
+    hsmauth: hsmauth::HsmAuthApplet,
     fido: FidoAuthenticator,
+}
+
+#[derive(Debug)]
+struct OwnedCommandApdu {
+    cla: u8,
+    ins: u8,
+    p1: u8,
+    p2: u8,
+    data: Vec<u8>,
+    le: Option<u32>,
+}
+
+impl OwnedCommandApdu {
+    fn borrowed(&self) -> CommandApdu<'_> {
+        CommandApdu {
+            cla: self.cla,
+            ins: self.ins,
+            p1: self.p1,
+            p2: self.p2,
+            data: &self.data,
+            le: self.le,
+        }
+    }
+
+    fn matches(&self, command: &CommandApdu<'_>) -> bool {
+        self.cla == command.cla
+            && self.ins == command.ins
+            && self.p1 == command.p1
+            && self.p2 == command.p2
+            && self.data == command.data
+            && self.le == command.le
+    }
+}
+
+#[derive(Debug)]
+struct ChainedCommand {
+    selected: Option<Applet>,
+    command: OwnedCommandApdu,
+}
+
+#[derive(Debug)]
+struct PresenceCommand {
+    selected: Option<Applet>,
+    command: OwnedCommandApdu,
+    final_fragment: OwnedCommandApdu,
 }
 
 impl VirtualYubiKey {
@@ -494,25 +551,40 @@ impl VirtualYubiKey {
     ) -> Self {
         let fido = FidoAuthenticator::with_configuration(profile.serial, configuration);
         let piv = piv::PivApplet::new(profile.serial, profile.firmware);
-        Self::with_applets(profile, piv, fido)
+        let hsmauth = hsmauth::HsmAuthApplet::new(profile.serial, profile.firmware);
+        Self::with_applets(profile, piv, hsmauth, fido)
     }
 
-    pub fn from_piv_persistent_state(
+    pub fn from_persistent_states(
         profile: DeviceProfile,
-        encoded: &[u8],
+        piv_encoded: &[u8],
+        hsmauth_encoded: &[u8],
     ) -> Result<Self, &'static str> {
         let fido = FidoAuthenticator::for_serial(profile.serial);
-        let piv = piv::PivApplet::from_persistent_state(profile.serial, profile.firmware, encoded)?;
-        Ok(Self::with_applets(profile, piv, fido))
+        let piv =
+            piv::PivApplet::from_persistent_state(profile.serial, profile.firmware, piv_encoded)?;
+        let hsmauth = hsmauth::HsmAuthApplet::from_persistent_state(
+            profile.serial,
+            profile.firmware,
+            hsmauth_encoded,
+        )?;
+        Ok(Self::with_applets(profile, piv, hsmauth, fido))
     }
 
-    fn with_applets(profile: DeviceProfile, piv: piv::PivApplet, fido: FidoAuthenticator) -> Self {
+    fn with_applets(
+        profile: DeviceProfile,
+        piv: piv::PivApplet,
+        hsmauth: hsmauth::HsmAuthApplet,
+        fido: FidoAuthenticator,
+    ) -> Self {
         Self {
             profile,
             selected: None,
-            chained_command: Vec::new(),
+            chained_command: None,
+            presence_command: None,
             pending_response: Vec::new(),
             piv,
+            hsmauth,
             fido,
         }
     }
@@ -521,8 +593,16 @@ impl VirtualYubiKey {
         self.piv.persistent_state()
     }
 
+    pub fn hsmauth_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.hsmauth.persistent_state()
+    }
+
     pub fn take_piv_persistent_change(&mut self) -> bool {
         self.piv.take_persistent_change()
+    }
+
+    pub fn take_hsmauth_persistent_change(&mut self) -> bool {
+        self.hsmauth.take_persistent_change()
     }
 
     pub fn profile(&self) -> &DeviceProfile {
@@ -537,8 +617,9 @@ impl VirtualYubiKey {
         if aid.is_empty() {
             return None;
         }
-        let candidates: [(Applet, &[u8]); 4] = [
+        let candidates: [(Applet, &[u8]); 5] = [
             (Applet::Management, &MANAGEMENT_AID),
+            (Applet::HsmAuth, &HSMAUTH_AID),
             (Applet::OpenPgp, &OPENPGP_AID),
             (Applet::Piv, &PIV_AID),
             (Applet::Fido2, &FIDO2_AID),
@@ -560,9 +641,11 @@ impl VirtualYubiKey {
 
     pub fn reset(&mut self) {
         self.selected = None;
-        self.chained_command.clear();
+        self.chained_command = None;
+        self.presence_command = None;
         self.pending_response.clear();
         self.piv.reset_connection();
+        self.hsmauth.reset_connection();
         self.fido.reset_connection();
     }
 
@@ -579,30 +662,156 @@ impl VirtualYubiKey {
             Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
         };
 
+        if presence == PresenceAuthorization::Granted {
+            let Some(pending) = self.presence_command.take() else {
+                return ApduExchange::Complete(ResponseApdu::status(0x6985).encode());
+            };
+            if pending.selected != self.selected || !pending.final_fragment.matches(&command) {
+                return ApduExchange::Complete(ResponseApdu::status(0x6985).encode());
+            }
+            return self.dispatch_apdu(&pending.command.borrowed(), presence);
+        }
+        self.presence_command = None;
+
         if command.cla == 0 && command.ins == INS_GET_RESPONSE {
             return ApduExchange::Complete(self.take_response(command.le).encode());
         }
+        self.pending_response.clear();
 
         if command.ins == INS_SELECT && command.p1 == 0x04 {
             return ApduExchange::Complete(self.select(command.data).encode());
         }
 
-        match self.selected {
-            Some(Applet::Management) => ApduExchange::Complete(self.management(&command).encode()),
-            Some(Applet::OpenPgp) => ApduExchange::Complete(openpgp::transmit(&command).encode()),
-            Some(Applet::Piv) => match self.piv.exchange(&command, presence) {
-                piv::PivExchange::Complete(response) => ApduExchange::Complete(response.encode()),
-                piv::PivExchange::PresenceRequired(policy) => {
-                    ApduExchange::PresenceRequired(policy)
+        let final_fragment = OwnedCommandApdu {
+            cla: command.cla,
+            ins: command.ins,
+            p1: command.p1,
+            p2: command.p2,
+            data: command.data.to_vec(),
+            le: command.le,
+        };
+        let command = match self.reassemble_command(command) {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                return ApduExchange::Complete(ResponseApdu::status(ISO7816_SUCCESS).encode());
+            }
+            Err(status) => return ApduExchange::Complete(ResponseApdu::status(status).encode()),
+        };
+        let result = self.dispatch_apdu(&command.borrowed(), presence);
+        if matches!(result, ApduExchange::PresenceRequired(_)) {
+            self.presence_command = Some(PresenceCommand {
+                selected: self.selected,
+                command,
+                final_fragment,
+            });
+        }
+        result
+    }
+
+    fn dispatch_apdu(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+    ) -> ApduExchange {
+        let response = match self.selected {
+            Some(Applet::Management) => self.management(command),
+            Some(Applet::HsmAuth) => match self.hsmauth.exchange(command, presence) {
+                hsmauth::HsmAuthExchange::Complete(response) => response,
+                hsmauth::HsmAuthExchange::PresenceRequired(policy) => {
+                    return ApduExchange::PresenceRequired(policy);
                 }
             },
-            Some(Applet::Fido2) => ApduExchange::Complete(self.fido2(&command).encode()),
-            None => ApduExchange::Complete(ResponseApdu::status(0x6999).encode()),
+            Some(Applet::OpenPgp) => openpgp::transmit(command),
+            Some(Applet::Piv) => match self.piv.exchange(command, presence) {
+                piv::PivExchange::Complete(response) => response,
+                piv::PivExchange::PresenceRequired(policy) => {
+                    return ApduExchange::PresenceRequired(policy);
+                }
+            },
+            Some(Applet::Fido2) => self.fido2(command),
+            None => ResponseApdu::status(0x6999),
+        };
+        ApduExchange::Complete(self.prepare_response(command.le, response).encode())
+    }
+
+    fn reassemble_command(
+        &mut self,
+        command: CommandApdu<'_>,
+    ) -> Result<Option<OwnedCommandApdu>, u16> {
+        let chaining = command.cla & 0x10 != 0;
+        let base_cla = command.cla & !0x10;
+        if chaining {
+            let pending = self.chained_command.get_or_insert_with(|| ChainedCommand {
+                selected: self.selected,
+                command: OwnedCommandApdu {
+                    cla: base_cla,
+                    ins: command.ins,
+                    p1: command.p1,
+                    p2: command.p2,
+                    data: Vec::new(),
+                    le: None,
+                },
+            });
+            if pending.selected != self.selected
+                || pending.command.cla != base_cla
+                || pending.command.ins != command.ins
+                || pending.command.p1 != command.p1
+                || pending.command.p2 != command.p2
+                || command.le.is_some()
+            {
+                self.chained_command = None;
+                return Err(0x6883);
+            }
+            if pending
+                .command
+                .data
+                .len()
+                .saturating_add(command.data.len())
+                > 65_535
+            {
+                self.chained_command = None;
+                return Err(0x6700);
+            }
+            pending.command.data.extend_from_slice(command.data);
+            return Ok(None);
+        }
+
+        if let Some(mut pending) = self.chained_command.take() {
+            if pending.selected != self.selected
+                || pending.command.cla != command.cla
+                || pending.command.ins != command.ins
+                || pending.command.p1 != command.p1
+                || pending.command.p2 != command.p2
+            {
+                return Err(0x6883);
+            }
+            if pending
+                .command
+                .data
+                .len()
+                .saturating_add(command.data.len())
+                > 65_535
+            {
+                return Err(0x6700);
+            }
+            pending.command.data.extend_from_slice(command.data);
+            pending.command.le = command.le;
+            Ok(Some(pending.command))
+        } else {
+            Ok(Some(OwnedCommandApdu {
+                cla: command.cla,
+                ins: command.ins,
+                p1: command.p1,
+                p2: command.p2,
+                data: command.data.to_vec(),
+                le: command.le,
+            }))
         }
     }
 
     fn select(&mut self, aid: &[u8]) -> ResponseApdu {
-        self.chained_command.clear();
+        self.chained_command = None;
+        self.presence_command = None;
         self.pending_response.clear();
         let Some(applet) = self.applet_for_aid(aid) else {
             self.selected = None;
@@ -616,6 +825,7 @@ impl VirtualYubiKey {
                 data.extend_from_slice(format!("{major}.{minor}.{patch}").as_bytes());
                 ResponseApdu::success(data)
             }
+            Applet::HsmAuth => ResponseApdu::success(self.hsmauth.select_response()),
             Applet::OpenPgp => ResponseApdu::success(Vec::new()),
             Applet::Piv => ResponseApdu::success(piv::select_response()),
             Applet::Fido2 => ResponseApdu::success(b"U2F_V2".to_vec()),
@@ -637,19 +847,25 @@ impl VirtualYubiKey {
             return ResponseApdu::status(0x6d00);
         }
 
-        self.chained_command.extend_from_slice(command.data);
-        if command.cla & 0x10 != 0 {
-            return ResponseApdu::status(ISO7816_SUCCESS);
-        }
+        let response = self.fido.exchange(command.data);
+        ResponseApdu::success(response)
+    }
 
-        let request = std::mem::take(&mut self.chained_command);
-        let response = self.fido.exchange(&request);
-        self.pending_response = response;
-        self.take_response(command.le)
+    fn prepare_response(&mut self, le: Option<u32>, response: ResponseApdu) -> ResponseApdu {
+        let requested = le.unwrap_or(256).min(65_536) as usize;
+        if response.status != ISO7816_SUCCESS || response.data.len() <= requested {
+            return response;
+        }
+        self.pending_response = response.data;
+        self.take_response_count(requested)
     }
 
     fn take_response(&mut self, le: Option<u32>) -> ResponseApdu {
         let requested = le.unwrap_or(256).min(256) as usize;
+        self.take_response_count(requested)
+    }
+
+    fn take_response_count(&mut self, requested: usize) -> ResponseApdu {
         let count = requested.min(self.pending_response.len());
         let remaining = self.pending_response.split_off(count);
         let data = std::mem::replace(&mut self.pending_response, remaining);
@@ -801,6 +1017,47 @@ mod tests {
         .concat()
     }
 
+    fn test_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![tag];
+        match value.len() {
+            0..=0x7f => encoded.push(value.len() as u8),
+            0x80..=0xff => encoded.extend([0x81, value.len() as u8]),
+            _ => panic!("test TLV is too large"),
+        }
+        encoded.extend_from_slice(value);
+        encoded
+    }
+
+    fn short_apdu(cla: u8, ins: u8, p1: u8, p2: u8, data: &[u8], le: Option<u8>) -> Vec<u8> {
+        assert!(data.len() <= 255);
+        let mut encoded = vec![cla, ins, p1, p2];
+        if data.is_empty() {
+            if let Some(le) = le {
+                encoded.push(le);
+            }
+            return encoded;
+        }
+        encoded.push(data.len() as u8);
+        encoded.extend_from_slice(data);
+        if let Some(le) = le {
+            encoded.push(le);
+        }
+        encoded
+    }
+
+    fn hsmauth_symmetric_put(label: &str, touch_required: bool) -> Vec<u8> {
+        [
+            test_tlv(0x7b, &[0; 16]),
+            test_tlv(0x71, label.as_bytes()),
+            test_tlv(0x74, &[38]),
+            test_tlv(0x75, &[0x11; 16]),
+            test_tlv(0x76, &[0x22; 16]),
+            test_tlv(0x73, &[0x33; 16]),
+            test_tlv(0x7a, &[u8::from(touch_required)]),
+        ]
+        .concat()
+    }
+
     #[test]
     fn management_identity_is_derived_from_profile() {
         let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(0x01020304));
@@ -810,8 +1067,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 2, 20]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 2, 20]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 3, 20]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 3, 20]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }
@@ -824,9 +1081,14 @@ mod tests {
             Some(Applet::Piv)
         );
         assert_eq!(
-            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05]),
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05, 0x27, 0x47]),
             Some(Applet::Management)
         );
+        assert_eq!(
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05, 0x27, 0x21]),
+            Some(Applet::HsmAuth)
+        );
+        assert_eq!(device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05]), None);
         assert_eq!(
             device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x06]),
             Some(Applet::Fido2)
@@ -892,6 +1154,128 @@ mod tests {
             remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
         }
         assert_eq!(&remainder[remainder.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn hsmauth_list_uses_generic_response_chaining() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        assert_eq!(
+            device.transmit(&select(&HSMAUTH_AID)),
+            [0x79, 3, 5, 8, 0, 0x90, 0]
+        );
+        for suffix in 0..5 {
+            let label = format!("{suffix}{}", "x".repeat(63));
+            let data = hsmauth_symmetric_put(&label, false);
+            assert_eq!(
+                device.transmit(&short_apdu(0, 0x01, 0, 0, &data, None)),
+                [0x90, 0]
+            );
+        }
+
+        let first = device.transmit(&[0, 0x05, 0, 0, 10]);
+        assert_eq!(first.len(), 12);
+        assert_eq!(first[first.len() - 2], 0x61);
+        let mut data = first[..first.len() - 2].to_vec();
+        let mut status = u16::from_be_bytes(first[first.len() - 2..].try_into().unwrap());
+        while status & 0xff00 == 0x6100 {
+            let next = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
+            data.extend_from_slice(&next[..next.len() - 2]);
+            status = u16::from_be_bytes(next[next.len() - 2..].try_into().unwrap());
+        }
+        assert_eq!(status, 0x9000);
+        assert_eq!(data.len(), 5 * 69);
+    }
+
+    #[test]
+    fn hsmauth_chained_touch_command_is_preserved_until_presence_is_granted() {
+        use software_key_core::secure_channel::{scp03_cryptogram, scp03_key};
+
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(2));
+        device.transmit(&select(&HSMAUTH_AID));
+        let put = hsmauth_symmetric_put("touch key", true);
+        assert_eq!(
+            device.transmit(&short_apdu(0, 0x01, 0, 0, &put, None)),
+            [0x90, 0]
+        );
+
+        let challenge_data = test_tlv(0x71, b"touch key");
+        let challenge = device.transmit(&short_apdu(0, 0x04, 0, 0, &challenge_data, None));
+        assert_eq!(&challenge[challenge.len() - 2..], &[0x90, 0]);
+        let mut context = challenge[..challenge.len() - 2].to_vec();
+        context.extend_from_slice(&[0x44; 8]);
+        let s_enc = scp03_key(&[0x11; 16], 0x04, &context).unwrap();
+        let s_mac = scp03_key(&[0x22; 16], 0x06, &context).unwrap();
+        let s_rmac = scp03_key(&[0x22; 16], 0x07, &context).unwrap();
+        let cryptogram = scp03_cryptogram(&s_mac, 0, &context).unwrap();
+        let calculate = [
+            test_tlv(0x71, b"touch key"),
+            test_tlv(0x77, &context),
+            test_tlv(0x78, &cryptogram),
+            test_tlv(0x73, &[0x33; 16]),
+        ]
+        .concat();
+        let split = calculate.len() / 2;
+        assert_eq!(
+            device.transmit(&short_apdu(0x10, 0x03, 0, 0, &calculate[..split], None)),
+            [0x90, 0]
+        );
+        let final_fragment = short_apdu(0, 0x03, 0, 0, &calculate[split..], None);
+        assert_eq!(
+            device.exchange_apdu(&final_fragment, PresenceAuthorization::Absent),
+            ApduExchange::PresenceRequired(UserPresencePolicy::Always)
+        );
+        assert_eq!(
+            device.exchange_apdu(&final_fragment, PresenceAuthorization::Granted),
+            ApduExchange::Complete(
+                [
+                    s_enc.as_slice(),
+                    s_mac.as_slice(),
+                    s_rmac.as_slice(),
+                    &[0x90, 0]
+                ]
+                .concat()
+            )
+        );
+    }
+
+    #[test]
+    fn piv_and_hsmauth_persistence_are_independent() {
+        let profile = DeviceProfile::yubikey_5_8_ccid(0x01020304);
+        let mut device = VirtualYubiKey::new(profile.clone());
+        device.transmit(&select(&HSMAUTH_AID));
+        let put = hsmauth_symmetric_put("persistent", false);
+        assert_eq!(
+            device.transmit(&short_apdu(0, 0x01, 0, 0, &put, None)),
+            [0x90, 0]
+        );
+        assert!(!device.take_piv_persistent_change());
+        assert!(device.take_hsmauth_persistent_change());
+        assert!(!device.take_hsmauth_persistent_change());
+
+        let piv_encoded = device.piv_persistent_state().unwrap();
+        let hsmauth_encoded = device.hsmauth_persistent_state().unwrap();
+        let mut restored =
+            VirtualYubiKey::from_persistent_states(profile, &piv_encoded, &hsmauth_encoded)
+                .unwrap();
+        assert_eq!(restored.selected_applet(), None);
+        assert!(!restored.take_piv_persistent_change());
+        assert!(!restored.take_hsmauth_persistent_change());
+        restored.transmit(&select(&HSMAUTH_AID));
+        let list = restored.transmit(&[0, 0x05, 0, 0, 0]);
+        assert!(list
+            .windows(b"persistent".len())
+            .any(|value| value == b"persistent"));
+        assert_eq!(&list[list.len() - 2..], &[0x90, 0]);
+
+        assert_eq!(
+            VirtualYubiKey::from_persistent_states(
+                DeviceProfile::yubikey_5_8_ccid(7),
+                &piv_encoded,
+                &hsmauth_encoded,
+            )
+            .unwrap_err(),
+            "persistent PIV state belongs to another device serial"
+        );
     }
 
     #[test]

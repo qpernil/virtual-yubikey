@@ -48,7 +48,7 @@ flowchart TB
         Profile["Root-owned TOML profile"]
         Supervisor["usb-gadget-supervisor (root)"]
         Worker["virtual-yubikey-worker (unprivileged)"]
-        Core["Virtual YubiKey core: FIDO, Management, PIV"]
+        Core["Virtual YubiKey core: FIDO, Management, PIV, YubiHSM Auth"]
         State["Persistent state: /var/lib/virtual-yubikey"]
 
         Systemd -. "starts and restarts" .-> Supervisor
@@ -76,7 +76,7 @@ flowchart TB
 | FunctionFS | Exposes one userspace composite function containing FIDO HID and CCID endpoints. |
 | `usb-gadget-supervisor` | Validates the worker personality, owns ep0/ConfigFS/lifecycle, transfers data endpoints, binds the UDC, and cleans up. |
 | `virtual-yubikey-worker` | Publishes its USB personality, answers forwarded setup requests, and implements FIDO and CCID over received endpoint files. |
-| `virtual-yubikey-core` | Implements Management, PIV, FIDO2, credentials, policy, cryptography, and persistent logical state. |
+| `virtual-yubikey-core` | Implements Management, PIV, YubiHSM Auth, FIDO2, credentials, policy, cryptography, and persistent logical state. |
 
 ## UDC, ConfigFS, and FunctionFS
 
@@ -383,7 +383,7 @@ ykman or yubico-piv-tool
   -> USB bulk CCID message
   -> Pi FunctionFS endpoint
   -> virtual-yubikey-worker
-  -> CCID framing -> APDU -> Management or PIV applet
+  -> CCID framing -> APDU -> Management, PIV, or YubiHSM Auth applet
 ```
 
 This middleware provides discovery, reader naming, card insertion state,
@@ -409,9 +409,9 @@ this application-activity indicator.
 
 A scoped physical-presence override blinks for as long as an application is
 blocked waiting for touch. It uses the measured YubiKey 5 NFC cadence for every
-application: a 384 ms half-period, approximately 1.30 blinks per second. PIV and
-FIDO use the same protocol-neutral presence service. OpenPGP and YubiHSM Auth
-can reuse it when their applets are implemented, without teaching the scheduler
+application: a 384 ms half-period, approximately 1.30 blinks per second. PIV,
+FIDO, and YubiHSM Auth use the same protocol-neutral presence service. OpenPGP
+can reuse it when that applet is implemented, without teaching the scheduler
 which protocol requested presence. USB suspend and worker exit independently
 clear the display and turn off its backlight.
 
@@ -429,10 +429,11 @@ wait destroys its socket and queued datagrams. Presses made while idle or while
 a previous request was active can therefore never approve a later operation.
 
 PIV reports `Always` or `Cached` requirements from the transport-neutral core.
-The CCID command thread blocks in the shared presence service while its endpoint
-owner continues sending time extensions. Cached authorization uses monotonic
-time, expires after 15 seconds, and is scoped to the PIV applet; FIDO presence
-does not populate it.
+Its applet-local presence client owns the monotonic 15-second cache. The CCID
+command thread blocks in the shared physical-presence service while its endpoint
+owner continues sending time extensions. FIDO and YubiHSM Auth presence cannot
+populate the PIV cache. A touch-required YubiHSM Auth credential always requests
+a new touch and uses the same CCID time-extension path.
 
 KEY3 is represented by its sampled current logical level. GPIO edges merely
 wake the main worker, and multiple wakes may coalesce without losing the final
@@ -567,7 +568,7 @@ flowchart TB
 
 | Virtual appliance | Host-facing applications | USB interfaces | Pi endpoint implementation | Device-specific worker responsibility |
 | --- | --- | --- | --- | --- |
-| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, FIDO2, keys, state, and local activity display |
+| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool`, `pkcs11rs` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, YubiHSM Auth, FIDO2, keys, state, and local activity display |
 | Virtual Trezor | Trezor Suite, `trezorctl`, Trezor Connect | Main vendor/WebUSB, optional debug and U2F HID | Primarily FunctionFS; profile-selected HID where appropriate | Trezor framing, legacy firmware, OLED framebuffer, buttons, wallet state |
 | Virtual YubiHSM | `yubihsm-shell`, PKCS #11 module, SDKs | Vendor-specific bulk OUT/IN | FunctionFS | YubiHSM sessions, commands, objects, capabilities, audit and state |
 

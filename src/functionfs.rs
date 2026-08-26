@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(target_os = "linux")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::{
     thread,
@@ -35,7 +35,7 @@ use usb_gadget_worker::{
     StatePersistence, StatePersistenceHandle, UsbBusEvent,
 };
 #[cfg(target_os = "linux")]
-use virtual_yubikey_core::{FidoAuthenticator, UserPresencePolicy};
+use virtual_yubikey_core::FidoAuthenticator;
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
@@ -76,6 +76,7 @@ pub(crate) fn run_worker(
     let storage = WorkerStorage {
         fido_state: state_directory.join(format!("fido-{serial}.cbor")),
         piv_state: state_directory.join(format!("piv-{serial}.cbor")),
+        hsmauth_state: state_directory.join(format!("hsmauth-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
     let fido_persistence = StatePersistence::start(
@@ -86,14 +87,30 @@ pub(crate) fn run_worker(
         || STOP_REQUESTED.store(true, Ordering::Relaxed),
     )?;
     let fido = fido_persistence.handle();
+    let ccid_state = Arc::new(Mutex::new(load_ccid_state(
+        serial,
+        &storage.piv_state,
+        &storage.hsmauth_state,
+    )?));
     let piv_persistence = StatePersistence::start(
-        load_piv_state(serial, &storage.piv_state)?,
+        SharedCcidState(Arc::clone(&ccid_state)),
         storage.piv_state.clone(),
         persistence_mode,
-        encode_piv_state,
+        encode_shared_piv_state,
         || STOP_REQUESTED.store(true, Ordering::Relaxed),
     )?;
-    let piv = piv_persistence.handle();
+    let hsmauth_persistence = StatePersistence::start(
+        SharedCcidState(Arc::clone(&ccid_state)),
+        storage.hsmauth_state.clone(),
+        persistence_mode,
+        encode_shared_hsmauth_state,
+        || STOP_REQUESTED.store(true, Ordering::Relaxed),
+    )?;
+    let smartcard = CcidPersistenceHandle {
+        state: ccid_state,
+        piv: piv_persistence.handle(),
+        hsmauth: hsmauth_persistence.handle(),
+    };
     let buttons = crate::buttons::Controller::start(
         resources.touch_button,
         resources.reconnect_button,
@@ -149,7 +166,7 @@ pub(crate) fn run_worker(
         let lifecycle = Arc::new(EndpointLifecycle::new());
         let endpoint_runtime = endpoints.start(
             fido.clone(),
-            piv.clone(),
+            smartcard.clone(),
             EndpointServices {
                 serial,
                 storage: &storage,
@@ -184,10 +201,12 @@ pub(crate) fn run_worker(
         let runtime_result = endpoint_runtime.shutdown();
         let fido_flush_result = fido_persistence.flush();
         let piv_flush_result = piv_persistence.flush();
+        let hsmauth_flush_result = hsmauth_persistence.flush();
         let outcome = control_result?;
         runtime_result?;
         fido_flush_result?;
         piv_flush_result?;
+        hsmauth_flush_result?;
         match outcome {
             ControlOutcome::Quiesce {
                 request_id,
@@ -219,11 +238,13 @@ pub(crate) fn run_worker(
     drop(keepalive);
     let fido_persistence_result = fido_persistence.shutdown();
     let piv_persistence_result = piv_persistence.shutdown();
+    let hsmauth_persistence_result = hsmauth_persistence.shutdown();
     let button_result = buttons.shutdown();
     let display_result = display.shutdown();
     result
         .and(fido_persistence_result)
         .and(piv_persistence_result)
+        .and(hsmauth_persistence_result)
         .and(button_result)
         .and(display_result)
 }
@@ -298,7 +319,20 @@ struct Endpoints {
 struct WorkerStorage {
     fido_state: PathBuf,
     piv_state: PathBuf,
+    hsmauth_state: PathBuf,
     touch_socket: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct SharedCcidState(Arc<Mutex<crate::ccid::Device>>);
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct CcidPersistenceHandle {
+    state: Arc<Mutex<crate::ccid::Device>>,
+    piv: StatePersistenceHandle<SharedCcidState>,
+    hsmauth: StatePersistenceHandle<SharedCcidState>,
 }
 
 #[cfg(target_os = "linux")]
@@ -402,7 +436,7 @@ impl Endpoints {
     fn start(
         self,
         fido: StatePersistenceHandle<FidoAuthenticator>,
-        ccid: StatePersistenceHandle<crate::ccid::Device>,
+        ccid: CcidPersistenceHandle,
         services: EndpointServices<'_>,
     ) -> io::Result<EndpointRuntime> {
         let EndpointServices {
@@ -808,7 +842,7 @@ fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
 fn serve_ccid(
     mut output: File,
     mut input: File,
-    ccid: StatePersistenceHandle<crate::ccid::Device>,
+    ccid: CcidPersistenceHandle,
     presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
@@ -826,16 +860,16 @@ fn serve_ccid(
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
-                    let (replies, mutation) = {
+                    let (replies, piv_mutation, hsmauth_mutation) = {
                         let mut state = ccid
-                            .state()
+                            .state
                             .lock()
-                            .map_err(|_| io::Error::other("PIV state lock poisoned"))?;
+                            .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
                         let replies = state.receive_with_keepalives(
                             &request[..length],
                             &clock,
-                            |policy| {
-                                presence.wait("piv", policy, || {
+                            || {
+                                presence.wait(|| {
                                     Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
                                         crate::presence::WaitControl::Cancel
                                     } else {
@@ -845,13 +879,20 @@ fn serve_ccid(
                             },
                             |keepalive| write_transfer(&mut input, keepalive),
                         )?;
-                        let mutation = state
+                        let piv_mutation = state
                             .take_piv_persistent_change()
-                            .then(|| ccid.record_mutation())
+                            .then(|| ccid.piv.record_mutation())
                             .transpose()?;
-                        (replies, mutation)
+                        let hsmauth_mutation = state
+                            .take_hsmauth_persistent_change()
+                            .then(|| ccid.hsmauth.record_mutation())
+                            .transpose()?;
+                        (replies, piv_mutation, hsmauth_mutation)
                     };
-                    if let Some(mutation) = mutation {
+                    if let Some(mutation) = piv_mutation {
+                        mutation.wait()?;
+                    }
+                    if let Some(mutation) = hsmauth_mutation {
                         mutation.wait()?;
                     }
                     for reply in replies {
@@ -1235,7 +1276,7 @@ fn wait_for_touch(
     clock: &crate::keepalive::Handle,
 ) -> io::Result<bool> {
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
-    presence.wait("fido", UserPresencePolicy::Always, || {
+    presence.wait(|| {
         if STOP_REQUESTED.load(Ordering::Relaxed) {
             return Ok(crate::presence::WaitControl::Cancel);
         }
@@ -1329,44 +1370,83 @@ fn encode_fido_state(fido: &FidoAuthenticator) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
-fn load_piv_state(serial: u32, path: &Path) -> io::Result<crate::ccid::Device> {
+fn load_ccid_state(
+    serial: u32,
+    piv_path: &Path,
+    hsmauth_path: &Path,
+) -> io::Result<crate::ccid::Device> {
+    let factory = crate::ccid::Device::new(serial);
+    let piv_factory = encode_piv_state(&factory)?;
+    let hsmauth_factory = encode_hsmauth_state(&factory)?;
+    let piv = load_applet_state(piv_path, "piv", &piv_factory)?;
+    let hsmauth = load_applet_state(hsmauth_path, "hsmauth", &hsmauth_factory)?;
+    crate::ccid::Device::from_persistent_states(serial, &piv, &hsmauth).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("load persistent smart-card applet state: {error}"),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn load_applet_state(path: &Path, applet: &str, factory: &[u8]) -> io::Result<Vec<u8>> {
     match fs::read(path) {
-        Ok(encoded) => crate::ccid::Device::from_piv_persistent_state(serial, &encoded)
-            .inspect(|_| {
-                diagnostics::log(
-                    Level::Info,
-                    "piv",
-                    "state_loaded",
-                    format_args!("source=persistent bytes={}", encoded.len()),
-                );
-            })
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("load persistent PIV state {}: {error}", path.display()),
-                )
-            }),
+        Ok(encoded) => {
+            diagnostics::log(
+                Level::Info,
+                "smartcard",
+                "state_loaded",
+                format_args!("applet={applet} source=persistent bytes={}", encoded.len()),
+            );
+            Ok(encoded)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             diagnostics::log(
                 Level::Info,
-                "piv",
+                "smartcard",
                 "state_loaded",
-                format_args!("source=factory"),
+                format_args!("applet={applet} source=factory"),
             );
-            let ccid = crate::ccid::Device::new(serial);
-            let encoded = encode_piv_state(&ccid)?;
-            replace_file_atomically(path, &encoded)
-                .map_err(|error| with_context(error, "create initial persistent PIV state"))?;
-            Ok(ccid)
+            replace_file_atomically(path, factory).map_err(|error| {
+                with_context(error, "create initial persistent smart-card applet state")
+            })?;
+            Ok(factory.to_vec())
         }
-        Err(error) => Err(with_context(error, "read persistent PIV state")),
+        Err(error) => Err(with_context(
+            error,
+            "read persistent smart-card applet state",
+        )),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn encode_shared_piv_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
+    let ccid = state
+        .0
+        .lock()
+        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
+    encode_piv_state(&ccid)
+}
+
+#[cfg(target_os = "linux")]
+fn encode_shared_hsmauth_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
+    let ccid = state
+        .0
+        .lock()
+        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
+    encode_hsmauth_state(&ccid)
 }
 
 #[cfg(target_os = "linux")]
 fn encode_piv_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
     ccid.piv_persistent_state()
         .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))
+}
+
+#[cfg(target_os = "linux")]
+fn encode_hsmauth_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
+    ccid.hsmauth_persistent_state()
+        .map_err(|error| io::Error::other(format!("encode persistent YubiHSM Auth state: {error}")))
 }
 
 #[cfg(target_os = "linux")]

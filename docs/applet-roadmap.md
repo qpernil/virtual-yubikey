@@ -12,7 +12,8 @@ The planned order is:
 
 1. Finish FIDO and `previewSign` compatibility.
 2. Add PIV and test it with `yubico-piv-tool`.
-3. Add YubiHSM Auth, including the Management behavior it needs.
+3. Add YubiHSM Auth, including the Management behavior it needs. *(Implemented;
+   USB client compatibility validation remains.)*
 4. Add Issuer Security Domain behavior and target-side SCP03/SCP11.
 5. Add OpenPGP after the preceding CCID applets and secure channels are stable.
 
@@ -116,16 +117,24 @@ randomness, trust policy, persistence, transport, and error mapping.
 - Next, pass representative `yubico-piv-tool` workflows over USB CCID and turn
   the observed transcripts into transport-level regression tests.
 - Add PIV attestation, CCID abort handling, and biometric policy events. Private
-  and management-key operations already use the shared physical-presence
-  service for `Always` and the 15-second `Cached` touch policy.
+  and management-key operations already use an applet-local presence client
+  for `Always` and the 15-second `Cached` touch policy; the client delegates
+  physical waits to the shared presence service.
 - Move `pkcs11rs` tests to the shared core only after standalone compatibility
   is established.
 
 ### YubiHSM Auth
 
-- Implement the applet commands and credential state used by `pkcs11rs`.
-- Validate with the real YubiHSM Auth client path and then reuse the core from
-  `pkcs11rs` tests.
+- The core implements persistent symmetric and P-256 credentials, management
+  and credential retry counters, touch-required calculation, all firmware 5.8
+  administration commands, symmetric SCP03 session derivation, and asymmetric
+  SCP11 key agreement and receipt validation.
+- Command chaining and `61xx`/`GET RESPONSE` response chaining live in the
+  common ISO 7816 router. PIV and YubiHSM Auth use independently scheduled,
+  atomically replaced state images while transient challenges and authorization
+  state are never persisted.
+- Next, validate with `ykman`, the real `pkcs11rs` YubiHSM Auth client path, and
+  a YubiHSM, then reuse the core from `pkcs11rs` tests.
 
 ### OpenPGP
 

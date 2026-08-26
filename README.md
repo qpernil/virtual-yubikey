@@ -4,8 +4,8 @@
 
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
 enumerate as a composite FIDO HID and CCID, YubiKey-compatible test device.
-HID carries FIDO/CTAP; CCID exposes YubiKey Management and PIV. The USB CCID
-reader deliberately rejects the FIDO AID.
+HID carries FIDO/CTAP; CCID exposes YubiKey Management, PIV, and YubiHSM Auth.
+The USB CCID reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -18,8 +18,8 @@ state, worker-owned USB personality, and declarative launch profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
-YubiKey Management and CTAP 2.1 behavior including PIN authorization,
-credential management, resident credentials, and `previewSign`.
+YubiKey Management, PIV, YubiHSM Auth, and CTAP 2.1 behavior including PIN
+authorization, credential management, resident credentials, and `previewSign`.
 
 ## Current behavior
 
@@ -30,6 +30,7 @@ credential management, resident credentials, and `previewSign`.
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | PIV | Persistent objects, PIN/PUK and management authentication, and RSA, NIST EC, Ed25519, and X25519 key operations |
+| YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
 | FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
 | Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
@@ -55,7 +56,7 @@ Implementation provenance and public sources are recorded in
 | Module | Responsibility |
 | --- | --- |
 | `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA controls, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
-| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, and PIV applet state |
+| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, PIV, and YubiHSM Auth applet state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
@@ -98,19 +99,36 @@ active on-disk format yet.
 
 ## PIV development status
 
-The logical PIV applet starts empty and persists its state separately from
-FIDO. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
+The logical PIV applet starts empty and persists separately from FIDO and
+YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
 AES-192 management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
 Ed25519/X25519 key generation, matching algorithm-specific private-key import,
 metadata, signing, raw RSA private operations, ECDH/X25519 key agreement, and
-key move/delete. PIV state is written atomically as `piv-<serial>.cbor` in the
+key move/delete. PIV state is atomically replaced as `piv-<serial>.cbor` in the
 configured state directory.
 
 The remaining PIV compatibility work is hardware transcript validation,
-attestation, and transport integration for touch, cancellation, and simulated
-fingerprint policy. Keys configured to require touch or biometric matching
-currently fail closed instead of bypassing the policy.
+attestation, CCID cancellation, and simulated fingerprint policy.
+
+## YubiHSM Auth development status
+
+The YubiHSM Auth applet implements the firmware 5.8 command set used by
+`ykman` and `pkcs11rs`: version and retry discovery, credential listing,
+symmetric and P-256 credential creation/import, public-key and challenge
+retrieval, session-key calculation, deletion, password and management-key
+changes, and factory reset. Management authorization is the submitted 16-byte
+management key; credentials retain their own padded 16-byte password and
+eight-attempt retry counter.
+
+Symmetric credentials derive SCP03 ENC, MAC, and RMAC session keys. Asymmetric
+credentials perform the ephemeral and static P-256 agreements, X9.63 SHA-256
+derivation, and receipt validation required by YubiHSM asymmetric
+authentication. A touch-required credential requests a fresh physical touch on
+every session-key calculation. ISO command chaining and `61xx`/`GET RESPONSE`
+response chaining are handled once in the shared APDU router rather than by the
+applet. Its state is independently scheduled and atomically replaced as
+`hsmauth-<serial>.cbor`.
 
 ## Credential algorithms
 
@@ -263,8 +281,8 @@ CCID probing is ordinary application activity.
 While any application is blocked waiting for physical presence, the same
 cut-outs blink until touch, cancellation, or failure ends the wait. Every
 application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
-approximately 1.30 blinks per second. FIDO and PIV use one protocol-neutral
-presence service; OpenPGP and YubiHSM Auth can join it when those applets are
+approximately 1.30 blinks per second. FIDO, PIV, and YubiHSM Auth use one
+protocol-neutral presence service; OpenPGP can join it when that applet is
 implemented. General FIDO HID report traffic does not drive the activity
 indication. USB suspend and worker shutdown clear the panel and turn off its
 backlight. Holding KEY3 turns the display off and
@@ -282,14 +300,15 @@ Display traffic never blocks a USB endpoint thread.
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
 `/var/lib/virtual-yubikey/fido-12345678.cbor` and
-`/var/lib/virtual-yubikey/piv-12345678.cbor`. Before reading or creating either
+`/var/lib/virtual-yubikey/piv-12345678.cbor`, and
+`/var/lib/virtual-yubikey/hsmauth-12345678.cbor`. Before reading or creating any
 image, the worker exclusively locks
 `/var/lib/virtual-yubikey/yubikey-12345678.lock`; one device-level lock covers
-both applets and remains held through their final persistence flush. The
+all applets and remains held through their final persistence flush. The
 sidecar remains present when unlocked, while a concurrent owner is a startup
 error. Missing state files are initialized from factory state before USB is
 served; invalid existing files are startup errors and are never silently
-replaced. Both applets use the shared supervisor-worker persistence engine. By
+replaced. All three state images use the shared supervisor-worker persistence engine. By
 default it batches changes for up to 500 ms, atomically replaces mode-`0600`
 files, and flushes pending state on USB ejection and worker shutdown.
 `--persistence immediate` instead synchronizes each durable change before its
@@ -346,9 +365,10 @@ persisted, and enforced when management authentication begins, but it supports
 only `Never` (`0xff`) and `Always` (`0xfe`); the candidate `Cached` encoding
 `0xfd` is rejected. A successful management authentication continues to
 authorize administrative commands for the connection. The touch cache uses
-monotonic time and is scoped to PIV, so a FIDO touch cannot authorize a PIV
-operation. PIV waits use ordinary CCID time-extension frames while the shared
-presence service waits for the same joystick or helper.
+monotonic time and is scoped to the PIV applet's local presence client, so a
+FIDO or YubiHSM Auth touch cannot authorize a PIV operation. PIV waits use
+ordinary CCID time-extension frames while the shared physical-presence service
+waits for the same joystick or helper.
 
 Holding display-HAT KEY3 requests a physical-style USB ejection. The worker
 sends an empty `Configure` record and remains ejected until release; it then
@@ -378,7 +398,8 @@ every 100 ms. After touch, the status changes to `PROCESSING` if computation
 continues. These status values, response ownership, and cancellation semantics
 follow the CTAPHID transport specification.
 
-CCID operations use the separate CCID time-extension mechanism. A PIV APDU runs
+CCID operations use the separate CCID time-extension mechanism. A PIV or
+YubiHSM Auth APDU runs
 on a scoped command thread; if it is still calculating after 500 ms, the CCID
 endpoint thread emits `RDR_to_PC_DataBlock` time-extension frames every 500 ms
 with the original slot and sequence number until it can send the final response.
@@ -396,6 +417,8 @@ PIV APDUs follow
 [NIST SP 800-73 Part 2](https://csrc.nist.gov/pubs/sp/800/73/pt2/5/final),
 with YubiKey-specific extensions matched to the
 [Yubico PIV command reference](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html).
+YubiHSM Auth APDUs follow the
+[Yubico YubiHSM Auth command reference](https://docs.yubico.com/yesdk/users-manual/application-yubihsm-auth/commands/yubihsm-auth-commands.html).
 
 ## Install as a service
 

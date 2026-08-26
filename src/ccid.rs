@@ -7,7 +7,6 @@ use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-use virtual_yubikey_core::UserPresencePolicy;
 
 const PC_TO_RDR_SET_PARAMETERS: u8 = 0x61;
 const PC_TO_RDR_ICC_POWER_ON: u8 = 0x62;
@@ -57,12 +56,15 @@ impl Device {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn from_piv_persistent_state(
+    pub(crate) fn from_persistent_states(
         serial: u32,
-        encoded: &[u8],
+        piv_encoded: &[u8],
+        hsmauth_encoded: &[u8],
     ) -> Result<Self, &'static str> {
-        Ok(Self::with_card(Card::from_piv_persistent_state(
-            serial, encoded,
+        Ok(Self::with_card(Card::from_persistent_states(
+            serial,
+            piv_encoded,
+            hsmauth_encoded,
         )?))
     }
 
@@ -87,13 +89,23 @@ impl Device {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn hsmauth_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.card.hsmauth_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
         self.card.take_piv_persistent_change()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_hsmauth_persistent_change(&mut self) -> bool {
+        self.card.take_hsmauth_persistent_change()
+    }
+
     #[cfg(test)]
     pub(crate) fn receive(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.receive_inner(bytes, None, &mut |_| Ok(false), &mut |_| Ok(()))
+        self.receive_inner(bytes, None, &mut || Ok(false), &mut |_| Ok(()))
             .expect("direct CCID receive has an infallible time-extension sink")
     }
 
@@ -102,7 +114,7 @@ impl Device {
         &mut self,
         bytes: &[u8],
         clock: &keepalive::Handle,
-        mut authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send,
+        mut authorize: impl FnMut() -> io::Result<bool> + Send,
         mut send: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
         self.receive_inner(bytes, Some(clock), &mut authorize, &mut send)
@@ -112,7 +124,7 @@ impl Device {
         &mut self,
         bytes: &[u8],
         clock: Option<&keepalive::Handle>,
-        authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
+        authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
         self.buffered.extend_from_slice(bytes);
@@ -160,7 +172,7 @@ impl Device {
         &mut self,
         message: &[u8],
         clock: Option<&keepalive::Handle>,
-        authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
+        authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<u8>> {
         let message_type = message[0];
@@ -493,7 +505,7 @@ fn transmit_with_keepalives(
     slot: u8,
     sequence: u8,
     clock: &keepalive::Handle,
-    authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
+    authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
     send: &mut impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     run_with_keepalives(
@@ -633,6 +645,7 @@ fn request_name(message_type: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::smartcard::{MANAGEMENT_AID, OPENPGP_AID};
+    use virtual_yubikey_core::HSMAUTH_AID;
 
     fn openpgp_device(serial: u32) -> Device {
         let mut profile = virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial);
@@ -647,6 +660,16 @@ mod tests {
         output.extend_from_slice(&specific);
         output.extend_from_slice(data);
         output
+    }
+
+    fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+        assert!(value.len() < 0x80);
+        [vec![tag, value.len() as u8], value.to_vec()].concat()
+    }
+
+    fn short_apdu(ins: u8, data: &[u8]) -> Vec<u8> {
+        assert!(data.len() <= u8::MAX as usize);
+        [vec![0, ins, 0, 0, data.len() as u8], data.to_vec()].concat()
     }
 
     #[test]
@@ -841,5 +864,68 @@ mod tests {
         let count = extensions.len();
         thread::sleep(Duration::from_millis(20));
         assert_eq!(extensions.len(), count);
+    }
+
+    #[test]
+    fn hsmauth_touch_wait_emits_ccid_time_extensions() {
+        let mut card = Card::new(1);
+        let select = [
+            vec![0, 0xa4, 4, 0, HSMAUTH_AID.len() as u8],
+            HSMAUTH_AID.to_vec(),
+            vec![0],
+        ]
+        .concat();
+        assert_eq!(&card.transmit(&select)[5..], &[0x90, 0]);
+
+        let label = b"touch";
+        let password = [0x33; 16];
+        let put = [
+            tlv(0x7b, &[0; 16]),
+            tlv(0x71, label),
+            tlv(0x74, &[38]),
+            tlv(0x75, &[0x11; 16]),
+            tlv(0x76, &[0x22; 16]),
+            tlv(0x73, &password),
+            tlv(0x7a, &[1]),
+        ]
+        .concat();
+        assert_eq!(card.transmit(&short_apdu(0x01, &put)), [0x90, 0]);
+
+        let calculate = [
+            tlv(0x71, label),
+            tlv(0x77, &[0x44; 16]),
+            tlv(0x78, &[0; 8]),
+            tlv(0x73, &password),
+        ]
+        .concat();
+        let calculate = short_apdu(0x03, &calculate);
+        let scheduler = keepalive::Scheduler::start().unwrap();
+        let clock = scheduler.handle();
+        let mut extensions = Vec::new();
+        let response = run_with_keepalives(
+            || {
+                card.transmit_with_presence(&calculate, || {
+                    thread::sleep(Duration::from_millis(35));
+                    Ok(true)
+                })
+            },
+            0,
+            11,
+            &clock,
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            &mut |frame| {
+                extensions.push(frame.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(response, [0x69, 0x85]);
+        assert!(!extensions.is_empty());
+        assert!(extensions
+            .iter()
+            .all(|frame| frame == &time_extension(0, 11)));
     }
 }
