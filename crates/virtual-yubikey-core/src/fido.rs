@@ -5,10 +5,12 @@ use crate::{
     FidoConfiguration, FidoCredentialAlgorithm,
 };
 use minicbor::Encoder;
-use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
 #[cfg(test)]
 use software_key_core::post_quantum;
-use software_key_core::software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningKey};
+use software_key_core::{
+    software_key_agreement::derive_with_signing_key,
+    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+};
 use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
@@ -63,7 +65,7 @@ impl From<()> for Error {
 pub(crate) struct FidoState {
     device_identifier: [u8; 16],
     pin: Option<Zeroizing<Vec<u8>>>,
-    key_agreement: Option<SecretKey>,
+    key_agreement: Option<SoftwareSigningKey>,
     pin_uv_auth_token: Zeroizing<Vec<u8>>,
     pin_uv_auth_protocols: Vec<u8>,
     permissioned_pin_uv_auth_tokens: bool,
@@ -1996,7 +1998,7 @@ fn encrypted_device_identifier(state: &FidoState) -> Result<Vec<u8>, Error> {
 struct ClientPinRequest {
     protocol: Option<u8>,
     subcommand: Option<u8>,
-    peer: Option<PublicKey>,
+    peer: Option<Vec<u8>>,
     auth: Option<Vec<u8>>,
     new_pin: Option<Vec<u8>>,
     pin_hash: Option<Vec<u8>>,
@@ -2088,7 +2090,7 @@ fn decode_client_pin(payload: &[u8]) -> Result<ClientPinRequest, u8> {
     Ok(request)
 }
 
-fn decode_cose_key(decoder: &mut minicbor::Decoder<'_>) -> Result<PublicKey, u8> {
+fn decode_cose_key(decoder: &mut minicbor::Decoder<'_>) -> Result<Vec<u8>, u8> {
     let count = decoder
         .map()
         .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
@@ -2127,13 +2129,25 @@ fn decode_cose_key(decoder: &mut minicbor::Decoder<'_>) -> Result<PublicKey, u8>
     point.push(4);
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
-    PublicKey::from_sec1_bytes(&point).map_err(|_| CTAP2_ERR_INVALID_CBOR)
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.clone(),
+    }
+    .validate()
+    .map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
+    Ok(point)
 }
 
 fn key_agreement_response(state: &mut FidoState) -> Result<Vec<u8>, Error> {
-    let secret = random_secret()?;
-    let public = secret.public_key().to_sec1_point(false);
-    let public = public.as_bytes();
+    let secret = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let SoftwarePublicKey::Ec {
+        uncompressed: public,
+        ..
+    } = secret.public_key()
+    else {
+        return Err(Error::from(CKR_DEVICE_ERROR));
+    };
     let mut response = vec![CTAP2_OK];
     let mut encoder = Encoder::new(&mut response);
     encoder
@@ -2240,19 +2254,9 @@ fn pin_token(state: &mut FidoState, request: ClientPinRequest) -> Result<Vec<u8>
     Ok(response)
 }
 
-fn random_secret() -> Result<SecretKey, Error> {
-    loop {
-        let mut bytes = Zeroizing::new([0u8; 32]);
-        getrandom::fill(bytes.as_mut()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        if let Ok(secret) = SecretKey::from_slice(bytes.as_ref()) {
-            return Ok(secret);
-        }
-    }
-}
-
 fn shared_secret(
     state: &FidoState,
-    peer: Option<&PublicKey>,
+    peer: Option<&Vec<u8>>,
     protocol: u8,
 ) -> Result<Zeroizing<Vec<u8>>, u8> {
     let secret = state
@@ -2260,16 +2264,16 @@ fn shared_secret(
         .as_ref()
         .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
     let peer = peer.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-    let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+    let z = derive_with_signing_key(secret, peer).map_err(|_| CTAP2_ERR_PIN_INVALID)?;
     match protocol {
-        1 => Ok(Zeroizing::new(sha256(z.raw_secret_bytes()))),
+        1 => Ok(Zeroizing::new(sha256(&z))),
         2 => {
             let mut output = Zeroizing::new(vec![0u8; 64]);
             let hmac_key = software_key_core::digest::hkdf(
                 software_key_core::digest::HashAlgorithm::Sha256,
                 true,
                 true,
-                z.raw_secret_bytes().as_ref(),
+                &z,
                 Some(&[0u8; 32]),
                 b"CTAP2 HMAC key",
                 32,
@@ -2279,7 +2283,7 @@ fn shared_secret(
                 software_key_core::digest::HashAlgorithm::Sha256,
                 true,
                 true,
-                z.raw_secret_bytes().as_ref(),
+                &z,
                 Some(&[0u8; 32]),
                 b"CTAP2 AES key",
                 32,
@@ -3640,8 +3644,18 @@ mod tests {
         rp_id: &str,
         preview_handle: Option<Vec<u8>>,
     ) -> ResidentCredential {
-        let private_key = SecretKey::from_slice(&[0x11; 32]).unwrap();
-        let public_key = private_key.public_key().to_sec1_point(false);
+        let private_key = SoftwareSigningKey::from_serialized(
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            &[0x11; 32],
+        )
+        .unwrap();
+        let SoftwarePublicKey::Ec {
+            uncompressed: public_key,
+            ..
+        } = private_key.public_key()
+        else {
+            unreachable!();
+        };
         ResidentCredential {
             rp_id: rp_id.to_owned(),
             rp_name: format!("{rp_id} test RP"),
@@ -3651,12 +3665,12 @@ mod tests {
             credential_id,
             private_key: CredentialPrivateKey {
                 algorithm: FidoCredentialAlgorithm::Es256,
-                key: SoftwareSigningKey::P256(private_key),
+                key: private_key,
             },
             public_key_cose: encode_ec2(
                 FidoCredentialAlgorithm::Es256.cose_identifier(),
                 1,
-                public_key.as_bytes(),
+                &public_key,
             )
             .unwrap(),
             counter: 0,
