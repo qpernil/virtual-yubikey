@@ -7,6 +7,7 @@ use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
+use virtual_yubikey_core::UserPresencePolicy;
 
 const PC_TO_RDR_SET_PARAMETERS: u8 = 0x61;
 const PC_TO_RDR_ICC_POWER_ON: u8 = 0x62;
@@ -92,7 +93,7 @@ impl Device {
 
     #[cfg(test)]
     pub(crate) fn receive(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.receive_inner(bytes, None, &mut |_| Ok(()))
+        self.receive_inner(bytes, None, &mut |_| Ok(false), &mut |_| Ok(()))
             .expect("direct CCID receive has an infallible time-extension sink")
     }
 
@@ -101,15 +102,17 @@ impl Device {
         &mut self,
         bytes: &[u8],
         clock: &keepalive::Handle,
+        mut authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send,
         mut send: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
-        self.receive_inner(bytes, Some(clock), &mut send)
+        self.receive_inner(bytes, Some(clock), &mut authorize, &mut send)
     }
 
     fn receive_inner(
         &mut self,
         bytes: &[u8],
         clock: Option<&keepalive::Handle>,
+        authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
         self.buffered.extend_from_slice(bytes);
@@ -148,7 +151,7 @@ impl Device {
                 break;
             }
             let message = self.buffered.drain(..total).collect::<Vec<_>>();
-            responses.push(self.handle(&message, clock, send)?);
+            responses.push(self.handle(&message, clock, authorize, send)?);
         }
         Ok(responses)
     }
@@ -157,6 +160,7 @@ impl Device {
         &mut self,
         message: &[u8],
         clock: Option<&keepalive::Handle>,
+        authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<u8>> {
         let message_type = message[0];
@@ -346,7 +350,15 @@ impl Device {
                     }
                 };
                 let apdu_response = if let Some(clock) = clock {
-                    transmit_with_keepalives(&mut self.card, &command, slot, sequence, clock, send)?
+                    transmit_with_keepalives(
+                        &mut self.card,
+                        &command,
+                        slot,
+                        sequence,
+                        clock,
+                        authorize,
+                        send,
+                    )?
                 } else {
                     self.card.transmit(&command)
                 };
@@ -481,17 +493,18 @@ fn transmit_with_keepalives(
     slot: u8,
     sequence: u8,
     clock: &keepalive::Handle,
+    authorize: &mut (impl FnMut(UserPresencePolicy) -> io::Result<bool> + Send),
     send: &mut impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     run_with_keepalives(
-        || card.transmit(data),
+        || card.transmit_with_presence(data, authorize),
         slot,
         sequence,
         clock,
         TIME_EXTENSION_DELAY,
         TIME_EXTENSION_INTERVAL,
         send,
-    )
+    )?
 }
 
 fn run_with_keepalives<T: Send>(

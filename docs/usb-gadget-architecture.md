@@ -410,9 +410,10 @@ this application-activity indicator.
 A scoped physical-presence override blinks for as long as an application is
 blocked waiting for touch. It uses the measured YubiKey 5 NFC cadence for every
 application: a 384 ms half-period, approximately 1.30 blinks per second. PIV and
-OpenPGP can reuse the same state when their touch paths are implemented, without
-teaching the scheduler which protocol requested presence. USB suspend and
-worker exit independently clear the display and turn off its backlight.
+FIDO use the same protocol-neutral presence service. OpenPGP and YubiHSM Auth
+can reuse it when their applets are implemented, without teaching the scheduler
+which protocol requested presence. USB suspend and worker exit independently
+clear the display and turn off its backlight.
 
 The ST7789 and buttons share a HAT but not an I/O path. Display frames use SPI;
 GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. Separate
@@ -423,9 +424,15 @@ enters `display-backends`.
 
 Every GPIO edge is drained immediately. A logical rising edge sends the same
 one-byte touch command as the local helper, but the destination datagram socket
-exists only for the lifetime of the current FIDO presence wait. Closing a wait
-destroys its socket and queued datagrams. Presses made while idle or while a
-previous request was active can therefore never approve a later operation.
+exists only for the lifetime of the current applet presence wait. Closing a
+wait destroys its socket and queued datagrams. Presses made while idle or while
+a previous request was active can therefore never approve a later operation.
+
+PIV reports `Always` or `Cached` requirements from the transport-neutral core.
+The CCID command thread blocks in the shared presence service while its endpoint
+owner continues sending time extensions. Cached authorization uses monotonic
+time, expires after 15 seconds, and is scoped to the PIV applet; FIDO presence
+does not populate it.
 
 KEY3 is represented by its sampled current logical level. GPIO edges merely
 wake the main worker, and multiple wakes may coalesce without losing the final

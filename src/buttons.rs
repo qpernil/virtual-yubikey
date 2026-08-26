@@ -1,7 +1,7 @@
 //! Event-driven controls from the display HAT joystick and keys.
 
 use crate::diagnostics::{self, Level};
-use crate::functionfs::USER_PRESENCE_TOUCH;
+use crate::presence::USER_PRESENCE_TOUCH;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
@@ -315,43 +315,4 @@ fn set_nonblocking(file: &File) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn touch_never_lingers_into_a_later_wait() {
-        let path =
-            std::env::temp_dir().join(format!("virtual-yubikey-touch-test-{}", std::process::id()));
-        let _ = fs::remove_file(&path);
-        let notifier = UnixDatagram::unbound().unwrap();
-
-        signal_touch(&notifier, &path);
-        let current = UnixDatagram::bind(&path).unwrap();
-        current.set_nonblocking(true).unwrap();
-        assert_eq!(
-            current.recv(&mut [0_u8; 1]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-
-        signal_touch(&notifier, &path);
-        let mut command = [0_u8; 1];
-        assert_eq!(current.recv(&mut command).unwrap(), 1);
-        assert_eq!(command[0], USER_PRESENCE_TOUCH);
-
-        drop(current);
-        fs::remove_file(&path).unwrap();
-        signal_touch(&notifier, &path);
-        let later = UnixDatagram::bind(&path).unwrap();
-        later.set_nonblocking(true).unwrap();
-        assert_eq!(
-            later.recv(&mut command).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(later);
-        fs::remove_file(path).unwrap();
-    }
 }

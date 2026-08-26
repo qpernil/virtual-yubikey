@@ -17,10 +17,6 @@ use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "linux")]
-use std::os::unix::net::UnixDatagram;
-#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
@@ -39,7 +35,7 @@ use usb_gadget_worker::{
     StatePersistence, StatePersistenceHandle, UsbBusEvent,
 };
 #[cfg(target_os = "linux")]
-use virtual_yubikey_core::FidoAuthenticator;
+use virtual_yubikey_core::{FidoAuthenticator, UserPresencePolicy};
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
@@ -49,27 +45,6 @@ const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
-#[cfg(target_os = "linux")]
-pub(crate) const USER_PRESENCE_TOUCH: u8 = b'T';
-
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UserPresenceCommand {
-    Touch,
-}
-
-#[cfg(target_os = "linux")]
-impl UserPresenceCommand {
-    fn decode(value: u8) -> Option<Self> {
-        match value {
-            USER_PRESENCE_TOUCH => Some(Self::Touch),
-            // Additional command bytes can represent simulated
-            // biometric results without changing the IPC transport.
-            _ => None,
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) fn run_worker(
     serial: u32,
@@ -338,9 +313,8 @@ struct EndpointServices<'a> {
 #[cfg(target_os = "linux")]
 struct HidRuntime {
     serial: u32,
-    touch_socket: PathBuf,
+    presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
-    display_activity: crate::display::Activity,
     lifecycle: Arc<EndpointLifecycle>,
 }
 
@@ -446,6 +420,8 @@ impl Endpoints {
             mut ccid_interrupt,
         } = self;
         let (notification_tx, notification_rx) = mpsc::sync_channel(1);
+        let presence =
+            crate::presence::Service::new(storage.touch_socket.clone(), display_activity.clone());
 
         let notification_thread = thread::Builder::new()
             .name("ccid-notify".to_owned())
@@ -476,11 +452,18 @@ impl Endpoints {
         let ccid_thread = thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
+            let presence = presence.clone();
             let lifecycle = Arc::clone(&lifecycle);
             move || {
-                if let Err(error) =
-                    serve_ccid(ccid_out, ccid_in, ccid, clock, display_activity, lifecycle)
-                {
+                if let Err(error) = serve_ccid(
+                    ccid_out,
+                    ccid_in,
+                    ccid,
+                    presence,
+                    clock,
+                    display_activity,
+                    lifecycle,
+                ) {
                     diagnostics::log(
                         Level::Info,
                         "ccid",
@@ -495,9 +478,8 @@ impl Endpoints {
         let fido_thread = thread::Builder::new().name("fido-hid".to_owned()).spawn({
             let runtime = HidRuntime {
                 serial,
-                touch_socket: storage.touch_socket.clone(),
+                presence,
                 clock: keepalive.handle(),
-                display_activity: display_activity.clone(),
                 lifecycle,
             };
             move || {
@@ -827,6 +809,7 @@ fn serve_ccid(
     mut output: File,
     mut input: File,
     ccid: StatePersistenceHandle<crate::ccid::Device>,
+    presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
     lifecycle: Arc<EndpointLifecycle>,
@@ -851,6 +834,15 @@ fn serve_ccid(
                         let replies = state.receive_with_keepalives(
                             &request[..length],
                             &clock,
+                            |policy| {
+                                presence.wait("piv", policy, || {
+                                    Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
+                                        crate::presence::WaitControl::Cancel
+                                    } else {
+                                        crate::presence::WaitControl::Continue
+                                    })
+                                })
+                            },
                             |keepalive| write_transfer(&mut input, keepalive),
                         )?;
                         let mutation = state
@@ -884,9 +876,8 @@ fn serve_hid(
 ) -> io::Result<()> {
     let HidRuntime {
         serial,
-        touch_socket,
+        presence,
         clock,
-        display_activity,
         lifecycle,
     } = runtime;
     let reports = HidReader::start(output, lifecycle)?;
@@ -978,14 +969,7 @@ fn serve_hid(
                             );
                         }
                         let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
-                            match wait_for_touch(
-                                &mut input,
-                                receiver,
-                                channel,
-                                &touch_socket,
-                                &clock,
-                                &display_activity,
-                            ) {
+                            match wait_for_touch(&mut input, receiver, channel, &presence, &clock) {
                                 Ok(true) => match exchange_persistent_fido_with_keepalives(
                                     &fido, &mut input, receiver, request, channel, true, &clock,
                                 ) {
@@ -1243,74 +1227,18 @@ fn exchange_fido_with_keepalives(
 }
 
 #[cfg(target_os = "linux")]
-struct TouchSocket {
-    socket: UnixDatagram,
-    path: PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-impl TouchSocket {
-    fn bind(path: &Path) -> io::Result<Self> {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(with_context(error, "remove stale touch socket")),
-        }
-        let socket =
-            UnixDatagram::bind(path).map_err(|error| with_context(error, "bind touch socket"))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        socket.set_nonblocking(true)?;
-        Ok(Self {
-            socket,
-            path: path.to_owned(),
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for TouchSocket {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn wait_for_touch(
     input: &mut File,
     reports: &Receiver<io::Result<Vec<u8>>>,
     channel: u32,
-    touch_socket: &Path,
+    presence: &crate::presence::Service,
     clock: &crate::keepalive::Handle,
-    display_activity: &crate::display::Activity,
 ) -> io::Result<bool> {
-    let touch = TouchSocket::bind(touch_socket)?;
-    diagnostics::log(
-        Level::Info,
-        "fido",
-        "user_presence_wait",
-        format_args!("channel={channel:08x} socket={}", touch_socket.display()),
-    );
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
-    let _presence_wait = display_activity.wait_for_presence()?;
-    let mut signal = [0_u8; 1];
-
-    while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        match touch.socket.recv(&mut signal) {
-            Ok(1) if UserPresenceCommand::decode(signal[0]) == Some(UserPresenceCommand::Touch) => {
-                diagnostics::log(
-                    Level::Info,
-                    "fido",
-                    "user_presence_received",
-                    format_args!("channel={channel:08x}"),
-                );
-                return Ok(true);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(with_context(error, "receive touch notification")),
+    presence.wait("fido", UserPresencePolicy::Always, || {
+        if STOP_REQUESTED.load(Ordering::Relaxed) {
+            return Ok(crate::presence::WaitControl::Cancel);
         }
-
         if let Some(report) = try_receive_hid_report(reports)? {
             match report.len() {
                 crate::ctaphid::REPORT_SIZE => {
@@ -1323,7 +1251,7 @@ fn wait_for_touch(
                             "user_presence_cancelled",
                             format_args!("channel={channel:08x}"),
                         );
-                        return Ok(false);
+                        return Ok(crate::presence::WaitControl::Cancel);
                     }
                     diagnostics::log(
                         Level::Debug,
@@ -1354,9 +1282,8 @@ fn wait_for_touch(
                 ),
             )?;
         }
-        thread::sleep(Duration::from_millis(5));
-    }
-    Ok(false)
+        Ok(crate::presence::WaitControl::Continue)
+    })
 }
 
 #[cfg(target_os = "linux")]

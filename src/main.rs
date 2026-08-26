@@ -14,6 +14,10 @@ mod functionfs;
 #[cfg(any(target_os = "linux", test))]
 mod keepalive;
 #[cfg(any(target_os = "linux", test))]
+mod presence;
+#[cfg(any(target_os = "linux", test))]
+mod presence_cache;
+#[cfg(any(target_os = "linux", test))]
 mod smartcard;
 #[cfg(any(target_os = "linux", test))]
 mod usb_identity;
