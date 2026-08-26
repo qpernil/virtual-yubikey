@@ -17,8 +17,8 @@ The principal public implementation references are:
 - NIST SP 800-73 PIV specifications;
 - ISO/IEC 7816 command and APDU behavior;
 - OpenPGP card specifications; and
-- Yubico's publicly available developer documentation for YubiKey Management
-  and PIV extensions.
+- Yubico's publicly available developer documentation for YubiKey Management,
+  PIV, and YubiHSM Auth.
 
 The optional physical display uses Yubico's publicly published YubiKey 5 NFC
 front product image as recorded in `assets/README.md`. The image is kept as an
@@ -27,7 +27,7 @@ code licensed by this repository.
 
 Compatibility validation uses normal, documented host applications and
 protocol exchanges with software including browsers, PC/SC, `ykman`,
-`yubico-piv-tool`, and Yubico Authenticator. Independently observed protocol
+`yubico-piv-tool`, `pkcs11rs`, and Yubico Authenticator. Independently observed protocol
 facts and test transcripts become independently written Rust code and
 regression tests; vendor source code is not copied.
 

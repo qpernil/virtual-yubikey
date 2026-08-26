@@ -1,5 +1,6 @@
 use crate::{
     crypto::{aes_ecb_block, Direction, AES_BLOCK_SIZE},
+    presence::PresenceClient,
     CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy, PIV_TOUCH_CACHE_DURATION,
 };
 use software_key_core::{
@@ -344,6 +345,7 @@ pub(crate) struct PivApplet {
     management_touch_policy: u8,
     management_challenge: Option<Zeroizing<Vec<u8>>>,
     management_authenticated: bool,
+    presence: PresenceClient,
     objects: BTreeMap<u32, Vec<u8>>,
     keys: BTreeMap<u8, PivKey>,
     persistent_change: bool,
@@ -381,6 +383,7 @@ impl PivApplet {
             management_touch_policy: TOUCH_POLICY_NEVER,
             management_challenge: None,
             management_authenticated: false,
+            presence: PresenceClient::default(),
             objects: BTreeMap::new(),
             keys: BTreeMap::new(),
             persistent_change: false,
@@ -552,6 +555,7 @@ impl PivApplet {
             management_touch_policy,
             management_challenge: None,
             management_authenticated: false,
+            presence: PresenceClient::default(),
             objects: objects.ok_or("persistent PIV state has no object store")?,
             keys: keys.ok_or("persistent PIV state has no key store")?,
             persistent_change: false,
@@ -1078,13 +1082,14 @@ impl PivApplet {
         };
 
         if fields.as_slice() == [(0x80, &[][..])] {
-            if presence == PresenceAuthorization::Absent {
-                match self.management_touch_policy {
-                    TOUCH_POLICY_NEVER => {}
-                    TOUCH_POLICY_ALWAYS => {
-                        return PivExchange::PresenceRequired(UserPresencePolicy::Always)
-                    }
-                    _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+            let presence_policy = match self.management_touch_policy {
+                TOUCH_POLICY_NEVER => None,
+                TOUCH_POLICY_ALWAYS => Some(UserPresencePolicy::Always),
+                _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+            };
+            if let Some(policy) = presence_policy {
+                if !self.presence.authorize(policy, presence) {
+                    return PivExchange::PresenceRequired(policy);
                 }
             }
             let mut challenge = Zeroizing::new(vec![0_u8; AES_BLOCK_SIZE]);
@@ -1156,18 +1161,15 @@ impl PivApplet {
         {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         }
-        if presence == PresenceAuthorization::Absent {
-            match key.touch_policy {
-                TOUCH_POLICY_NEVER => {}
-                TOUCH_POLICY_ALWAYS => {
-                    return PivExchange::PresenceRequired(UserPresencePolicy::Always)
-                }
-                TOUCH_POLICY_CACHED => {
-                    return PivExchange::PresenceRequired(UserPresencePolicy::Cached(
-                        PIV_TOUCH_CACHE_DURATION,
-                    ))
-                }
-                _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+        let presence_policy = match key.touch_policy {
+            TOUCH_POLICY_NEVER => None,
+            TOUCH_POLICY_ALWAYS => Some(UserPresencePolicy::Always),
+            TOUCH_POLICY_CACHED => Some(UserPresencePolicy::Cached(PIV_TOUCH_CACHE_DURATION)),
+            _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+        };
+        if let Some(policy) = presence_policy {
+            if !self.presence.authorize(policy, presence) {
+                return PivExchange::PresenceRequired(policy);
             }
         }
         let result = if let Some(digest) = unique_field(&fields, 0x81) {
@@ -1714,6 +1716,27 @@ mod tests {
         generate_touch_key(&mut piv, 0x9a, TOUCH_POLICY_ALWAYS);
         generate_touch_key(&mut piv, 0x9d, TOUCH_POLICY_CACHED);
 
+        let cached_request = signing_request(&[0x22; 32]);
+        let cached = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9d,
+            &cached_request,
+        );
+        assert!(matches!(
+            piv.exchange(&cached, PresenceAuthorization::Absent),
+            PivExchange::PresenceRequired(UserPresencePolicy::Cached(duration))
+                if duration == PIV_TOUCH_CACHE_DURATION
+        ));
+        assert_eq!(
+            complete(piv.exchange(&cached, PresenceAuthorization::Granted)).status,
+            0x9000
+        );
+        assert_eq!(
+            complete(piv.exchange(&cached, PresenceAuthorization::Absent)).status,
+            0x9000
+        );
+
         let always_request = signing_request(&[0x11; 32]);
         let always = command(
             INS_AUTHENTICATE,
@@ -1733,27 +1756,6 @@ mod tests {
             piv.exchange(&always, PresenceAuthorization::Absent),
             PivExchange::PresenceRequired(UserPresencePolicy::Always)
         ));
-
-        let cached_request = signing_request(&[0x22; 32]);
-        let cached = command(
-            INS_AUTHENTICATE,
-            PivAlgorithm::EccP256 as u8,
-            0x9d,
-            &cached_request,
-        );
-        assert!(matches!(
-            piv.exchange(&cached, PresenceAuthorization::Absent),
-            PivExchange::PresenceRequired(UserPresencePolicy::Cached(duration))
-                if duration == PIV_TOUCH_CACHE_DURATION
-        ));
-        assert_eq!(
-            complete(piv.exchange(&cached, PresenceAuthorization::Granted)).status,
-            0x9000
-        );
-        assert_eq!(
-            piv.transmit(&cached).status,
-            STATUS_CONDITIONS_NOT_SATISFIED
-        );
     }
 
     fn decode_ecdsa_der(signature: &[u8], coordinate_length: usize) -> Vec<u8> {

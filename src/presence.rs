@@ -4,8 +4,6 @@
 use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
 use crate::display;
-#[cfg(target_os = "linux")]
-use crate::presence_cache::TouchCache;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -16,9 +14,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 #[cfg(target_os = "linux")]
 use std::thread;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
-#[cfg(target_os = "linux")]
-use virtual_yubikey_core::UserPresencePolicy;
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -60,7 +56,6 @@ struct Inner {
     touch_socket: PathBuf,
     display_activity: display::Activity,
     sensor: Mutex<()>,
-    cache: Mutex<TouchCache>,
 }
 
 #[cfg(target_os = "linux")]
@@ -71,24 +66,14 @@ impl Service {
                 touch_socket,
                 display_activity,
                 sensor: Mutex::new(()),
-                cache: Mutex::new(TouchCache::default()),
             }),
         }
     }
 
     pub(crate) fn wait(
         &self,
-        application: &'static str,
-        policy: UserPresencePolicy,
         mut poll: impl FnMut() -> io::Result<WaitControl>,
     ) -> io::Result<bool> {
-        if let UserPresencePolicy::Cached(timeout) = policy {
-            if self.cached(application, timeout, Instant::now())? {
-                self.log_cache_hit(application, timeout);
-                return Ok(true);
-            }
-        }
-
         let _sensor = loop {
             match self.inner.sensor.try_lock() {
                 Ok(sensor) => break sensor,
@@ -104,23 +89,12 @@ impl Service {
             }
         };
 
-        if let UserPresencePolicy::Cached(timeout) = policy {
-            if self.cached(application, timeout, Instant::now())? {
-                self.log_cache_hit(application, timeout);
-                return Ok(true);
-            }
-        }
-
         let touch = TouchSocket::bind(&self.inner.touch_socket)?;
         diagnostics::log(
             Level::Info,
             "presence",
             "wait",
-            format_args!(
-                "application={application} policy={} socket={}",
-                policy_name(policy),
-                self.inner.touch_socket.display()
-            ),
+            format_args!("socket={}", self.inner.touch_socket.display()),
         );
         let _attention = self.inner.display_activity.wait_for_presence()?;
         let mut signal = [0_u8; 1];
@@ -131,17 +105,7 @@ impl Service {
                     if UserPresenceCommand::decode(signal[0])
                         == Some(UserPresenceCommand::Touch) =>
                 {
-                    self.inner
-                        .cache
-                        .lock()
-                        .map_err(|_| io::Error::other("presence cache lock poisoned"))?
-                        .record(application, Instant::now());
-                    diagnostics::log(
-                        Level::Info,
-                        "presence",
-                        "received",
-                        format_args!("application={application}"),
-                    );
+                    diagnostics::log(Level::Info, "presence", "received", format_args!("touch"));
                     return Ok(true);
                 }
                 Ok(_) => {}
@@ -155,46 +119,12 @@ impl Service {
                     Level::Info,
                     "presence",
                     "cancelled",
-                    format_args!("application={application}"),
+                    format_args!("cancelled"),
                 );
                 return Ok(false);
             }
             thread::sleep(POLL_INTERVAL);
         }
-    }
-
-    fn cached(
-        &self,
-        application: &'static str,
-        timeout: Duration,
-        now: Instant,
-    ) -> io::Result<bool> {
-        let cache = self
-            .inner
-            .cache
-            .lock()
-            .map_err(|_| io::Error::other("presence cache lock poisoned"))?;
-        Ok(cache.is_valid(application, timeout, now))
-    }
-
-    fn log_cache_hit(&self, application: &'static str, timeout: Duration) {
-        diagnostics::log(
-            Level::Info,
-            "presence",
-            "cache_hit",
-            format_args!(
-                "application={application} timeout_ms={}",
-                timeout.as_millis()
-            ),
-        );
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn policy_name(policy: UserPresencePolicy) -> &'static str {
-    match policy {
-        UserPresencePolicy::Always => "always",
-        UserPresencePolicy::Cached(_) => "cached",
     }
 }
 

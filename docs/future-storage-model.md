@@ -2,11 +2,11 @@
 
 ## Status
 
-This document specifies a future storage design. The current FIDO and PIV state
-files remain the supported on-disk format until the replacement is implemented
-and tested. Activating the replacement must be explicit; an unsupported or
-corrupt state must continue to fail closed rather than silently starting with
-an empty token.
+This document specifies a future storage design. The current independent FIDO,
+PIV, and YubiHSM Auth state files remain the supported on-disk format until the
+replacement is implemented and tested. Activating the
+replacement must be explicit; an unsupported or corrupt state must continue to
+fail closed rather than silently starting with an empty token.
 
 ## Goals
 

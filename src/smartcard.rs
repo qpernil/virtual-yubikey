@@ -3,8 +3,7 @@
 use crate::diagnostics::{self, Level};
 use std::io;
 use virtual_yubikey_core::{
-    ApduExchange, Applet, CommandApdu, DeviceProfile, PresenceAuthorization, UserPresencePolicy,
-    VirtualYubiKey,
+    ApduExchange, Applet, CommandApdu, DeviceProfile, PresenceAuthorization, VirtualYubiKey,
 };
 #[cfg(test)]
 use virtual_yubikey_core::{FIDO2_AID, PIV_AID};
@@ -32,14 +31,16 @@ impl Card {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn from_piv_persistent_state(
+    pub(crate) fn from_persistent_states(
         serial: u32,
-        encoded: &[u8],
+        piv_encoded: &[u8],
+        hsmauth_encoded: &[u8],
     ) -> Result<Self, &'static str> {
         Ok(Self {
-            device: VirtualYubiKey::from_piv_persistent_state(
+            device: VirtualYubiKey::from_persistent_states(
                 DeviceProfile::yubikey_5_8_ccid(serial),
-                encoded,
+                piv_encoded,
+                hsmauth_encoded,
             )?,
         })
     }
@@ -50,8 +51,18 @@ impl Card {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn hsmauth_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.device.hsmauth_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
         self.device.take_piv_persistent_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_hsmauth_persistent_change(&mut self) -> bool {
+        self.device.take_hsmauth_persistent_change()
     }
 
     pub(crate) fn reset(&mut self) {
@@ -65,14 +76,14 @@ impl Card {
     }
 
     pub(crate) fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
-        self.transmit_inner(raw, |_| Ok(false))
+        self.transmit_inner(raw, || Ok(false))
             .expect("the direct smart-card transport has an infallible presence policy")
     }
 
     pub(crate) fn transmit_with_presence(
         &mut self,
         raw: &[u8],
-        authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool>,
+        authorize: impl FnMut() -> io::Result<bool>,
     ) -> io::Result<Vec<u8>> {
         self.transmit_inner(raw, authorize)
     }
@@ -80,7 +91,7 @@ impl Card {
     fn transmit_inner(
         &mut self,
         raw: &[u8],
-        mut authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool>,
+        mut authorize: impl FnMut() -> io::Result<bool>,
     ) -> io::Result<Vec<u8>> {
         if diagnostics::enabled(Level::Trace) {
             diagnostics::log(
@@ -134,7 +145,7 @@ impl Card {
                 .exchange_apdu(raw, PresenceAuthorization::Absent)
             {
                 ApduExchange::Complete(response) => response,
-                ApduExchange::PresenceRequired(policy) if authorize(policy)? => {
+                ApduExchange::PresenceRequired(_) if authorize()? => {
                     match self
                         .device
                         .exchange_apdu(raw, PresenceAuthorization::Granted)
@@ -142,7 +153,7 @@ impl Card {
                         ApduExchange::Complete(response) => response,
                         ApduExchange::PresenceRequired(_) => {
                             return Err(io::Error::other(
-                                "PIV operation requested presence after it was granted",
+                                "smart-card operation requested presence after it was granted",
                             ));
                         }
                     }
@@ -213,6 +224,25 @@ impl Card {
                     ),
                 );
             }
+            Some(Applet::HsmAuth) => {
+                let state_changing = matches!(command.ins, 0x01 | 0x02 | 0x06 | 0x08 | 0x0b);
+                diagnostics::log(
+                    if state_changing || status != 0x9000 {
+                        Level::Info
+                    } else {
+                        Level::Debug
+                    },
+                    "hsmauth",
+                    hsmauth_instruction_name(command.ins),
+                    format_args!(
+                        "ins={:02x} p1={:02x} p2={:02x} data_length={} sw={status:04x}",
+                        command.ins,
+                        command.p1,
+                        command.p2,
+                        command.data.len()
+                    ),
+                );
+            }
             _ => {}
         }
     }
@@ -236,6 +266,23 @@ impl Card {
                 format_args!("hex={}", diagnostics::hex(response)),
             );
         }
+    }
+}
+
+fn hsmauth_instruction_name(instruction: u8) -> &'static str {
+    match instruction {
+        0x01 => "put_credential",
+        0x02 => "delete_credential",
+        0x03 => "calculate_session_keys",
+        0x04 => "get_challenge",
+        0x05 => "list_credentials",
+        0x06 => "reset",
+        0x07 => "get_version",
+        0x08 => "put_management_key",
+        0x09 => "get_management_key_retries",
+        0x0a => "get_public_key",
+        0x0b => "change_credential_password",
+        _ => "unknown_instruction",
     }
 }
 
