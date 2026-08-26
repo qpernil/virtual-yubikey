@@ -150,10 +150,6 @@ impl core::fmt::Debug for Credential {
 }
 
 enum Challenge {
-    Symmetric {
-        label: String,
-        host: [u8; 8],
-    },
     Asymmetric {
         label: String,
         ephemeral: Box<SoftwareSigningKey>,
@@ -438,7 +434,6 @@ impl HsmAuthApplet {
                 if getrandom::fill(&mut host).is_err() {
                     return ResponseApdu::status(STATUS_EXECUTION_ERROR);
                 }
-                self.challenge = Some(Challenge::Symmetric { label, host });
                 ResponseApdu::success(host.to_vec())
             }
             Algorithm::EcP256YubicoAuthentication
@@ -508,7 +503,7 @@ impl HsmAuthApplet {
                     ],
                 ) =>
             {
-                self.calculate_symmetric(index, &label, tlvs[1].value, tlvs[2].value)
+                self.calculate_symmetric(index, tlvs[1].value, tlvs[2].value)
                     .into()
             }
             Algorithm::EcP256YubicoAuthentication
@@ -539,22 +534,11 @@ impl HsmAuthApplet {
     fn calculate_symmetric(
         &mut self,
         index: usize,
-        label: &str,
         context: &[u8],
         card_cryptogram: &[u8],
     ) -> ResponseApdu {
         if context.len() != 16 || card_cryptogram.len() != 8 {
             return ResponseApdu::status(STATUS_WRONG_DATA);
-        }
-        let Some(Challenge::Symmetric {
-            label: pending_label,
-            host,
-        }) = self.challenge.take()
-        else {
-            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
-        };
-        if pending_label != label || !bool::from(host.ct_eq(&context[..8])) {
-            return ResponseApdu::status(STATUS_DATA_INVALID);
         }
         let CredentialSecret::Symmetric { enc, mac } = &self.credentials[index].secret else {
             return ResponseApdu::status(STATUS_WRONG_DATA);
@@ -753,9 +737,7 @@ impl HsmAuthApplet {
     fn clear_challenge_for(&mut self, label: &str) {
         if matches!(
             &self.challenge,
-            Some(Challenge::Symmetric { label: pending, .. })
-                | Some(Challenge::Asymmetric { label: pending, .. })
-                if pending == label
+            Some(Challenge::Asymmetric { label: pending, .. }) if pending == label
         ) {
             self.challenge = None;
         }
@@ -1199,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn symmetric_credential_derives_all_three_scp03_session_keys_and_requires_touch() {
+    fn symmetric_credential_accepts_host_context_derives_session_keys_and_requires_touch() {
         let enc = [0x11; 16];
         let mac = [0x22; 16];
         let mut applet = HsmAuthApplet::new(1, [5, 8, 0]);
@@ -1208,20 +1190,10 @@ mod tests {
             0x9000
         );
 
-        let mut challenge_data = Vec::new();
-        append_tlv(&mut challenge_data, TAG_LABEL, b"touch key");
-        let challenge = complete(execute(
-            &mut applet,
-            INS_GET_CHALLENGE,
-            0,
-            0,
-            &challenge_data,
-            PresenceAuthorization::Absent,
-        ));
-        assert_eq!(challenge.status, 0x9000);
-        assert_eq!(challenge.data.len(), 8);
-
-        let mut context = challenge.data;
+        // Symmetric HSM Auth is stateless: callers may generate the host
+        // challenge themselves and calculate directly from the complete
+        // host-plus-card context without first issuing GET CHALLENGE.
+        let mut context = vec![0x33; 8];
         context.extend_from_slice(&[0x44; 8]);
         let s_enc = scp03_key(&enc, 0x04, &context).unwrap();
         let s_mac = scp03_key(&mac, 0x06, &context).unwrap();
@@ -1454,9 +1426,13 @@ mod tests {
             applet.verify_credential_password(0, &[0xff; 16]),
             Err(STATUS_VERIFY_FAILED | 7)
         );
-        applet.challenge = Some(Challenge::Symmetric {
+        let ephemeral =
+            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        let public = p256_public_key(&ephemeral).unwrap();
+        applet.challenge = Some(Challenge::Asymmetric {
             label: "persistent".to_owned(),
-            host: [9; 8],
+            ephemeral: Box::new(ephemeral),
+            public,
         });
 
         let encoded = applet.persistent_state().unwrap();
