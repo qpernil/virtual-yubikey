@@ -263,10 +263,11 @@ CCID probing is ordinary application activity.
 While any application is blocked waiting for physical presence, the same
 cut-outs blink until touch, cancellation, or failure ends the wait. Every
 application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
-approximately 1.30 blinks per second. PIV and OpenPGP will reuse this state when
-those application paths implement touch. General FIDO HID report traffic does
-not drive the activity indication. USB suspend and worker shutdown clear the
-panel and turn off its backlight. Holding KEY3 turns the display off and
+approximately 1.30 blinks per second. FIDO and PIV use one protocol-neutral
+presence service; OpenPGP and YubiHSM Auth can join it when those applets are
+implemented. General FIDO HID report traffic does not drive the activity
+indication. USB suspend and worker shutdown clear the panel and turn off its
+backlight. Holding KEY3 turns the display off and
 publishes an empty personality, leaving the worker powered but absent from USB.
 Releasing KEY3 republishes the complete personality immediately, and the same
 worker restores the idle image when the new generation is bound. To the host
@@ -331,13 +332,23 @@ The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event
 virtual-yubikey-touch
 ```
 
+PIV private-key operations honor the key policy stored at generation or import:
+`Never` proceeds immediately, `Always` requires a fresh touch, and `Cached`
+reuses a PIV touch for 15 seconds. The management-key policy is likewise stored,
+reported by metadata, persisted, and enforced when management authentication
+begins. Its `0xff`, `0xfe`, and `0xfd` encodings select `Never`, `Always`, and
+`Cached`. The cache uses monotonic time and is scoped to PIV, so a FIDO touch
+cannot authorize a PIV operation. PIV waits use ordinary CCID time-extension
+frames while the shared presence service waits for the same joystick or helper.
+
 Holding display-HAT KEY3 requests a physical-style USB ejection. The worker
 sends an empty `Configure` record and remains ejected until release; it then
 sends its complete personality in a second `Configure`. It neither signals nor
 restarts the supervisor. KEY1 and KEY2 are intentionally unassigned.
 
 The GPIO thread drains edge events continuously but sends only a newly observed
-press into the socket for the currently active wait. The helper fails when no
+press into the socket for the currently active wait, independent of which
+applet requested it. The helper fails when no
 operation is waiting. A press while idle, a button held before a request, switch
 bounce after completion, and unread datagrams from a completed wait therefore
 cannot approve a later request. Browser or operating-system UI remains

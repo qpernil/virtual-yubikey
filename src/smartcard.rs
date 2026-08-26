@@ -1,7 +1,11 @@
 //! Diagnostic adapter from CCID to the transport-neutral logical device.
 
 use crate::diagnostics::{self, Level};
-use virtual_yubikey_core::{Applet, CommandApdu, DeviceProfile, VirtualYubiKey};
+use std::io;
+use virtual_yubikey_core::{
+    ApduExchange, Applet, CommandApdu, DeviceProfile, PresenceAuthorization, UserPresencePolicy,
+    VirtualYubiKey,
+};
 #[cfg(test)]
 use virtual_yubikey_core::{FIDO2_AID, PIV_AID};
 
@@ -61,6 +65,23 @@ impl Card {
     }
 
     pub(crate) fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
+        self.transmit_inner(raw, |_| Ok(false))
+            .expect("the direct smart-card transport has an infallible presence policy")
+    }
+
+    pub(crate) fn transmit_with_presence(
+        &mut self,
+        raw: &[u8],
+        authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool>,
+    ) -> io::Result<Vec<u8>> {
+        self.transmit_inner(raw, authorize)
+    }
+
+    fn transmit_inner(
+        &mut self,
+        raw: &[u8],
+        mut authorize: impl FnMut(UserPresencePolicy) -> io::Result<bool>,
+    ) -> io::Result<Vec<u8>> {
         if diagnostics::enabled(Level::Trace) {
             diagnostics::log(
                 Level::Trace,
@@ -108,13 +129,32 @@ impl Card {
             );
             vec![0x6a, 0x82]
         } else {
-            self.device.transmit(raw)
+            match self
+                .device
+                .exchange_apdu(raw, PresenceAuthorization::Absent)
+            {
+                ApduExchange::Complete(response) => response,
+                ApduExchange::PresenceRequired(policy) if authorize(policy)? => {
+                    match self
+                        .device
+                        .exchange_apdu(raw, PresenceAuthorization::Granted)
+                    {
+                        ApduExchange::Complete(response) => response,
+                        ApduExchange::PresenceRequired(_) => {
+                            return Err(io::Error::other(
+                                "PIV operation requested presence after it was granted",
+                            ));
+                        }
+                    }
+                }
+                ApduExchange::PresenceRequired(_) => vec![0x69, 0x85],
+            }
         };
         if let Ok(command) = command {
             self.log_outcome(&command, &response);
         }
         self.log_response(&response);
-        response
+        Ok(response)
     }
 
     fn log_outcome(&self, command: &CommandApdu<'_>, response: &[u8]) {

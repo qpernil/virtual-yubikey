@@ -1,6 +1,6 @@
 use crate::{
     crypto::{aes_ecb_block, Direction, AES_BLOCK_SIZE},
-    CommandApdu, ResponseApdu,
+    CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy, PIV_TOUCH_CACHE_DURATION,
 };
 use software_key_core::{
     software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
@@ -67,6 +67,19 @@ const PIN_POLICY_NEVER: u8 = 1;
 const PIN_POLICY_ONCE: u8 = 2;
 const PIN_POLICY_ALWAYS: u8 = 3;
 const TOUCH_POLICY_NEVER: u8 = 1;
+const TOUCH_POLICY_ALWAYS: u8 = 2;
+const TOUCH_POLICY_CACHED: u8 = 3;
+
+pub(crate) enum PivExchange {
+    Complete(ResponseApdu),
+    PresenceRequired(UserPresencePolicy),
+}
+
+impl From<ResponseApdu> for PivExchange {
+    fn from(response: ResponseApdu) -> Self {
+        Self::Complete(response)
+    }
+}
 
 pub(crate) fn select_response() -> Vec<u8> {
     PIV_SELECT_RESPONSE.to_vec()
@@ -328,6 +341,7 @@ pub(crate) struct PivApplet {
     pin_verified: bool,
     management_algorithm: ManagementAlgorithm,
     management_key: Zeroizing<Vec<u8>>,
+    management_touch_policy: u8,
     management_challenge: Option<Zeroizing<Vec<u8>>>,
     management_authenticated: bool,
     objects: BTreeMap<u32, Vec<u8>>,
@@ -345,6 +359,7 @@ impl fmt::Debug for PivApplet {
             .field("puk_retries", &self.puk.retries)
             .field("pin_verified", &self.pin_verified)
             .field("management_algorithm", &self.management_algorithm)
+            .field("management_touch_policy", &self.management_touch_policy)
             .field("management_authenticated", &self.management_authenticated)
             .field("object_count", &self.objects.len())
             .field("key_count", &self.keys.len())
@@ -363,6 +378,7 @@ impl PivApplet {
             pin_verified: false,
             management_algorithm: ManagementAlgorithm::Aes192,
             management_key: Zeroizing::new(FACTORY_MANAGEMENT_KEY.to_vec()),
+            management_touch_policy: TOUCH_POLICY_NEVER,
             management_challenge: None,
             management_authenticated: false,
             objects: BTreeMap::new(),
@@ -397,6 +413,7 @@ impl PivApplet {
         let mut puk_maximum = None;
         let mut management_algorithm = None;
         let mut management_key = None;
+        let mut management_touch_policy = None;
         let mut objects = None;
         let mut keys = None;
         for _ in 0..fields {
@@ -472,6 +489,12 @@ impl PivApplet {
                 12 if keys.is_none() => {
                     keys = Some(decode_persistent_keys(&mut decoder)?);
                 }
+                13 if management_touch_policy.is_none() => {
+                    management_touch_policy =
+                        Some(decoder.u8().map_err(|_| {
+                            "persistent PIV state has invalid management touch policy"
+                        })?);
+                }
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent PIV state contains invalid data")?,
@@ -507,6 +530,9 @@ impl PivApplet {
         if management_key.len() != management_algorithm.key_length() {
             return Err("persistent PIV state management key has the wrong length");
         }
+        let management_touch_policy = management_touch_policy
+            .filter(|policy| valid_touch_policy(*policy))
+            .ok_or("persistent PIV state has no valid management touch policy")?;
         Ok(Self {
             serial,
             firmware,
@@ -523,6 +549,7 @@ impl PivApplet {
             pin_verified: false,
             management_algorithm,
             management_key,
+            management_touch_policy,
             management_challenge: None,
             management_authenticated: false,
             objects: objects.ok_or("persistent PIV state has no object store")?,
@@ -534,7 +561,7 @@ impl PivApplet {
     pub(crate) fn persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
-            .map(12)
+            .map(13)
             .map_err(|_| "cannot encode persistent PIV state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent PIV state")?
@@ -617,6 +644,11 @@ impl PivApplet {
                 .bytes(&private_key)
                 .map_err(|_| "cannot encode persistent PIV key")?;
         }
+        encoder
+            .u8(13)
+            .map_err(|_| "cannot encode persistent PIV state")?
+            .u8(self.management_touch_policy)
+            .map_err(|_| "cannot encode persistent PIV state")?;
         Ok(encoder.into_writer())
     }
 
@@ -624,11 +656,25 @@ impl PivApplet {
         std::mem::take(&mut self.persistent_change)
     }
 
+    #[cfg(test)]
     pub(crate) fn transmit(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
-        if command.cla != 0 {
-            return ResponseApdu::status(STATUS_CLASS_NOT_SUPPORTED);
+        match self.exchange(command, PresenceAuthorization::Absent) {
+            PivExchange::Complete(response) => response,
+            PivExchange::PresenceRequired(_) => {
+                ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED)
+            }
         }
-        match command.ins {
+    }
+
+    pub(crate) fn exchange(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+    ) -> PivExchange {
+        if command.cla != 0 {
+            return ResponseApdu::status(STATUS_CLASS_NOT_SUPPORTED).into();
+        }
+        let response = match command.ins {
             INS_GET_VERSION if empty_command(command, 0, 0) => {
                 ResponseApdu::success(self.firmware.to_vec())
             }
@@ -654,9 +700,9 @@ impl PivApplet {
                 self.reset_retry(command.data)
             }
             INS_AUTHENTICATE if command.p2 == REFERENCE_MANAGEMENT_KEY => {
-                self.authenticate_management(command)
+                return self.authenticate_management(command, presence)
             }
-            INS_AUTHENTICATE => self.general_authenticate(command),
+            INS_AUTHENTICATE => return self.general_authenticate(command, presence),
             INS_IMPORT_KEY => self.import_key(command),
             INS_SET_RETRIES if command.data.is_empty() => self.set_retries(command.p1, command.p2),
             INS_RESET if empty_command(command, 0, 0) => self.reset(),
@@ -674,7 +720,8 @@ impl PivApplet {
             | INS_SET_RETRIES
             | INS_RESET => ResponseApdu::status(STATUS_INCORRECT_PARAMETERS),
             _ => ResponseApdu::status(STATUS_INSTRUCTION_NOT_SUPPORTED),
-        }
+        };
+        response.into()
     }
 
     fn get_metadata(&self, reference: u8) -> ResponseApdu {
@@ -684,7 +731,7 @@ impl PivApplet {
             REFERENCE_PUK => self.push_reference_metadata(&mut data, &self.puk),
             REFERENCE_MANAGEMENT_KEY => {
                 push_tlv(&mut data, 0x01, &[self.management_algorithm as u8]);
-                push_tlv(&mut data, 0x02, &[0, 1]);
+                push_tlv(&mut data, 0x02, &[0, self.management_touch_policy]);
                 push_tlv(&mut data, 0x05, &[1]);
             }
             slot if valid_key_slot(slot) => {
@@ -1007,74 +1054,96 @@ impl PivApplet {
         }
     }
 
-    fn authenticate_management(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+    fn authenticate_management(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+    ) -> PivExchange {
         if command.p2 != REFERENCE_MANAGEMENT_KEY || command.p1 != self.management_algorithm as u8 {
-            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS).into();
         }
         let Some(dynamic) = decode_exact_tlv(command.data, 0x7c) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         let Some(fields) = decode_tlvs(dynamic) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
 
         if fields.as_slice() == [(0x80, &[][..])] {
+            if presence == PresenceAuthorization::Absent {
+                match self.management_touch_policy {
+                    TOUCH_POLICY_NEVER => {}
+                    TOUCH_POLICY_ALWAYS => {
+                        return PivExchange::PresenceRequired(UserPresencePolicy::Always)
+                    }
+                    TOUCH_POLICY_CACHED => {
+                        return PivExchange::PresenceRequired(UserPresencePolicy::Cached(
+                            PIV_TOUCH_CACHE_DURATION,
+                        ))
+                    }
+                    _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+                }
+            }
             let mut challenge = Zeroizing::new(vec![0_u8; AES_BLOCK_SIZE]);
             if getrandom::fill(challenge.as_mut()).is_err() {
-                return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
             }
             let Ok(cryptogram) =
                 aes_ecb_block(&self.management_key, &challenge, Direction::Encrypt)
             else {
-                return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
             };
             self.management_challenge = Some(challenge);
-            return ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x80, &cryptogram)));
+            return ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x80, &cryptogram))).into();
         }
 
         let Some(card_response) = unique_field(&fields, 0x80) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         let Some(host_challenge) = unique_field(&fields, 0x81) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         if card_response.len() != AES_BLOCK_SIZE || host_challenge.len() != AES_BLOCK_SIZE {
-            return ResponseApdu::status(STATUS_WRONG_LENGTH);
+            return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
         }
         let Some(expected) = self.management_challenge.take() else {
-            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
+            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
         };
         if !bool::from(expected.as_slice().ct_eq(card_response)) {
             self.management_authenticated = false;
-            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
         }
         let Ok(cryptogram) =
             aes_ecb_block(&self.management_key, host_challenge, Direction::Encrypt)
         else {
-            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
         };
         self.management_authenticated = true;
-        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &cryptogram)))
+        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &cryptogram))).into()
     }
 
-    fn general_authenticate(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+    fn general_authenticate(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+    ) -> PivExchange {
         let Some(key) = self.keys.get(&command.p2) else {
-            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND).into();
         };
         if command.p1 != key.algorithm as u8 {
-            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS).into();
         }
-        if key.pin_policy >= 4 || key.touch_policy != TOUCH_POLICY_NEVER {
-            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
+        if key.pin_policy >= 4 {
+            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
         }
         if key.pin_policy != PIN_POLICY_NEVER && !self.pin_verified {
-            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
         }
         let Some(dynamic) = decode_exact_tlv(command.data, 0x7c) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         let Some(fields) = decode_tlvs(dynamic) else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         if fields.len() != 2
             || unique_field(&fields, 0x82) != Some(&[][..])
@@ -1082,7 +1151,21 @@ impl PivApplet {
                 .iter()
                 .any(|(tag, _)| !matches!(*tag, 0x81 | 0x82 | 0x85))
         {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+        }
+        if presence == PresenceAuthorization::Absent {
+            match key.touch_policy {
+                TOUCH_POLICY_NEVER => {}
+                TOUCH_POLICY_ALWAYS => {
+                    return PivExchange::PresenceRequired(UserPresencePolicy::Always)
+                }
+                TOUCH_POLICY_CACHED => {
+                    return PivExchange::PresenceRequired(UserPresencePolicy::Cached(
+                        PIV_TOUCH_CACHE_DURATION,
+                    ))
+                }
+                _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
+            }
         }
         let result = if let Some(digest) = unique_field(&fields, 0x81) {
             let invalid_length = match key.algorithm {
@@ -1095,14 +1178,14 @@ impl PivApplet {
                 }
                 PivAlgorithm::Ed25519 => false,
                 PivAlgorithm::X25519 => {
-                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 }
             };
             if invalid_length {
-                return ResponseApdu::status(STATUS_WRONG_LENGTH);
+                return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
             let PivPrivateKey::Signing(private_key) = &key.private_key else {
-                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
             };
             let signature = if key.algorithm.rsa_bits().is_some() {
                 private_key
@@ -1114,20 +1197,20 @@ impl PivApplet {
                     .map(|signature| signature.into_bytes())
             } else {
                 let Some(algorithm) = key.algorithm.signing_algorithm() else {
-                    return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 };
                 private_key
                     .sign_prehash(algorithm, digest)
                     .map(|signature| signature.into_bytes())
             };
             let Ok(signature) = signature else {
-                return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
             };
             if key.algorithm.rsa_bits().is_some() || key.algorithm == PivAlgorithm::Ed25519 {
                 signature
             } else {
                 let Some(signature) = encode_ecdsa_der(&signature) else {
-                    return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+                    return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
                 };
                 signature
             }
@@ -1141,7 +1224,7 @@ impl PivApplet {
                 || key.algorithm == PivAlgorithm::Ed25519
                 || peer_public_key.len() != expected_length
             {
-                return ResponseApdu::status(STATUS_WRONG_LENGTH);
+                return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
             let shared_secret = match &key.private_key {
                 PivPrivateKey::Signing(private_key) => {
@@ -1152,20 +1235,20 @@ impl PivApplet {
                 }
             };
             let Ok(shared_secret) = shared_secret else {
-                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+                return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
             };
             shared_secret.to_vec()
         } else {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
         if key.pin_policy == PIN_POLICY_ALWAYS {
             self.pin_verified = false;
         }
-        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &result)))
+        ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &result))).into()
     }
 
     fn set_management_key(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
-        if command.p1 != 0xff || !matches!(command.p2, 0xfe | 0xff) {
+        if command.p1 != 0xff || !matches!(command.p2, 0xfd..=0xff) {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         }
         if !self.management_authenticated {
@@ -1192,6 +1275,12 @@ impl PivApplet {
         self.management_key.zeroize();
         self.management_key = Zeroizing::new(key.to_vec());
         self.management_algorithm = algorithm;
+        self.management_touch_policy = match command.p2 {
+            0xff => TOUCH_POLICY_NEVER,
+            0xfe => TOUCH_POLICY_ALWAYS,
+            0xfd => TOUCH_POLICY_CACHED,
+            _ => unreachable!(),
+        };
         self.management_challenge = None;
         self.persistent_change = true;
         ResponseApdu::success(Vec::new())
@@ -1568,6 +1657,94 @@ mod tests {
         assert_eq!(
             aes_ecb_block(key, cryptogram, Direction::Decrypt).unwrap(),
             host_challenge
+        );
+    }
+
+    fn complete(exchange: PivExchange) -> ResponseApdu {
+        match exchange {
+            PivExchange::Complete(response) => response,
+            PivExchange::PresenceRequired(policy) => {
+                panic!("unexpected presence request: {policy:?}")
+            }
+        }
+    }
+
+    fn generate_touch_key(piv: &mut PivApplet, slot: u8, touch_policy: u8) {
+        let template = [
+            encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]),
+            encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            encode_tlv(0xab, &[touch_policy]),
+        ]
+        .concat();
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GENERATE_ASYMMETRIC,
+                0,
+                slot,
+                &encode_tlv(0xac, &template),
+            ))
+            .status,
+            0x9000
+        );
+    }
+
+    fn signing_request(digest: &[u8]) -> Vec<u8> {
+        encode_tlv(
+            0x7c,
+            &[encode_tlv(0x82, &[]), encode_tlv(0x81, digest)].concat(),
+        )
+    }
+
+    #[test]
+    fn private_key_operations_surface_always_and_cached_touch_policies() {
+        let mut piv = PivApplet::new(20, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        generate_touch_key(&mut piv, 0x9a, TOUCH_POLICY_ALWAYS);
+        generate_touch_key(&mut piv, 0x9d, TOUCH_POLICY_CACHED);
+
+        let always_request = signing_request(&[0x11; 32]);
+        let always = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9a,
+            &always_request,
+        );
+        assert!(matches!(
+            piv.exchange(&always, PresenceAuthorization::Absent),
+            PivExchange::PresenceRequired(UserPresencePolicy::Always)
+        ));
+        assert_eq!(
+            complete(piv.exchange(&always, PresenceAuthorization::Granted)).status,
+            0x9000
+        );
+        assert!(matches!(
+            piv.exchange(&always, PresenceAuthorization::Absent),
+            PivExchange::PresenceRequired(UserPresencePolicy::Always)
+        ));
+
+        let cached_request = signing_request(&[0x22; 32]);
+        let cached = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x9d,
+            &cached_request,
+        );
+        assert!(matches!(
+            piv.exchange(&cached, PresenceAuthorization::Absent),
+            PivExchange::PresenceRequired(UserPresencePolicy::Cached(duration))
+                if duration == PIV_TOUCH_CACHE_DURATION
+        ));
+        assert_eq!(
+            complete(piv.exchange(&cached, PresenceAuthorization::Granted)).status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&cached).status,
+            STATUS_CONDITIONS_NOT_SATISFIED
         );
     }
 
@@ -2482,15 +2659,47 @@ mod tests {
         ];
         set_key.extend_from_slice(&new_key);
         assert_eq!(
-            piv.transmit(&command(INS_SET_MANAGEMENT_KEY, 0xff, 0xff, &set_key))
+            piv.transmit(&command(INS_SET_MANAGEMENT_KEY, 0xff, 0xfd, &set_key))
                 .status,
             0x9000
         );
         assert!(piv.take_persistent_change());
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, REFERENCE_MANAGEMENT_KEY, &[]));
+        let metadata = decode_tlvs(&metadata.data).unwrap();
         assert_eq!(
-            piv.transmit(&command(INS_GET_METADATA, 0, REFERENCE_MANAGEMENT_KEY, &[]))
-                .data[2],
-            ManagementAlgorithm::Aes128 as u8
+            unique_field(&metadata, 0x01),
+            Some(&[ManagementAlgorithm::Aes128 as u8][..])
+        );
+        assert_eq!(
+            unique_field(&metadata, 0x02),
+            Some(&[0, TOUCH_POLICY_CACHED][..])
+        );
+
+        piv.reset_connection();
+        let witness = encode_tlv(0x7c, &encode_tlv(0x80, &[]));
+        let authenticate = command(
+            INS_AUTHENTICATE,
+            ManagementAlgorithm::Aes128 as u8,
+            REFERENCE_MANAGEMENT_KEY,
+            &witness,
+        );
+        assert!(matches!(
+            piv.exchange(&authenticate, PresenceAuthorization::Absent),
+            PivExchange::PresenceRequired(UserPresencePolicy::Cached(duration))
+                if duration == PIV_TOUCH_CACHE_DURATION
+        ));
+        assert_eq!(
+            complete(piv.exchange(&authenticate, PresenceAuthorization::Granted)).status,
+            0x9000
+        );
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(1, [5, 8, 0], &encoded).unwrap();
+        let metadata =
+            restored.transmit(&command(INS_GET_METADATA, 0, REFERENCE_MANAGEMENT_KEY, &[]));
+        assert_eq!(
+            unique_field(&decode_tlvs(&metadata.data).unwrap(), 0x02),
+            Some(&[0, TOUCH_POLICY_CACHED][..])
         );
     }
 

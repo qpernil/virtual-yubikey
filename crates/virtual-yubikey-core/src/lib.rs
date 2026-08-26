@@ -12,12 +12,37 @@ mod preview_sign;
 use software_key_core::{
     post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
 };
+use std::time::Duration;
 
 pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
 pub use openpgp::OPENPGP_AID;
 pub use piv::PIV_AID;
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
+pub const PIV_TOUCH_CACHE_DURATION: Duration = Duration::from_secs(15);
+
+/// Physical-presence policy requested by an applet operation.
+///
+/// Transports decide how a touch is collected. Keeping this result in the
+/// logical core lets USB, PC/SC, and future in-process frontends share the same
+/// applet policy without coupling the core to buttons or IPC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserPresencePolicy {
+    Always,
+    Cached(Duration),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresenceAuthorization {
+    Absent,
+    Granted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApduExchange {
+    Complete(Vec<u8>),
+    PresenceRequired(UserPresencePolicy),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FidoCredentialAlgorithm {
@@ -542,25 +567,37 @@ impl VirtualYubiKey {
     }
 
     pub fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
+        match self.exchange_apdu(raw, PresenceAuthorization::Absent) {
+            ApduExchange::Complete(response) => response,
+            ApduExchange::PresenceRequired(_) => ResponseApdu::status(0x6985).encode(),
+        }
+    }
+
+    pub fn exchange_apdu(&mut self, raw: &[u8], presence: PresenceAuthorization) -> ApduExchange {
         let command = match CommandApdu::decode(raw) {
             Ok(command) => command,
-            Err(_) => return ResponseApdu::status(0x6700).encode(),
+            Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
         };
 
         if command.cla == 0 && command.ins == INS_GET_RESPONSE {
-            return self.take_response(command.le).encode();
+            return ApduExchange::Complete(self.take_response(command.le).encode());
         }
 
         if command.ins == INS_SELECT && command.p1 == 0x04 {
-            return self.select(command.data).encode();
+            return ApduExchange::Complete(self.select(command.data).encode());
         }
 
         match self.selected {
-            Some(Applet::Management) => self.management(&command).encode(),
-            Some(Applet::OpenPgp) => openpgp::transmit(&command).encode(),
-            Some(Applet::Piv) => self.piv.transmit(&command).encode(),
-            Some(Applet::Fido2) => self.fido2(&command).encode(),
-            None => ResponseApdu::status(0x6999).encode(),
+            Some(Applet::Management) => ApduExchange::Complete(self.management(&command).encode()),
+            Some(Applet::OpenPgp) => ApduExchange::Complete(openpgp::transmit(&command).encode()),
+            Some(Applet::Piv) => match self.piv.exchange(&command, presence) {
+                piv::PivExchange::Complete(response) => ApduExchange::Complete(response.encode()),
+                piv::PivExchange::PresenceRequired(policy) => {
+                    ApduExchange::PresenceRequired(policy)
+                }
+            },
+            Some(Applet::Fido2) => ApduExchange::Complete(self.fido2(&command).encode()),
+            None => ApduExchange::Complete(ResponseApdu::status(0x6999).encode()),
         }
     }
 

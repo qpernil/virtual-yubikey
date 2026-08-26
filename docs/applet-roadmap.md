@@ -115,9 +115,9 @@ randomness, trust policy, persistence, transport, and error mapping.
   metadata, public-key, operation, and persistence encodings.
 - Next, pass representative `yubico-piv-tool` workflows over USB CCID and turn
   the observed transcripts into transport-level regression tests.
-- Add PIV attestation, CCID touch/cancel integration, and biometric policy
-  events. Until touch is connected, a key configured with a non-`Never` touch
-  policy fails closed.
+- Add PIV attestation, CCID abort handling, and biometric policy events. Private
+  and management-key operations already use the shared physical-presence
+  service for `Always` and the 15-second `Cached` touch policy.
 - Move `pkcs11rs` tests to the shared core only after standalone compatibility
   is established.
 
