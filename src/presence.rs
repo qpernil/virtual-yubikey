@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 #[cfg(target_os = "linux")]
 use std::thread;
 #[cfg(target_os = "linux")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -70,14 +70,35 @@ impl Service {
         }
     }
 
-    pub(crate) fn wait(
+    pub(crate) fn wait(&self, poll: impl FnMut() -> io::Result<WaitControl>) -> io::Result<bool> {
+        self.wait_until(None, poll)
+    }
+
+    pub(crate) fn wait_for(
         &self,
+        timeout: Duration,
+        poll: impl FnMut() -> io::Result<WaitControl>,
+    ) -> io::Result<bool> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "presence timeout overflow")
+        })?;
+        self.wait_until(Some(deadline), poll)
+    }
+
+    fn wait_until(
+        &self,
+        deadline: Option<Instant>,
         mut poll: impl FnMut() -> io::Result<WaitControl>,
     ) -> io::Result<bool> {
+        let started = Instant::now();
         let _sensor = loop {
             match self.inner.sensor.try_lock() {
                 Ok(sensor) => break sensor,
                 Err(TryLockError::WouldBlock) => {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        self.log_timeout(started);
+                        return Ok(false);
+                    }
                     if poll()? == WaitControl::Cancel {
                         return Ok(false);
                     }
@@ -123,8 +144,21 @@ impl Service {
                 );
                 return Ok(false);
             }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.log_timeout(started);
+                return Ok(false);
+            }
             thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    fn log_timeout(&self, started: Instant) {
+        diagnostics::log(
+            Level::Info,
+            "presence",
+            "timed_out",
+            format_args!("elapsed_ms={}", started.elapsed().as_millis()),
+        );
     }
 }
 

@@ -126,7 +126,8 @@ randomness, trust policy, persistence, transport, and error mapping.
 ### YubiHSM Auth
 
 - The core implements persistent symmetric and P-256 credentials, management
-  and credential retry counters, touch-required calculation, all firmware 5.8
+  and credential retry counters, touch-required calculation with a 15-second
+  wait timeout, all firmware 5.8
   administration commands, symmetric SCP03 session derivation, and asymmetric
   SCP11 key agreement and receipt validation.
 - Command chaining and `61xx`/`GET RESPONSE` response chaining live in the

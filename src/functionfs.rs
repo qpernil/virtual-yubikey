@@ -46,6 +46,8 @@ const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(target_os = "linux")]
+const CCID_TOUCH_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(target_os = "linux")]
 pub(crate) fn run_worker(
     serial: u32,
     display_kind: crate::cli::DisplayKind,
@@ -869,7 +871,7 @@ fn serve_ccid(
                             &request[..length],
                             &clock,
                             || {
-                                presence.wait(|| {
+                                presence.wait_for(CCID_TOUCH_TIMEOUT, || {
                                     Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
                                         crate::presence::WaitControl::Cancel
                                     } else {
