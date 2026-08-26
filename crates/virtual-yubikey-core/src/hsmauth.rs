@@ -1181,6 +1181,30 @@ mod tests {
     }
 
     #[test]
+    fn symmetric_get_challenge_returns_random_bytes_without_pending_state() {
+        let mut applet = HsmAuthApplet::new(1, [5, 8, 0]);
+        assert_eq!(
+            put_symmetric(&mut applet, "symmetric", &[0x11; 16], &[0x22; 16], false).status,
+            0x9000
+        );
+
+        let mut challenge_data = Vec::new();
+        append_tlv(&mut challenge_data, TAG_LABEL, b"symmetric");
+        let challenge = complete(execute(
+            &mut applet,
+            INS_GET_CHALLENGE,
+            0,
+            0,
+            &challenge_data,
+            PresenceAuthorization::Absent,
+        ));
+
+        assert_eq!(challenge.status, 0x9000);
+        assert_eq!(challenge.data.len(), 8);
+        assert!(applet.challenge.is_none());
+    }
+
+    #[test]
     fn symmetric_credential_accepts_host_context_derives_session_keys_and_requires_touch() {
         let enc = [0x11; 16];
         let mac = [0x22; 16];
