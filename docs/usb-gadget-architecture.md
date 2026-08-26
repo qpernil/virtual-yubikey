@@ -433,7 +433,8 @@ Its applet-local presence client owns the monotonic 15-second cache. The CCID
 command thread blocks in the shared physical-presence service while its endpoint
 owner continues sending time extensions. FIDO and YubiHSM Auth presence cannot
 populate the PIV cache. A touch-required YubiHSM Auth credential always requests
-a new touch and uses the same CCID time-extension path.
+a new touch, uses the same CCID time-extension path, and fails cleanly when the
+15-second physical-touch window expires.
 
 KEY3 is represented by its sampled current logical level. GPIO edges merely
 wake the main worker, and multiple wakes may coalesce without losing the final

@@ -125,7 +125,9 @@ Symmetric credentials derive SCP03 ENC, MAC, and RMAC session keys. Asymmetric
 credentials perform the ephemeral and static P-256 agreements, X9.63 SHA-256
 derivation, and receipt validation required by YubiHSM asymmetric
 authentication. A touch-required credential requests a fresh physical touch on
-every session-key calculation. ISO command chaining and `61xx`/`GET RESPONSE`
+every session-key calculation. The wait expires after 15 seconds without a
+touch, while CCID time-extension frames keep the host transaction alive. ISO
+command chaining and `61xx`/`GET RESPONSE`
 response chaining are handled once in the shared APDU router rather than by the
 applet. Its state is independently scheduled and atomically replaced as
 `hsmauth-<serial>.cbor`.

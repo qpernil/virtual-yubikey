@@ -672,6 +672,44 @@ mod tests {
         [vec![0, ins, 0, 0, data.len() as u8], data.to_vec()].concat()
     }
 
+    fn hsmauth_touch_calculation() -> (Card, Vec<u8>) {
+        let mut card = Card::new(1);
+        let select = [
+            vec![0, 0xa4, 4, 0, HSMAUTH_AID.len() as u8],
+            HSMAUTH_AID.to_vec(),
+            vec![0],
+        ]
+        .concat();
+        assert_eq!(&card.transmit(&select)[5..], &[0x90, 0]);
+
+        let label = b"touch";
+        let password = [0x33; 16];
+        let put = [
+            tlv(0x7b, &[0; 16]),
+            tlv(0x71, label),
+            tlv(0x74, &[38]),
+            tlv(0x75, &[0x11; 16]),
+            tlv(0x76, &[0x22; 16]),
+            tlv(0x73, &password),
+            tlv(0x7a, &[1]),
+        ]
+        .concat();
+        assert_eq!(card.transmit(&short_apdu(0x01, &put)), [0x90, 0]);
+
+        let challenge = card.transmit(&short_apdu(0x04, &tlv(0x71, label)));
+        assert_eq!(&challenge[challenge.len() - 2..], &[0x90, 0]);
+        let mut context = challenge[..challenge.len() - 2].to_vec();
+        context.extend_from_slice(&[0x44; 8]);
+        let calculate = [
+            tlv(0x71, label),
+            tlv(0x77, &context),
+            tlv(0x78, &[0; 8]),
+            tlv(0x73, &password),
+        ]
+        .concat();
+        (card, short_apdu(0x03, &calculate))
+    }
+
     #[test]
     fn powers_on_with_yubikey_atr() {
         let mut device = Device::new(1);
@@ -868,37 +906,7 @@ mod tests {
 
     #[test]
     fn hsmauth_touch_wait_emits_ccid_time_extensions() {
-        let mut card = Card::new(1);
-        let select = [
-            vec![0, 0xa4, 4, 0, HSMAUTH_AID.len() as u8],
-            HSMAUTH_AID.to_vec(),
-            vec![0],
-        ]
-        .concat();
-        assert_eq!(&card.transmit(&select)[5..], &[0x90, 0]);
-
-        let label = b"touch";
-        let password = [0x33; 16];
-        let put = [
-            tlv(0x7b, &[0; 16]),
-            tlv(0x71, label),
-            tlv(0x74, &[38]),
-            tlv(0x75, &[0x11; 16]),
-            tlv(0x76, &[0x22; 16]),
-            tlv(0x73, &password),
-            tlv(0x7a, &[1]),
-        ]
-        .concat();
-        assert_eq!(card.transmit(&short_apdu(0x01, &put)), [0x90, 0]);
-
-        let calculate = [
-            tlv(0x71, label),
-            tlv(0x77, &[0x44; 16]),
-            tlv(0x78, &[0; 8]),
-            tlv(0x73, &password),
-        ]
-        .concat();
-        let calculate = short_apdu(0x03, &calculate);
+        let (mut card, calculate) = hsmauth_touch_calculation();
         let scheduler = keepalive::Scheduler::start().unwrap();
         let clock = scheduler.handle();
         let mut extensions = Vec::new();
@@ -922,10 +930,46 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(response, [0x69, 0x85]);
+        assert_eq!(response, [0x69, 0x84]);
         assert!(!extensions.is_empty());
         assert!(extensions
             .iter()
             .all(|frame| frame == &time_extension(0, 11)));
+    }
+
+    #[test]
+    fn hsmauth_touch_timeout_stops_extensions_and_fails_the_apdu() {
+        let (mut card, calculate) = hsmauth_touch_calculation();
+        let scheduler = keepalive::Scheduler::start().unwrap();
+        let clock = scheduler.handle();
+        let mut extensions = Vec::new();
+        let response = run_with_keepalives(
+            || {
+                card.transmit_with_presence(&calculate, || {
+                    thread::sleep(Duration::from_millis(35));
+                    Ok(false)
+                })
+            },
+            0,
+            12,
+            &clock,
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            &mut |frame| {
+                extensions.push(frame.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(response, [0x69, 0x85]);
+        assert!(!extensions.is_empty());
+        assert!(extensions
+            .iter()
+            .all(|frame| frame == &time_extension(0, 12)));
+        let count = extensions.len();
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(extensions.len(), count);
     }
 }
