@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -216,9 +216,11 @@ mod tests {
     #[test]
     fn zero_interval_is_rejected() {
         let scheduler = Scheduler::start().unwrap();
-        assert!(scheduler
-            .handle()
-            .subscribe(Duration::ZERO, Duration::ZERO)
-            .is_err());
+        assert!(
+            scheduler
+                .handle()
+                .subscribe(Duration::ZERO, Duration::ZERO)
+                .is_err()
+        );
     }
 }

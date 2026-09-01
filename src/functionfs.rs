@@ -1,13 +1,13 @@
 //! Unprivileged FunctionFS transport for the virtual YubiKey worker.
 
 #[cfg(target_os = "linux")]
+use crate::STOP_REQUESTED;
+#[cfg(target_os = "linux")]
 use crate::diagnostics::{self, Level};
 #[cfg(target_os = "linux")]
 use crate::worker_protocol::{
-    validate_initial_resources, Channel, Kind, Record, RUNTIME_DIRECTORY_ENV, STATE_DIRECTORY_ENV,
+    Channel, Kind, RUNTIME_DIRECTORY_ENV, Record, STATE_DIRECTORY_ENV, validate_initial_resources,
 };
-#[cfg(target_os = "linux")]
-use crate::STOP_REQUESTED;
 #[cfg(target_os = "linux")]
 use std::env;
 #[cfg(target_os = "linux")]
@@ -31,8 +31,8 @@ use std::{
 };
 #[cfg(target_os = "linux")]
 use usb_gadget_worker::{
-    replace_file_atomically, EndpointLifecycle, MutationReceipt, PersistenceMode, StateLock,
-    StatePersistence, StatePersistenceHandle, UsbBusEvent,
+    EndpointLifecycle, MutationReceipt, PersistenceMode, StateLock, StatePersistence,
+    StatePersistenceHandle, UsbBusEvent, replace_file_atomically,
 };
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
@@ -935,10 +935,10 @@ fn serve_hid(
                 Ok(Err(error)) => return Err(error),
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) if STOP_REQUESTED.load(Ordering::Relaxed) => {
-                    return Ok(())
+                    return Ok(());
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::other("FIDO OUT reader stopped"))
+                    return Err(io::Error::other("FIDO OUT reader stopped"));
                 }
             };
             match report.len() {

@@ -1,7 +1,7 @@
 //! Transport-neutral YubiHSM Auth smart-card applet.
 
 use crate::{
-    presence::PresenceClient, CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy,
+    CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy, presence::PresenceClient,
 };
 use software_key_core::{
     secure_channel::{scp03_cryptogram, scp03_key, x963_kdf_sha256},

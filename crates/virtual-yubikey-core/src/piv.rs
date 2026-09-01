@@ -1,10 +1,10 @@
 use crate::{
-    crypto::{aes_ecb_block, Direction, AES_BLOCK_SIZE},
+    CommandApdu, PIV_TOUCH_CACHE_DURATION, PresenceAuthorization, ResponseApdu, UserPresencePolicy,
+    crypto::{AES_BLOCK_SIZE, Direction, aes_ecb_block},
     presence::PresenceClient,
-    CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy, PIV_TOUCH_CACHE_DURATION,
 };
 use software_key_core::{
-    software_key_agreement::{derive_with_signing_key, MontgomeryCurve, SoftwareMontgomeryKey},
+    software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
     software_signing::{
         EcCurve, EdwardsCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
@@ -486,9 +486,9 @@ impl PivApplet {
                 }
                 9 if management_algorithm.is_none() => {
                     management_algorithm =
-                        Some(decoder.u8().map_err(|_| {
-                            "persistent PIV state has an invalid management algorithm"
-                        })?);
+                        Some(decoder.u8().map_err(
+                            |_| "persistent PIV state has an invalid management algorithm",
+                        )?);
                 }
                 10 if management_key.is_none() => {
                     management_key = Some(Zeroizing::new(
@@ -506,9 +506,9 @@ impl PivApplet {
                 }
                 13 if management_touch_policy.is_none() => {
                     management_touch_policy =
-                        Some(decoder.u8().map_err(|_| {
-                            "persistent PIV state has invalid management touch policy"
-                        })?);
+                        Some(decoder.u8().map_err(
+                            |_| "persistent PIV state has invalid management touch policy",
+                        )?);
                 }
                 _ => decoder
                     .skip()
@@ -720,7 +720,7 @@ impl PivApplet {
                 self.reset_retry(command.data)
             }
             INS_AUTHENTICATE if command.p2 == REFERENCE_MANAGEMENT_KEY => {
-                return self.authenticate_management(command, presence)
+                return self.authenticate_management(command, presence);
             }
             INS_AUTHENTICATE => return self.general_authenticate(command, presence),
             INS_IMPORT_KEY => self.import_key(command),
@@ -1097,10 +1097,10 @@ impl PivApplet {
                 TOUCH_POLICY_ALWAYS => Some(UserPresencePolicy::Always),
                 _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
             };
-            if let Some(policy) = presence_policy {
-                if !self.presence.authorize(policy, presence) {
-                    return PivExchange::PresenceRequired(policy);
-                }
+            if let Some(policy) = presence_policy
+                && !self.presence.authorize(policy, presence)
+            {
+                return PivExchange::PresenceRequired(policy);
             }
             let mut challenge = Zeroizing::new(vec![0_u8; AES_BLOCK_SIZE]);
             if getrandom::fill(challenge.as_mut()).is_err() {
@@ -1177,10 +1177,10 @@ impl PivApplet {
             TOUCH_POLICY_CACHED => Some(UserPresencePolicy::Cached(PIV_TOUCH_CACHE_DURATION)),
             _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
         };
-        if let Some(policy) = presence_policy {
-            if !self.presence.authorize(policy, presence) {
-                return PivExchange::PresenceRequired(policy);
-            }
+        if let Some(policy) = presence_policy
+            && !self.presence.authorize(policy, presence)
+        {
+            return PivExchange::PresenceRequired(policy);
         }
         let result = if let Some(digest) = unique_field(&fields, 0x81) {
             let invalid_length = match key.algorithm {
@@ -1485,7 +1485,7 @@ fn optional_policy(fields: &[(u32, &[u8])], tag: u32, default: u8) -> Option<u8>
 }
 
 fn encode_ecdsa_der(signature: &[u8]) -> Option<Vec<u8>> {
-    if signature.is_empty() || signature.len() % 2 != 0 {
+    if signature.is_empty() || !signature.len().is_multiple_of(2) {
         return None;
     }
     let (r, s) = signature.split_at(signature.len() / 2);

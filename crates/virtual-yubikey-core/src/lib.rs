@@ -969,19 +969,11 @@ impl<'a> CommandApdu<'a> {
 }
 
 fn short_le(value: u8) -> u32 {
-    if value == 0 {
-        256
-    } else {
-        u32::from(value)
-    }
+    if value == 0 { 256 } else { u32::from(value) }
 }
 
 fn extended_le(value: u16) -> u32 {
-    if value == 0 {
-        65_536
-    } else {
-        u32::from(value)
-    }
+    if value == 0 { 65_536 } else { u32::from(value) }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1281,9 +1273,10 @@ mod tests {
         assert!(!restored.take_hsmauth_persistent_change());
         restored.transmit(&select(&HSMAUTH_AID));
         let list = restored.transmit(&[0, 0x05, 0, 0, 0]);
-        assert!(list
-            .windows(b"persistent".len())
-            .any(|value| value == b"persistent"));
+        assert!(
+            list.windows(b"persistent".len())
+                .any(|value| value == b"persistent")
+        );
         assert_eq!(&list[list.len() - 2..], &[0x90, 0]);
 
         assert_eq!(

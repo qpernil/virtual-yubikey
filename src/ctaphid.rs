@@ -114,10 +114,10 @@ impl Device {
         if length > MAX_MESSAGE_SIZE {
             return encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]);
         }
-        if let Some(active) = &self.transaction {
-            if active.channel != channel {
-                return encode_message(channel, CMD_ERROR, &[ERR_CHANNEL_BUSY]);
-            }
+        if let Some(active) = &self.transaction
+            && active.channel != channel
+        {
+            return encode_message(channel, CMD_ERROR, &[ERR_CHANNEL_BUSY]);
         }
         self.transaction = None;
 
@@ -356,9 +356,11 @@ mod tests {
         );
         assert_eq!(response[0][4], 0xc2);
         assert_eq!(response[0][7], 25);
-        assert!(response[0]
-            .windows(6)
-            .any(|value| value == [2, 4, 0, 188, 97, 78]));
+        assert!(
+            response[0]
+                .windows(6)
+                .any(|value| value == [2, 4, 0, 188, 97, 78])
+        );
         assert!(response[0].windows(5).any(|value| value == [5, 3, 5, 8, 0]));
     }
 
