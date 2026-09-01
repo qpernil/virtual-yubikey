@@ -72,8 +72,10 @@ The logical core separates key identity from cryptographic operations:
 `KeyKind` is used only at generation/import/restore boundaries, while
 `SignatureScheme` is selected when an applet signs or verifies. PIV, FIDO, and
 YubiHSM Auth retain parsed private keys in memory, so seed expansion and key
-validation are not repeated for every APDU. Their existing applet-specific CBOR
-records remain persistence DTOs rather than runtime key objects.
+validation are not repeated for every APDU. PIV stores signing and X25519 keys
+through the shared `SoftwarePrivateKey` union; applet algorithms and policy stay
+in the PIV object. Existing applet-specific CBOR records remain persistence DTOs
+rather than runtime key objects.
 
 For a visual explanation of Raspberry Pi USB gadget mode, its direct endpoint
 data paths, the supervisor's privilege boundary, and the Virtual YubiKey,
