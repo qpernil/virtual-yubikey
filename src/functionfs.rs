@@ -393,7 +393,7 @@ impl Endpoints {
         let mut ccid_out = None;
         let mut ccid_in = None;
         let mut ccid_interrupt = None;
-        for (entry, file) in record.body[2..].chunks_exact(4).zip(record.files) {
+        for (entry, file) in record.body[2..].as_chunks::<4>().0.iter().zip(record.files) {
             set_nonblocking(&file)?;
             let address = entry[0];
             let transfer_type = entry[1];
