@@ -5,6 +5,7 @@ use crate::{
 };
 use software_key_core::{
     software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
+    software_private_key::SoftwarePrivateKey,
     software_signing::{EcCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::{collections::BTreeMap, fmt};
@@ -207,46 +208,42 @@ impl PivAlgorithm {
     }
 }
 
-#[derive(Clone)]
-enum PivPrivateKey {
-    Signing(SoftwareSigningKey),
-    KeyAgreement(SoftwareX25519Key),
+fn generate_private_key(algorithm: PivAlgorithm) -> Result<SoftwarePrivateKey, ()> {
+    if let Some(key_kind) = algorithm.key_kind() {
+        SoftwareSigningKey::generate_for_kind(key_kind)
+            .map(SoftwarePrivateKey::Signing)
+            .map_err(|_| ())
+    } else if algorithm == PivAlgorithm::X25519 {
+        SoftwareX25519Key::generate()
+            .map(SoftwarePrivateKey::X25519)
+            .map_err(|_| ())
+    } else {
+        Err(())
+    }
 }
 
-impl PivPrivateKey {
-    fn generate(algorithm: PivAlgorithm) -> Result<Self, ()> {
-        if let Some(key_kind) = algorithm.key_kind() {
-            SoftwareSigningKey::generate_for_kind(key_kind)
-                .map(Self::Signing)
-                .map_err(|_| ())
-        } else if algorithm == PivAlgorithm::X25519 {
-            SoftwareX25519Key::generate()
-                .map(Self::KeyAgreement)
-                .map_err(|_| ())
-        } else {
-            Err(())
-        }
+fn private_key_from_serialized(
+    algorithm: PivAlgorithm,
+    serialized: &[u8],
+) -> Result<SoftwarePrivateKey, ()> {
+    if let Some(key_kind) = algorithm.key_kind() {
+        SoftwareSigningKey::from_serialized_for_kind(key_kind, serialized)
+            .map(SoftwarePrivateKey::Signing)
+            .map_err(|_| ())
+    } else if algorithm == PivAlgorithm::X25519 {
+        SoftwareX25519Key::from_serialized(serialized)
+            .map(SoftwarePrivateKey::X25519)
+            .map_err(|_| ())
+    } else {
+        Err(())
     }
+}
 
-    fn from_serialized(algorithm: PivAlgorithm, serialized: &[u8]) -> Result<Self, ()> {
-        if let Some(key_kind) = algorithm.key_kind() {
-            SoftwareSigningKey::from_serialized_for_kind(key_kind, serialized)
-                .map(Self::Signing)
-                .map_err(|_| ())
-        } else if algorithm == PivAlgorithm::X25519 {
-            SoftwareX25519Key::from_serialized(serialized)
-                .map(Self::KeyAgreement)
-                .map_err(|_| ())
-        } else {
-            Err(())
-        }
-    }
-
-    fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, ()> {
-        match self {
-            Self::Signing(key) => key.serialized().map_err(|_| ()),
-            Self::KeyAgreement(key) => Ok(key.serialized()),
-        }
+fn serialized_private_key(key: &SoftwarePrivateKey) -> Result<Zeroizing<Vec<u8>>, ()> {
+    match key {
+        SoftwarePrivateKey::Signing(key) => key.serialized().map_err(|_| ()),
+        SoftwarePrivateKey::X25519(key) => Ok(key.serialized()),
+        SoftwarePrivateKey::MlKem(_) => Err(()),
     }
 }
 
@@ -256,7 +253,7 @@ struct PivKey {
     pin_policy: u8,
     touch_policy: u8,
     origin: u8,
-    private_key: PivPrivateKey,
+    private_key: SoftwarePrivateKey,
 }
 
 impl fmt::Debug for PivKey {
@@ -274,7 +271,7 @@ impl fmt::Debug for PivKey {
 impl PivKey {
     fn public_template(&self) -> Result<Vec<u8>, ()> {
         match &self.private_key {
-            PivPrivateKey::Signing(key) => match key.public_key() {
+            SoftwarePrivateKey::Signing(key) => match key.public_key() {
                 SoftwarePublicKey::Ec {
                     curve,
                     uncompressed,
@@ -289,10 +286,10 @@ impl PivKey {
                 }
                 _ => Err(()),
             },
-            PivPrivateKey::KeyAgreement(key) if self.algorithm == PivAlgorithm::X25519 => {
+            SoftwarePrivateKey::X25519(key) if self.algorithm == PivAlgorithm::X25519 => {
                 Ok(encode_tlv(0x86, &key.public_key()))
             }
-            PivPrivateKey::KeyAgreement(_) => Err(()),
+            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
 }
@@ -637,9 +634,7 @@ impl PivApplet {
             .array(u64::try_from(self.keys.len()).map_err(|_| "too many PIV keys to persist")?)
             .map_err(|_| "cannot encode persistent PIV state")?;
         for (slot, key) in &self.keys {
-            let private_key = key
-                .private_key
-                .serialized()
+            let private_key = serialized_private_key(&key.private_key)
                 .map_err(|_| "cannot serialize persistent PIV key")?;
             encoder
                 .array(6)
@@ -843,7 +838,7 @@ impl PivApplet {
         let Some(touch_policy) = optional_policy(&fields, 0xab, TOUCH_POLICY_NEVER) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let Ok(private_key) = PivPrivateKey::generate(algorithm) else {
+        let Ok(private_key) = generate_private_key(algorithm) else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
         };
         let key = PivKey {
@@ -914,7 +909,7 @@ impl PivApplet {
                         Err(software_key_core::software_signing::SoftwareSigningError::InvalidPrivateKey)
                     }
                 })
-                .map(PivPrivateKey::Signing)
+                .map(SoftwarePrivateKey::Signing)
                 .map_err(|_| ())
         } else {
             let Some(import_tag) = algorithm.import_tag() else {
@@ -937,7 +932,7 @@ impl PivApplet {
             {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             }
-            PivPrivateKey::from_serialized(algorithm, serialized)
+            private_key_from_serialized(algorithm, serialized)
         };
         let Ok(private_key) = private_key else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
@@ -1198,7 +1193,7 @@ impl PivApplet {
             if invalid_length {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
-            let PivPrivateKey::Signing(private_key) = &key.private_key else {
+            let SoftwarePrivateKey::Signing(private_key) = &key.private_key else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
             };
             let signature = if key.algorithm.rsa_bits().is_some() {
@@ -1241,12 +1236,13 @@ impl PivApplet {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
             let shared_secret = match &key.private_key {
-                PivPrivateKey::Signing(private_key) => {
+                SoftwarePrivateKey::Signing(private_key) => {
                     derive_with_signing_key(private_key, peer_public_key).map_err(|_| ())
                 }
-                PivPrivateKey::KeyAgreement(private_key) => {
+                SoftwarePrivateKey::X25519(private_key) => {
                     private_key.derive(peer_public_key).map_err(|_| ())
                 }
+                SoftwarePrivateKey::MlKem(_) => Err(()),
             };
             let Ok(shared_secret) = shared_secret else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -1416,7 +1412,7 @@ fn decode_persistent_keys(
         let serialized = decoder
             .bytes()
             .map_err(|_| "persistent PIV key has invalid private material")?;
-        let private_key = PivPrivateKey::from_serialized(algorithm, serialized)
+        let private_key = private_key_from_serialized(algorithm, serialized)
             .map_err(|_| "persistent PIV key has invalid private material")?;
         let key = PivKey {
             algorithm,
@@ -2062,7 +2058,8 @@ mod tests {
                 .status,
             0x9000
         );
-        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x9c).unwrap().private_key else {
+        let SoftwarePrivateKey::Signing(private_key) = &piv.keys.get(&0x9c).unwrap().private_key
+        else {
             unreachable!();
         };
         let public_key = private_key.public_key();
@@ -2225,7 +2222,8 @@ mod tests {
         let fields = decode_tlvs(public).unwrap();
         assert_eq!(unique_field(&fields, 0x81).unwrap().len(), 128);
         assert_eq!(unique_field(&fields, 0x82), Some(&[1, 0, 1][..]));
-        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x9e).unwrap().private_key else {
+        let SoftwarePrivateKey::Signing(private_key) = &piv.keys.get(&0x9e).unwrap().private_key
+        else {
             unreachable!();
         };
         let public_key = private_key.public_key();
@@ -2342,8 +2340,8 @@ mod tests {
             uncompressed: first_public,
             ..
         } = (match &piv.keys.get(&0x9d).unwrap().private_key {
-            PivPrivateKey::Signing(key) => key.public_key(),
-            PivPrivateKey::KeyAgreement(_) => unreachable!(),
+            SoftwarePrivateKey::Signing(key) => key.public_key(),
+            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
         })
         else {
             unreachable!();
@@ -2352,13 +2350,14 @@ mod tests {
             uncompressed: second_public,
             ..
         } = (match &piv.keys.get(&0x82).unwrap().private_key {
-            PivPrivateKey::Signing(key) => key.public_key(),
-            PivPrivateKey::KeyAgreement(_) => unreachable!(),
+            SoftwarePrivateKey::Signing(key) => key.public_key(),
+            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
         })
         else {
             unreachable!();
         };
-        let PivPrivateKey::Signing(private_key) = &piv.keys.get(&0x82).unwrap().private_key else {
+        let SoftwarePrivateKey::Signing(private_key) = &piv.keys.get(&0x82).unwrap().private_key
+        else {
             unreachable!();
         };
         let expected = derive_with_signing_key(private_key, &first_public).unwrap();
