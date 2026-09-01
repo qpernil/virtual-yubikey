@@ -2,7 +2,7 @@
 
 use crate::diagnostics::{self, Level};
 use crate::keepalive;
-use crate::smartcard::{Card, ATR};
+use crate::smartcard::{ATR, Card};
 use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -895,9 +895,11 @@ mod tests {
         .unwrap();
         assert_eq!(result, 42);
         assert!(!extensions.is_empty());
-        assert!(extensions
-            .iter()
-            .all(|frame| frame == &time_extension(0, 7)));
+        assert!(
+            extensions
+                .iter()
+                .all(|frame| frame == &time_extension(0, 7))
+        );
 
         let count = extensions.len();
         thread::sleep(Duration::from_millis(20));
@@ -932,9 +934,11 @@ mod tests {
 
         assert_eq!(response, [0x69, 0x84]);
         assert!(!extensions.is_empty());
-        assert!(extensions
-            .iter()
-            .all(|frame| frame == &time_extension(0, 11)));
+        assert!(
+            extensions
+                .iter()
+                .all(|frame| frame == &time_extension(0, 11))
+        );
     }
 
     #[test]
@@ -965,9 +969,11 @@ mod tests {
 
         assert_eq!(response, [0x69, 0x85]);
         assert!(!extensions.is_empty());
-        assert!(extensions
-            .iter()
-            .all(|frame| frame == &time_extension(0, 12)));
+        assert!(
+            extensions
+                .iter()
+                .all(|frame| frame == &time_extension(0, 12))
+        );
         let count = extensions.len();
         thread::sleep(Duration::from_millis(20));
         assert_eq!(extensions.len(), count);

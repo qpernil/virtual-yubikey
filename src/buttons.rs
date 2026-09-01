@@ -8,8 +8,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
 
@@ -79,7 +79,7 @@ impl Controller {
                     ));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    return Ok(self.reconnect_pressed())
+                    return Ok(self.reconnect_pressed());
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
@@ -183,13 +183,13 @@ fn drain_touch_events(
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "touch-button descriptor closed",
-                ))
+                ));
             }
             Ok(length) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("partial GPIO edge event: {length} bytes"),
-                ))
+                ));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -222,13 +222,13 @@ fn drain_reconnect_events(
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "button descriptor closed",
-                ))
+                ));
             }
             Ok(length) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("partial GPIO edge event: {length} bytes"),
-                ))
+                ));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

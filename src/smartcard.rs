@@ -200,7 +200,9 @@ impl Card {
                     },
                     format_args!(
                         "serial={} version={major}.{minor}.{patch} usb_capabilities=0x{:04x} page={} sw={status:04x}",
-                        profile.serial, profile.usb_enabled_capabilities(), command.p1
+                        profile.serial,
+                        profile.usb_enabled_capabilities(),
+                        command.p1
                     ),
                 );
             }
@@ -347,8 +349,9 @@ mod tests {
         assert_eq!(card.transmit(&[0, 0xf8, 0, 0, 0]), [1, 2, 3, 4, 0x90, 0]);
         card.reset();
         assert_eq!(
-            &card.transmit(&[0x00, 0xa4, 0x04, 0x00, 0x05, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00,])
-                [..2],
+            &card.transmit(&[
+                0x00, 0xa4, 0x04, 0x00, 0x05, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00,
+            ])[..2],
             &[0x61, 0x11]
         );
     }

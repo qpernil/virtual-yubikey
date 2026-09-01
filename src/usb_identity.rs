@@ -220,10 +220,12 @@ mod tests {
         assert_eq!(personality.configuration_descriptor[4], 2);
         assert_eq!(personality.configuration_descriptor[8], 15);
         for address in [FIDO_IN, FIDO_OUT, CCID_OUT, CCID_IN, CCID_INTERRUPT_IN] {
-            assert!(personality
-                .configuration_descriptor
-                .windows(3)
-                .any(|bytes| bytes == [7, 5, address]));
+            assert!(
+                personality
+                    .configuration_descriptor
+                    .windows(3)
+                    .any(|bytes| bytes == [7, 5, address])
+            );
         }
         assert!(personality.microsoft_os_1.is_none());
         assert!(personality.webusb.is_none());
@@ -301,9 +303,11 @@ mod tests {
         let profile: toml::Value = toml::from_str(OLED_PROFILE).unwrap();
         let worker = profile.get("worker").unwrap();
         let arguments = worker.get("arguments").unwrap().as_array().unwrap();
-        assert!(arguments
-            .iter()
-            .any(|argument| argument.as_str() == Some("--display=sh1106-spi")));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.as_str() == Some("--display=sh1106-spi"))
+        );
 
         let resources = profile.get("resources").unwrap().as_array().unwrap();
         let controls = resources

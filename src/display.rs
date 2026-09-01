@@ -248,8 +248,10 @@ mod tests {
         assert_ne!(IDLE_FRAME, ACTIVE_FRAME);
         let mut changed = 0;
         for (index, (idle, active)) in IDLE_FRAME
-            .chunks_exact(2)
-            .zip(ACTIVE_FRAME.chunks_exact(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(ACTIVE_FRAME.as_chunks::<2>().0.iter())
             .enumerate()
         {
             if idle == active {

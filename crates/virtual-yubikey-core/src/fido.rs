@@ -1,14 +1,14 @@
 //! CTAP 2.1 applet state and commands, including the previewSign extension.
 
 use crate::{
-    crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
     FidoConfiguration, FidoCredentialAlgorithm,
+    crypto::{AES_BLOCK_SIZE, Direction, aes_cbc},
 };
 use minicbor::Encoder;
 #[cfg(test)]
 use software_key_core::{
     post_quantum,
-    software_signing::{ecdsa_signature_from_der, SignatureScheme},
+    software_signing::{SignatureScheme, ecdsa_signature_from_der},
 };
 use software_key_core::{
     software_key_agreement::derive_with_signing_key,
@@ -735,10 +735,8 @@ fn decode_algorithms(
                 _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
             }
         }
-        if public_key {
-            if let Some(algorithm) = algorithm {
-                request.algorithms.push(algorithm);
-            }
+        if public_key && let Some(algorithm) = algorithm {
+            request.algorithms.push(algorithm);
         }
     }
     Ok(())
@@ -1350,7 +1348,7 @@ fn authenticator_credential_management(
 }
 
 fn encode_ec2(algorithm: i64, curve: u8, public: &[u8]) -> Result<Vec<u8>, Error> {
-    if public.len() < 3 || public[0] != 4 || (public.len() - 1) % 2 != 0 {
+    if public.len() < 3 || public[0] != 4 || !(public.len() - 1).is_multiple_of(2) {
         return Err(CKR_DEVICE_ERROR.into());
     }
     let coordinate_length = (public.len() - 1) / 2;
@@ -2336,13 +2334,13 @@ fn decrypt(protocol: u8, key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<
     let result = match protocol {
         1 if key.len() == 32
             && !ciphertext.is_empty()
-            && ciphertext.len() % AES_BLOCK_SIZE == 0 =>
+            && ciphertext.len().is_multiple_of(AES_BLOCK_SIZE) =>
         {
             aes_cbc(key, &[0u8; AES_BLOCK_SIZE], ciphertext, Direction::Decrypt)
         }
         2 if key.len() == 64
             && ciphertext.len() >= AES_BLOCK_SIZE * 2
-            && ciphertext.len() % AES_BLOCK_SIZE == 0 =>
+            && ciphertext.len().is_multiple_of(AES_BLOCK_SIZE) =>
         {
             aes_cbc(
                 &key[32..],
@@ -2359,7 +2357,7 @@ fn decrypt(protocol: u8, key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<
 }
 
 fn encrypt(protocol: u8, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    if plaintext.len() % AES_BLOCK_SIZE != 0 {
+    if !plaintext.len().is_multiple_of(AES_BLOCK_SIZE) {
         return Err(CKR_DEVICE_ERROR.into());
     }
     match protocol {
@@ -2876,9 +2874,11 @@ mod tests {
         let registration_response = exchange(&mut state, &registration);
         assert_eq!(registration_response[0], CTAP2_OK);
         let seed = crate::preview_sign::seed_cose().unwrap();
-        assert!(registration_response
-            .windows(seed.len())
-            .any(|window| window == seed));
+        assert!(
+            registration_response
+                .windows(seed.len())
+                .any(|window| window == seed)
+        );
         let credential_id = state.credentials[0].credential_id.clone();
         let signing_key_handle = state.credentials[0]
             .preview
@@ -3720,7 +3720,9 @@ mod tests {
     fn decode_hex(input: &str) -> Vec<u8> {
         input
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = (pair[0] as char).to_digit(16).unwrap();
                 let low = (pair[1] as char).to_digit(16).unwrap();
