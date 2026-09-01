@@ -10,7 +10,7 @@ use software_key_core::{
         ARKG_P256_MAX_CONTEXT_LENGTH as MAX_CONTEXT_LENGTH,
         ARKG_P256_POINT_LENGTH as P256_POINT_LENGTH, ARKG_P256_TICKET_LENGTH as ARKG_TICKET_LENGTH,
     },
-    software_signing::{SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SignatureScheme, SoftwareSigningKey},
 };
 
 pub(crate) const ARKG_P256_ESP256_ALGORITHM: i64 = -65_539;
@@ -67,8 +67,8 @@ pub(crate) fn sign(signing_arguments_cbor: &[u8], digest: &[u8]) -> Result<Vec<u
             }
             _ => "private derivation failed",
         })?;
-    let algorithm = SoftwareSigningAlgorithm::EcdsaP256Sha256;
-    SoftwareSigningKey::from_serialized(algorithm, &private[..])
+    let algorithm = SignatureScheme::EcdsaP256Sha256;
+    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &private[..])
         .and_then(|key| key.sign_prehash(algorithm, digest))
         .map(|signature| signature.into_bytes())
         .map_err(|_| "signing failed")

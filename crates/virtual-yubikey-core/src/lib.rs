@@ -12,7 +12,8 @@ mod piv;
 mod presence;
 mod preview_sign;
 use software_key_core::{
-    post_quantum::MlDsaParameterSet, software_signing::SoftwareSigningAlgorithm,
+    post_quantum::MlDsaParameterSet,
+    software_signing::{EcCurve, KeyKind, SignatureScheme},
 };
 use std::time::Duration;
 
@@ -169,22 +170,40 @@ impl FidoCredentialAlgorithm {
         }
     }
 
-    pub const fn software_signing_algorithm(self) -> SoftwareSigningAlgorithm {
+    pub const fn software_signing_algorithm(self) -> SignatureScheme {
         match self {
-            Self::Es256 | Self::Esp256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            Self::Ed25519 => SoftwareSigningAlgorithm::Ed25519,
-            Self::Esp384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
-            Self::Esp512 => SoftwareSigningAlgorithm::EcdsaP521Sha512,
-            Self::Es256K => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
-            Self::Ps256 => SoftwareSigningAlgorithm::RsaPssSha256,
-            Self::Ps384 => SoftwareSigningAlgorithm::RsaPssSha384,
-            Self::Ps512 => SoftwareSigningAlgorithm::RsaPssSha512,
-            Self::Rs256 => SoftwareSigningAlgorithm::RsaPkcs1Sha256,
-            Self::Rs384 => SoftwareSigningAlgorithm::RsaPkcs1Sha384,
-            Self::Rs512 => SoftwareSigningAlgorithm::RsaPkcs1Sha512,
-            Self::MlDsa44 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
-            Self::MlDsa65 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
-            Self::MlDsa87 => SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
+            Self::Es256 | Self::Esp256 => SignatureScheme::EcdsaP256Sha256,
+            Self::Ed25519 => SignatureScheme::Ed25519,
+            Self::Esp384 => SignatureScheme::EcdsaP384Sha384,
+            Self::Esp512 => SignatureScheme::EcdsaP521Sha512,
+            Self::Es256K => SignatureScheme::EcdsaSecp256k1Sha256,
+            Self::Ps256 => SignatureScheme::RsaPssSha256,
+            Self::Ps384 => SignatureScheme::RsaPssSha384,
+            Self::Ps512 => SignatureScheme::RsaPssSha512,
+            Self::Rs256 => SignatureScheme::RsaPkcs1Sha256,
+            Self::Rs384 => SignatureScheme::RsaPkcs1Sha384,
+            Self::Rs512 => SignatureScheme::RsaPkcs1Sha512,
+            Self::MlDsa44 => SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44),
+            Self::MlDsa65 => SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa87),
+        }
+    }
+
+    /// Key identity used at generation and restore boundaries. The COSE
+    /// algorithm remains a separate operation choice.
+    pub const fn software_key_kind(self) -> KeyKind {
+        match self {
+            Self::Es256 | Self::Esp256 => KeyKind::Ec(EcCurve::P256),
+            Self::Ed25519 => KeyKind::Ed25519,
+            Self::Esp384 => KeyKind::Ec(EcCurve::P384),
+            Self::Esp512 => KeyKind::Ec(EcCurve::P521),
+            Self::Es256K => KeyKind::Ec(EcCurve::Secp256k1),
+            Self::Ps256 | Self::Ps384 | Self::Ps512 | Self::Rs256 | Self::Rs384 | Self::Rs512 => {
+                KeyKind::Rsa { modulus_bits: 2048 }
+            }
+            Self::MlDsa44 => KeyKind::MlDsa(MlDsaParameterSet::MlDsa44),
+            Self::MlDsa65 => KeyKind::MlDsa(MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => KeyKind::MlDsa(MlDsaParameterSet::MlDsa87),
         }
     }
 

@@ -68,6 +68,13 @@ Implementation provenance and public sources are recorded in
 | `usb_identity.rs` | Complete typed USB personality published by the worker as CBOR |
 | `profiles/` | Root-installed worker launch and resource boundary |
 
+The logical core separates key identity from cryptographic operations:
+`KeyKind` is used only at generation/import/restore boundaries, while
+`SignatureScheme` is selected when an applet signs or verifies. PIV, FIDO, and
+YubiHSM Auth retain parsed private keys in memory, so seed expansion and key
+validation are not repeated for every APDU. Their existing applet-specific CBOR
+records remain persistence DTOs rather than runtime key objects.
+
 For a visual explanation of Raspberry Pi USB gadget mode, its direct endpoint
 data paths, the supervisor's privilege boundary, and the Virtual YubiKey,
 Virtual Trezor, and Virtual YubiHSM profiles, see the
