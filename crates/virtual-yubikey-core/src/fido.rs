@@ -9,7 +9,7 @@ use minicbor::Encoder;
 use software_key_core::post_quantum;
 use software_key_core::{
     software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::fmt;
 use subtle::ConstantTimeEq;
@@ -114,7 +114,7 @@ impl fmt::Debug for CredentialPrivateKey {
 
 impl CredentialPrivateKey {
     fn generate(algorithm: FidoCredentialAlgorithm) -> Result<Self, Error> {
-        let key = SoftwareSigningKey::generate(algorithm.software_signing_algorithm())
+        let key = SoftwareSigningKey::generate_for_kind(algorithm.software_key_kind())
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         Ok(Self { algorithm, key })
     }
@@ -124,7 +124,7 @@ impl CredentialPrivateKey {
         serialized: &[u8],
     ) -> Result<Self, &'static str> {
         let key =
-            SoftwareSigningKey::from_serialized(algorithm.software_signing_algorithm(), serialized)
+            SoftwareSigningKey::from_serialized_for_kind(algorithm.software_key_kind(), serialized)
                 .map_err(|_| "persistent credential private key is invalid")?;
         Ok(Self { algorithm, key })
     }
@@ -2139,7 +2139,7 @@ fn decode_cose_key(decoder: &mut minicbor::Decoder<'_>) -> Result<Vec<u8>, u8> {
 }
 
 fn key_agreement_response(state: &mut FidoState) -> Result<Vec<u8>, Error> {
-    let secret = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+    let secret = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     let SoftwarePublicKey::Ec {
         uncompressed: public,
@@ -3644,11 +3644,9 @@ mod tests {
         rp_id: &str,
         preview_handle: Option<Vec<u8>>,
     ) -> ResidentCredential {
-        let private_key = SoftwareSigningKey::from_serialized(
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            &[0x11; 32],
-        )
-        .unwrap();
+        let private_key =
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &[0x11; 32])
+                .unwrap();
         let SoftwarePublicKey::Ec {
             uncompressed: public_key,
             ..

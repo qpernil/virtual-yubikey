@@ -5,7 +5,7 @@ use crate::{
 };
 use software_key_core::{
     software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::{collections::BTreeMap, fmt};
 use subtle::ConstantTimeEq;
@@ -141,14 +141,27 @@ impl PivAlgorithm {
         }
     }
 
-    const fn signing_algorithm(self) -> Option<SoftwareSigningAlgorithm> {
+    const fn signing_algorithm(self) -> Option<SignatureScheme> {
         match self {
             Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => {
-                Some(SoftwareSigningAlgorithm::RsaPkcs1Sha256)
+                Some(SignatureScheme::RsaPkcs1Sha256)
             }
-            Self::EccP256 => Some(SoftwareSigningAlgorithm::EcdsaP256Sha256),
-            Self::EccP384 => Some(SoftwareSigningAlgorithm::EcdsaP384Sha384),
-            Self::Ed25519 => Some(SoftwareSigningAlgorithm::Ed25519),
+            Self::EccP256 => Some(SignatureScheme::EcdsaP256Sha256),
+            Self::EccP384 => Some(SignatureScheme::EcdsaP384Sha384),
+            Self::Ed25519 => Some(SignatureScheme::Ed25519),
+            Self::X25519 => None,
+        }
+    }
+
+    const fn key_kind(self) -> Option<KeyKind> {
+        match self {
+            Self::Rsa1024 => Some(KeyKind::Rsa { modulus_bits: 1024 }),
+            Self::Rsa2048 => Some(KeyKind::Rsa { modulus_bits: 2048 }),
+            Self::Rsa3072 => Some(KeyKind::Rsa { modulus_bits: 3072 }),
+            Self::Rsa4096 => Some(KeyKind::Rsa { modulus_bits: 4096 }),
+            Self::EccP256 => Some(KeyKind::Ec(EcCurve::P256)),
+            Self::EccP384 => Some(KeyKind::Ec(EcCurve::P384)),
+            Self::Ed25519 => Some(KeyKind::Ed25519),
             Self::X25519 => None,
         }
     }
@@ -202,12 +215,8 @@ enum PivPrivateKey {
 
 impl PivPrivateKey {
     fn generate(algorithm: PivAlgorithm) -> Result<Self, ()> {
-        if let Some(bits) = algorithm.rsa_bits() {
-            SoftwareSigningKey::generate_rsa(bits)
-                .map(Self::Signing)
-                .map_err(|_| ())
-        } else if let Some(signing_algorithm) = algorithm.signing_algorithm() {
-            SoftwareSigningKey::generate(signing_algorithm)
+        if let Some(key_kind) = algorithm.key_kind() {
+            SoftwareSigningKey::generate_for_kind(key_kind)
                 .map(Self::Signing)
                 .map_err(|_| ())
         } else if algorithm == PivAlgorithm::X25519 {
@@ -220,8 +229,8 @@ impl PivPrivateKey {
     }
 
     fn from_serialized(algorithm: PivAlgorithm, serialized: &[u8]) -> Result<Self, ()> {
-        if let Some(signing_algorithm) = algorithm.signing_algorithm() {
-            SoftwareSigningKey::from_serialized(signing_algorithm, serialized)
+        if let Some(key_kind) = algorithm.key_kind() {
+            SoftwareSigningKey::from_serialized_for_kind(key_kind, serialized)
                 .map(Self::Signing)
                 .map_err(|_| ())
         } else if algorithm == PivAlgorithm::X25519 {
@@ -1198,7 +1207,7 @@ impl PivApplet {
                     .map(|signature| signature.into_bytes())
             } else if key.algorithm == PivAlgorithm::Ed25519 {
                 private_key
-                    .sign_message(SoftwareSigningAlgorithm::Ed25519, digest)
+                    .sign_message(SignatureScheme::Ed25519, digest)
                     .map(|signature| signature.into_bytes())
             } else {
                 let Some(algorithm) = key.algorithm.signing_algorithm() else {
@@ -2088,7 +2097,7 @@ mod tests {
         let signature = decode_exact_tlv(dynamic, 0x82).unwrap();
         public_key
             .verify_prehash(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                SignatureScheme::EcdsaP256Sha256,
                 &digest,
                 &decode_ecdsa_der(signature, 32),
             )
@@ -2107,8 +2116,7 @@ mod tests {
 
     #[test]
     fn imports_moves_uses_and_deletes_an_ecc_key() {
-        let imported =
-            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        let imported = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
         let public_key = imported.public_key();
         let private_key = imported.serialized().unwrap();
         let request = [
@@ -2162,7 +2170,7 @@ mod tests {
             decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
         public_key
             .verify_prehash(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                SignatureScheme::EcdsaP256Sha256,
                 &digest,
                 &decode_ecdsa_der(signature, 32),
             )
@@ -2256,7 +2264,10 @@ mod tests {
 
     #[test]
     fn imports_and_validates_rsa_crt_components() {
-        let imported = SoftwareSigningKey::generate_rsa(1_024).unwrap();
+        let imported = SoftwareSigningKey::generate_for_kind(KeyKind::Rsa {
+            modulus_bits: 1_024,
+        })
+        .unwrap();
         let components = imported.rsa_crt_components().unwrap();
         let mut request = Vec::new();
         for (index, component) in components.iter().enumerate() {
@@ -2445,7 +2456,7 @@ mod tests {
             0x9000
         );
         let imported =
-            SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &seed).unwrap();
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &seed).unwrap();
         let SoftwarePublicKey::Ed25519(expected_public) = imported.public_key() else {
             unreachable!();
         };

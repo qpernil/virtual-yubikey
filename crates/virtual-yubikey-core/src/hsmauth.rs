@@ -6,7 +6,7 @@ use crate::{
 use software_key_core::{
     secure_channel::{scp03_cryptogram, scp03_key, x963_kdf_sha256},
     software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
     software_symmetric::aes_cmac,
 };
 use subtle::ConstantTimeEq;
@@ -119,12 +119,11 @@ impl CredentialSecret {
                     mac: Zeroizing::new(encoded[16..].try_into().unwrap()),
                 })
             }
-            Algorithm::EcP256YubicoAuthentication => SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
-                encoded,
-            )
-            .map(Self::Asymmetric)
-            .map_err(|_| "persistent YubiHSM Auth P-256 key is invalid"),
+            Algorithm::EcP256YubicoAuthentication => {
+                SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), encoded)
+                    .map(Self::Asymmetric)
+                    .map_err(|_| "persistent YubiHSM Auth P-256 key is invalid")
+            }
         }
     }
 }
@@ -321,10 +320,10 @@ impl HsmAuthApplet {
                 if tlvs.len() == 6 && tlvs[3].tag == TAG_PRIVATE_KEY =>
             {
                 let key = if tlvs[3].value.is_empty() {
-                    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256))
                 } else {
-                    SoftwareSigningKey::from_serialized(
-                        SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                    SoftwareSigningKey::from_serialized_for_kind(
+                        KeyKind::Ec(EcCurve::P256),
                         tlvs[3].value,
                     )
                 };
@@ -445,7 +444,7 @@ impl HsmAuthApplet {
                     return ResponseApdu::status(status);
                 }
                 let Ok(ephemeral) =
-                    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256))
                 else {
                     return ResponseApdu::status(STATUS_EXECUTION_ERROR);
                 };
@@ -1259,11 +1258,9 @@ mod tests {
     fn asymmetric_credential_performs_both_ecdh_operations_and_validates_the_receipt() {
         let mut private = [0_u8; 32];
         private[31] = 7;
-        let credential_key = SoftwareSigningKey::from_serialized(
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            &private,
-        )
-        .unwrap();
+        let credential_key =
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &private)
+                .unwrap();
         let credential_public = p256_public_key(&credential_key).unwrap();
         let mut applet = HsmAuthApplet::new(2, [5, 8, 0]);
         assert_eq!(
@@ -1295,9 +1292,9 @@ mod tests {
         assert_eq!(host_ephemeral_public.status, 0x9000);
 
         let device_static =
-            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+            SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
         let device_ephemeral =
-            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+            SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
         let device_static_public = p256_public_key(&device_static).unwrap();
         let device_ephemeral_public = p256_public_key(&device_ephemeral).unwrap();
         let ephemeral_secret =
@@ -1450,8 +1447,7 @@ mod tests {
             applet.verify_credential_password(0, &[0xff; 16]),
             Err(STATUS_VERIFY_FAILED | 7)
         );
-        let ephemeral =
-            SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        let ephemeral = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
         let public = p256_public_key(&ephemeral).unwrap();
         applet.challenge = Some(Challenge::Asymmetric {
             label: "persistent".to_owned(),
