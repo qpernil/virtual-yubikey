@@ -13,7 +13,7 @@ mod presence;
 mod preview_sign;
 use software_key_core::{
     post_quantum::MlDsaParameterSet,
-    software_signing::{EcCurve, KeyKind, SignatureScheme},
+    software_signing::{EcCurve, EdwardsCurve, KeyKind, SignatureScheme},
 };
 use std::time::Duration;
 
@@ -194,7 +194,7 @@ impl FidoCredentialAlgorithm {
     pub const fn software_key_kind(self) -> KeyKind {
         match self {
             Self::Es256 | Self::Esp256 => KeyKind::Ec(EcCurve::P256),
-            Self::Ed25519 => KeyKind::Ed25519,
+            Self::Ed25519 => KeyKind::Edwards(EdwardsCurve::Ed25519),
             Self::Esp384 => KeyKind::Ec(EcCurve::P384),
             Self::Esp512 => KeyKind::Ec(EcCurve::P521),
             Self::Es256K => KeyKind::Ec(EcCurve::Secp256k1),

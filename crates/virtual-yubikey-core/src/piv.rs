@@ -4,9 +4,11 @@ use crate::{
     CommandApdu, PresenceAuthorization, ResponseApdu, UserPresencePolicy, PIV_TOUCH_CACHE_DURATION,
 };
 use software_key_core::{
-    software_key_agreement::{derive_with_signing_key, SoftwareX25519Key},
+    software_key_agreement::{derive_with_signing_key, MontgomeryCurve, SoftwareMontgomeryKey},
     software_private_key::SoftwarePrivateKey,
-    software_signing::{EcCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey},
+    software_signing::{
+        EcCurve, EdwardsCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
+    },
 };
 use std::{collections::BTreeMap, fmt};
 use subtle::ConstantTimeEq;
@@ -162,7 +164,7 @@ impl PivAlgorithm {
             Self::Rsa4096 => Some(KeyKind::Rsa { modulus_bits: 4096 }),
             Self::EccP256 => Some(KeyKind::Ec(EcCurve::P256)),
             Self::EccP384 => Some(KeyKind::Ec(EcCurve::P384)),
-            Self::Ed25519 => Some(KeyKind::Ed25519),
+            Self::Ed25519 => Some(KeyKind::Edwards(EdwardsCurve::Ed25519)),
             Self::X25519 => None,
         }
     }
@@ -214,8 +216,8 @@ fn generate_private_key(algorithm: PivAlgorithm) -> Result<SoftwarePrivateKey, (
             .map(SoftwarePrivateKey::Signing)
             .map_err(|_| ())
     } else if algorithm == PivAlgorithm::X25519 {
-        SoftwareX25519Key::generate()
-            .map(SoftwarePrivateKey::X25519)
+        SoftwareMontgomeryKey::generate(MontgomeryCurve::X25519)
+            .map(SoftwarePrivateKey::Montgomery)
             .map_err(|_| ())
     } else {
         Err(())
@@ -231,8 +233,8 @@ fn private_key_from_serialized(
             .map(SoftwarePrivateKey::Signing)
             .map_err(|_| ())
     } else if algorithm == PivAlgorithm::X25519 {
-        SoftwareX25519Key::from_serialized(serialized)
-            .map(SoftwarePrivateKey::X25519)
+        SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, serialized)
+            .map(SoftwarePrivateKey::Montgomery)
             .map_err(|_| ())
     } else {
         Err(())
@@ -242,7 +244,7 @@ fn private_key_from_serialized(
 fn serialized_private_key(key: &SoftwarePrivateKey) -> Result<Zeroizing<Vec<u8>>, ()> {
     match key {
         SoftwarePrivateKey::Signing(key) => key.serialized().map_err(|_| ()),
-        SoftwarePrivateKey::X25519(key) => Ok(key.serialized()),
+        SoftwarePrivateKey::Montgomery(key) => Ok(key.serialized()),
         SoftwarePrivateKey::MlKem(_) => Err(()),
     }
 }
@@ -276,9 +278,10 @@ impl PivKey {
                     curve,
                     uncompressed,
                 } if Some(curve) == self.algorithm.curve() => Ok(encode_tlv(0x86, &uncompressed)),
-                SoftwarePublicKey::Ed25519(public) if self.algorithm == PivAlgorithm::Ed25519 => {
-                    Ok(encode_tlv(0x86, &public))
-                }
+                SoftwarePublicKey::Edwards {
+                    curve: EdwardsCurve::Ed25519,
+                    public_key,
+                } if self.algorithm == PivAlgorithm::Ed25519 => Ok(encode_tlv(0x86, &public_key)),
                 SoftwarePublicKey::Rsa { modulus, exponent }
                     if self.algorithm.rsa_bits() == Some(modulus.len() * 8) =>
                 {
@@ -286,10 +289,13 @@ impl PivKey {
                 }
                 _ => Err(()),
             },
-            SoftwarePrivateKey::X25519(key) if self.algorithm == PivAlgorithm::X25519 => {
+            SoftwarePrivateKey::Montgomery(key)
+                if self.algorithm == PivAlgorithm::X25519
+                    && key.curve() == MontgomeryCurve::X25519 =>
+            {
                 Ok(encode_tlv(0x86, &key.public_key()))
             }
-            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
 }
@@ -1239,7 +1245,7 @@ impl PivApplet {
                 SoftwarePrivateKey::Signing(private_key) => {
                     derive_with_signing_key(private_key, peer_public_key).map_err(|_| ())
                 }
-                SoftwarePrivateKey::X25519(private_key) => {
+                SoftwarePrivateKey::Montgomery(private_key) => {
                     private_key.derive(peer_public_key).map_err(|_| ())
                 }
                 SoftwarePrivateKey::MlKem(_) => Err(()),
@@ -2341,7 +2347,7 @@ mod tests {
             ..
         } = (match &piv.keys.get(&0x9d).unwrap().private_key {
             SoftwarePrivateKey::Signing(key) => key.public_key(),
-            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
+            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
         })
         else {
             unreachable!();
@@ -2351,7 +2357,7 @@ mod tests {
             ..
         } = (match &piv.keys.get(&0x82).unwrap().private_key {
             SoftwarePrivateKey::Signing(key) => key.public_key(),
-            SoftwarePrivateKey::X25519(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
+            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
         })
         else {
             unreachable!();
@@ -2454,9 +2460,16 @@ mod tests {
                 .status,
             0x9000
         );
-        let imported =
-            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &seed).unwrap();
-        let SoftwarePublicKey::Ed25519(expected_public) = imported.public_key() else {
+        let imported = SoftwareSigningKey::from_serialized_for_kind(
+            KeyKind::Edwards(EdwardsCurve::Ed25519),
+            &seed,
+        )
+        .unwrap();
+        let SoftwarePublicKey::Edwards {
+            curve: EdwardsCurve::Ed25519,
+            public_key: expected_public,
+        } = imported.public_key()
+        else {
             unreachable!();
         };
         let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x82, &[]));
@@ -2491,7 +2504,7 @@ mod tests {
             .to_vec();
         assert_eq!(public.len(), 32);
 
-        let peer = SoftwareX25519Key::generate().unwrap();
+        let peer = SoftwareMontgomeryKey::generate(MontgomeryCurve::X25519).unwrap();
         let peer_public = peer.public_key();
         let expected = peer.derive(&public).unwrap();
         let request = encode_tlv(
@@ -2545,7 +2558,8 @@ mod tests {
                 .status,
             0x9000
         );
-        let imported = SoftwareX25519Key::from_serialized(&seed).unwrap();
+        let imported =
+            SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, &seed).unwrap();
         let expected_public = imported.public_key();
         let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x82, &[]));
         let fields = decode_tlvs(&metadata.data).unwrap();
