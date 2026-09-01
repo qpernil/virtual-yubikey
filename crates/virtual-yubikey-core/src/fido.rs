@@ -6,10 +6,13 @@ use crate::{
 };
 use minicbor::Encoder;
 #[cfg(test)]
-use software_key_core::post_quantum;
+use software_key_core::{
+    post_quantum,
+    software_signing::{ecdsa_signature_from_der, SignatureScheme},
+};
 use software_key_core::{
     software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
+    software_signing::{EcCurve, EdwardsCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::fmt;
 use subtle::ConstantTimeEq;
@@ -157,9 +160,14 @@ impl CredentialPrivateKey {
                 };
                 encode_ec2(self.algorithm.cose_identifier(), cose_curve, &uncompressed)
             }
-            SoftwarePublicKey::Ed25519(public) => {
-                encode_okp(self.algorithm.cose_identifier(), 6, &public)
-            }
+            SoftwarePublicKey::Edwards {
+                curve: EdwardsCurve::Ed25519,
+                public_key,
+            } => encode_okp(self.algorithm.cose_identifier(), 6, &public_key),
+            SoftwarePublicKey::Edwards {
+                curve: EdwardsCurve::Ed448,
+                ..
+            } => Err(CKR_DEVICE_ERROR.into()),
             SoftwarePublicKey::MlDsa { public_key, .. } => {
                 encode_akp(self.algorithm.cose_identifier(), &public_key)
             }
@@ -2447,8 +2455,8 @@ mod tests {
         let response = standard_assertion_response(&mut state, 0, &[0x55; 32], None).unwrap();
         assert_eq!(assertion_user_field_count(&response[1..]), None);
     }
-    use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
-    use signature::{hazmat::PrehashVerifier, Verifier};
+    use p256::ecdsa::{Signature, VerifyingKey};
+    use signature::hazmat::PrehashVerifier;
 
     const CONTEXT: &[u8] = b"ARKG-P256.test vectors";
     const EXPECTED_PUBLIC_KEY: &str = "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107dac2a1b197cc10d2376559ad6df6bc107318d5cfb90def9f4a1f5347e086c2cd";
@@ -2683,14 +2691,9 @@ mod tests {
 
         let client_data_hash = [0x44; 32];
         let credential_id = restored.credentials[0].credential_id.clone();
-        let CredentialPrivateKey {
-            algorithm: FidoCredentialAlgorithm::Es256,
-            key: SoftwareSigningKey::P256(private_key),
-        } = &restored.credentials[0].private_key
-        else {
-            panic!("standard test credential should use ES256");
-        };
-        let verifying_key = VerifyingKey::from(private_key.public_key());
+        let private_key = &restored.credentials[0].private_key.key;
+        assert_eq!(private_key.key_kind(), KeyKind::Ec(EcCurve::P256));
+        let public_key = private_key.public_key();
         let mut assertion = vec![AUTHENTICATOR_GET_ASSERTION];
         Encoder::new(&mut assertion)
             .map(5)
@@ -2728,10 +2731,13 @@ mod tests {
         let assertion = exchange(&mut restored, &assertion);
         assert_eq!(assertion[0], CTAP2_OK);
         let auth_data = assertion_authenticator_data(&assertion[1..]);
-        let signature = assertion_signature(&assertion[1..]);
+        let signature =
+            ecdsa_signature_from_der(&assertion_signature_bytes(&assertion[1..]), 32).unwrap();
         let mut signed = auth_data;
         signed.extend_from_slice(&client_data_hash);
-        verifying_key.verify(&signed, &signature).unwrap();
+        public_key
+            .verify_message(SignatureScheme::EcdsaP256Sha256, &signed, &signature)
+            .unwrap();
 
         let mut full = FidoState::new(identifier, FidoConfiguration::default());
         for index in 0..MAX_RESIDENT_CREDENTIALS {
@@ -3153,14 +3159,9 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey {
-            algorithm: FidoCredentialAlgorithm::Esp256,
-            key: SoftwareSigningKey::P256(key),
-        } = &restored.credentials[0].private_key
-        else {
-            panic!("ESP256 credential did not restore its P-256 key");
-        };
-        let verifying_key = VerifyingKey::from(key.public_key());
+        let key = &restored.credentials[0].private_key.key;
+        assert_eq!(key.key_kind(), KeyKind::Ec(EcCurve::P256));
+        let public_key = key.public_key();
         let client_data_hash = [0x79; 32];
         let assertion_request = get_assertion_request(
             "esp256.example",
@@ -3171,8 +3172,10 @@ mod tests {
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
-        verifying_key
-            .verify(&signed, &assertion_signature(&assertion[1..]))
+        let signature =
+            ecdsa_signature_from_der(&assertion_signature_bytes(&assertion[1..]), 32).unwrap();
+        public_key
+            .verify_message(SignatureScheme::EcdsaP256Sha256, &signed, &signature)
             .unwrap();
     }
 
@@ -3195,12 +3198,13 @@ mod tests {
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
         let CredentialPrivateKey {
             algorithm: FidoCredentialAlgorithm::Ed25519,
-            key: SoftwareSigningKey::Ed25519(key),
+            key,
         } = &restored.credentials[0].private_key
         else {
             panic!("Ed25519 credential did not restore its signing key");
         };
-        let verifying_key = key.verifying_key();
+        assert_eq!(key.key_kind(), KeyKind::Edwards(EdwardsCurve::Ed25519));
+        let public_key = key.public_key();
         let client_data_hash = [0x78; 32];
         let assertion_request = get_assertion_request(
             "ed25519.example",
@@ -3211,11 +3215,13 @@ mod tests {
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
-        let signature = ed25519_dalek::Signature::try_from(
-            assertion_signature_bytes(&assertion[1..]).as_slice(),
-        )
-        .unwrap();
-        verifying_key.verify(&signed, &signature).unwrap();
+        public_key
+            .verify_message(
+                SignatureScheme::Ed25519,
+                &signed,
+                &assertion_signature_bytes(&assertion[1..]),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -3235,14 +3241,9 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey {
-            algorithm: FidoCredentialAlgorithm::Esp384,
-            key: SoftwareSigningKey::P384(key),
-        } = &restored.credentials[0].private_key
-        else {
-            panic!("ESP384 credential did not restore its P-384 key");
-        };
-        let verifying_key = p384::ecdsa::VerifyingKey::from(key.public_key());
+        let key = &restored.credentials[0].private_key.key;
+        assert_eq!(key.key_kind(), KeyKind::Ec(EcCurve::P384));
+        let public_key = key.public_key();
         let client_data_hash = [0x77; 32];
         let assertion_request = get_assertion_request(
             "esp384.example",
@@ -3254,9 +3255,10 @@ mod tests {
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
         let signature =
-            p384::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
-                .unwrap();
-        verifying_key.verify(&signed, &signature).unwrap();
+            ecdsa_signature_from_der(&assertion_signature_bytes(&assertion[1..]), 48).unwrap();
+        public_key
+            .verify_message(SignatureScheme::EcdsaP384Sha384, &signed, &signature)
+            .unwrap();
     }
 
     #[test]
@@ -3276,14 +3278,9 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey {
-            algorithm: FidoCredentialAlgorithm::Esp512,
-            key: SoftwareSigningKey::P521(key),
-        } = &restored.credentials[0].private_key
-        else {
-            panic!("ESP512 credential did not restore its P-521 key");
-        };
-        let verifying_key = p521::ecdsa::VerifyingKey::from(key.public_key());
+        let key = &restored.credentials[0].private_key.key;
+        assert_eq!(key.key_kind(), KeyKind::Ec(EcCurve::P521));
+        let public_key = key.public_key();
         let client_data_hash = [0x76; 32];
         let assertion_request = get_assertion_request(
             "esp512.example",
@@ -3295,9 +3292,10 @@ mod tests {
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
         let signature =
-            p521::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
-                .unwrap();
-        verifying_key.verify(&signed, &signature).unwrap();
+            ecdsa_signature_from_der(&assertion_signature_bytes(&assertion[1..]), 66).unwrap();
+        public_key
+            .verify_message(SignatureScheme::EcdsaP521Sha512, &signed, &signature)
+            .unwrap();
     }
 
     #[test]
@@ -3317,14 +3315,9 @@ mod tests {
             FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
         let mut restored =
             FidoState::decode_persistent(&encoded, identifier, configuration).unwrap();
-        let CredentialPrivateKey {
-            algorithm: FidoCredentialAlgorithm::Es256K,
-            key: SoftwareSigningKey::K256(key),
-        } = &restored.credentials[0].private_key
-        else {
-            panic!("ES256K credential did not restore its secp256k1 key");
-        };
-        let verifying_key = k256::ecdsa::VerifyingKey::from(key.public_key());
+        let key = &restored.credentials[0].private_key.key;
+        assert_eq!(key.key_kind(), KeyKind::Ec(EcCurve::Secp256k1));
+        let public_key = key.public_key();
         let client_data_hash = [0x75; 32];
         let assertion_request = get_assertion_request(
             "es256k.example",
@@ -3336,9 +3329,10 @@ mod tests {
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
         let signature =
-            k256::ecdsa::DerSignature::from_bytes(&assertion_signature_bytes(&assertion[1..]))
-                .unwrap();
-        verifying_key.verify(&signed, &signature).unwrap();
+            ecdsa_signature_from_der(&assertion_signature_bytes(&assertion[1..]), 32).unwrap();
+        public_key
+            .verify_message(SignatureScheme::EcdsaSecp256k1Sha256, &signed, &signature)
+            .unwrap();
     }
 
     #[test]
@@ -3700,10 +3694,6 @@ mod tests {
             }
         }
         panic!("assertion response did not contain a signature");
-    }
-
-    fn assertion_signature(response: &[u8]) -> DerSignature {
-        DerSignature::from_bytes(&assertion_signature_bytes(response)).unwrap()
     }
 
     fn assertion_user_field_count(response: &[u8]) -> Option<u64> {
