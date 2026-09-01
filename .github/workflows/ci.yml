@@ -16,7 +16,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check out first-party dependencies
-        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
 
       - name: Run tests
         run: cargo test --locked --workspace --all-features
@@ -35,7 +38,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check out first-party dependencies
-        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
 
       - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@1.85.0
@@ -51,7 +57,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check out first-party dependencies
-        run: git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
 
       - name: Install iOS Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
