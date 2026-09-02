@@ -196,6 +196,7 @@ mod tests {
 
     const PROFILE: &str = include_str!("../profiles/virtual-yubikey.toml");
     const OLED_PROFILE: &str = include_str!("../profiles/virtual-yubikey-sh1106-spi.toml");
+    const I2C_PROFILE: &str = include_str!("../profiles/virtual-yubikey-sh1106-i2c.toml");
 
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
@@ -296,6 +297,21 @@ mod tests {
                 .as_str(),
             Some("/absolute/path/to/virtual-yubikey-worker")
         );
+    }
+
+    #[test]
+    fn i2c_profile_selects_sh1106_and_remote_buttons() {
+        let profile: toml::Value = toml::from_str(I2C_PROFILE).unwrap();
+        let resources = profile.get("resources").unwrap().as_array().unwrap();
+        assert_eq!(
+            profile["worker"]["arguments"].as_array().unwrap()[4].as_str(),
+            Some("--display=sh1106-i2c")
+        );
+        assert_eq!(resources[0]["name"].as_str(), Some("display-i2c"));
+        assert_eq!(resources[0]["path"].as_str(), Some("/dev/i2c-1"));
+        assert_eq!(resources[1]["offsets"].as_array().unwrap().len(), 1);
+        assert_eq!(resources[2]["offsets"][0].as_integer(), Some(5));
+        assert_eq!(resources[3]["offsets"][0].as_integer(), Some(26));
     }
 
     #[test]

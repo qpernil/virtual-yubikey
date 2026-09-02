@@ -341,7 +341,7 @@ profile supplies the worker serial and log level; its direct options are:
 ```text
 --serial DECIMAL       Management serial (default 12345678)
 --log-level LEVEL      off, info, debug, or trace
---display BACKEND      st7789-spi (default) or sh1106-spi
+--display BACKEND      st7789-spi (default), sh1106-spi, or sh1106-i2c
 --persistence MODE     batched (default, 500 ms) or immediate
 ```
 
@@ -361,6 +361,12 @@ The separate `virtual-yubikey-touch` tool sends the one-byte user-presence event
 ```sh
 virtual-yubikey-touch
 ```
+
+The checked-in `virtual-yubikey-sh1106-i2c.toml` profile drives the same
+monochrome image over `/dev/i2c-1`. It is intended for an I2C-native SH1106 or
+the Pi 3B `virtual-display --display=sh1106` SDL target. In that profile the
+SDL target's GPIO5 output supplies touch and GPIO26 controls USB
+eject/reinsertion; the direct SPI profiles retain the display-HAT GPIOs.
 
 PIV private-key operations honor the key policy stored at generation or import:
 `Never` proceeds immediately, `Always` requires a fresh touch, and `Cached`

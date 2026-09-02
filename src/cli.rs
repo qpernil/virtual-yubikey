@@ -16,6 +16,7 @@ pub(crate) struct Options {
 pub(crate) enum DisplayKind {
     St7789Spi,
     Sh1106Spi,
+    Sh1106I2c,
 }
 
 impl DisplayKind {
@@ -24,6 +25,7 @@ impl DisplayKind {
         match self {
             Self::St7789Spi => "st7789-spi",
             Self::Sh1106Spi => "sh1106-spi",
+            Self::Sh1106I2c => "sh1106-i2c",
         }
     }
 
@@ -31,9 +33,10 @@ impl DisplayKind {
         match value {
             "st7789-spi" => Ok(Self::St7789Spi),
             "sh1106-spi" => Ok(Self::Sh1106Spi),
+            "sh1106-i2c" => Ok(Self::Sh1106I2c),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid display {value:?}; use st7789-spi or sh1106-spi"),
+                format!("invalid display {value:?}; use st7789-spi, sh1106-spi, or sh1106-i2c"),
             )),
         }
     }
@@ -86,7 +89,7 @@ where
                      This unprivileged binary is started by usb-gadget-supervisor. Its\n\
                      control socket is fixed at FD 3 and resource descriptors arrive through\n\
                      the versioned supervisor protocol. It refuses to run as root.\n\
-                     BACKEND is st7789-spi (default) or sh1106-spi.\n\
+                     BACKEND is st7789-spi (default), sh1106-spi, or sh1106-i2c.\n\
                      MODE is batched (default, 500 ms) or immediate.\n\
                      LEVEL is off, info (default), debug, or trace. Trace includes payloads\n\
                      and may expose secrets once stateful commands are implemented."
@@ -166,6 +169,9 @@ mod tests {
     fn parses_oled_display() {
         let options = parse(["--display=sh1106-spi".to_owned()]).unwrap();
         assert_eq!(options.display, DisplayKind::Sh1106Spi);
+
+        let options = parse(["--display=sh1106-i2c".to_owned()]).unwrap();
+        assert_eq!(options.display, DisplayKind::Sh1106I2c);
     }
 
     #[test]

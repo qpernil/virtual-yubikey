@@ -70,7 +70,7 @@ pub(crate) fn run_worker(
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
     let _state_lock = StateLock::acquire(state_directory.join(format!("yubikey-{serial}.lock")))?;
     let display = crate::display::Controller::start(
-        resources.display_spi,
+        resources.display_bus,
         resources.display_control,
         display_kind,
     )?;
@@ -253,7 +253,7 @@ pub(crate) fn run_worker(
 
 #[cfg(target_os = "linux")]
 struct InitialResources {
-    display_spi: File,
+    display_bus: File,
     display_control: File,
     touch_button: File,
     reconnect_button: File,
@@ -262,13 +262,13 @@ struct InitialResources {
 #[cfg(target_os = "linux")]
 impl InitialResources {
     fn parse(resources: Vec<(String, File)>) -> io::Result<Self> {
-        let mut display_spi = None;
+        let mut display_bus = None;
         let mut display_control = None;
         let mut touch_button = None;
         let mut reconnect_button = None;
         for (name, file) in resources {
             let target = match name.as_str() {
-                "display-spi" => &mut display_spi,
+                "display-spi" | "display-i2c" => &mut display_bus,
                 "display-control" => &mut display_control,
                 "touch-button" => &mut touch_button,
                 "reconnect-button" => &mut reconnect_button,
@@ -279,7 +279,8 @@ impl InitialResources {
             }
         }
         Ok(Self {
-            display_spi: display_spi.ok_or_else(|| data_error("missing display-spi resource"))?,
+            display_bus: display_bus
+                .ok_or_else(|| data_error("missing display-spi or display-i2c resource"))?,
             display_control: display_control
                 .ok_or_else(|| data_error("missing display-control resource"))?,
             touch_button: touch_button

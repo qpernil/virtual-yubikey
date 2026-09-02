@@ -1,0 +1,45 @@
+schema = 1
+name = "virtual-yubikey-sh1106-i2c"
+functionfs_mount = "/dev/ffs-virtual-yubikey"
+
+[worker]
+command = "/absolute/path/to/virtual-yubikey-worker"
+arguments = ["--serial", "12345678", "--log-level", "info", "--display=sh1106-i2c"]
+run_as = "worker-account"
+readiness_timeout_ms = 10000
+state_directory = "/var/lib/virtual-yubikey"
+runtime_directory = "/run/virtual-yubikey"
+
+[[resources]]
+type = "character-device"
+name = "display-i2c"
+path = "/dev/i2c-1"
+access = "read-write"
+
+[[resources]]
+type = "gpio-lines"
+name = "display-control"
+path = "/dev/gpiochip0"
+offsets = [25]
+direction = "output"
+initial_values = [false]
+
+[[resources]]
+type = "gpio-lines"
+name = "touch-button"
+path = "/dev/gpiochip0"
+offsets = [5]
+direction = "input"
+active_low = true
+bias = "pull-up"
+edge = "both"
+
+[[resources]]
+type = "gpio-lines"
+name = "reconnect-button"
+path = "/dev/gpiochip0"
+offsets = [26]
+direction = "input"
+active_low = true
+bias = "pull-up"
+edge = "both"

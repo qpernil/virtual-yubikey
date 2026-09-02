@@ -107,7 +107,7 @@ fn button_loop(
         Level::Info,
         "button",
         "ready",
-        format_args!("touch=joystick-center gpio=13 reconnect=key3 gpio=16"),
+        format_args!("touch=touch-button reconnect=reconnect-button"),
     );
     let notifier = UnixDatagram::unbound()?;
     let mut poll_fds = [
