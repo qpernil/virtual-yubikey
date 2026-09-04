@@ -114,14 +114,17 @@ YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/
 certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
 Ed25519/X25519 key generation, matching algorithm-specific private-key import,
 metadata, signing, raw RSA private operations, ECDH/X25519 key agreement, and
-key move/delete. PIV state is atomically replaced as `piv-<serial>.cbor` in the
-configured state directory.
+key move/delete. Reads of the four biometric and printed-information objects
+enforce PIV PIN verification. Generated RSA, EC, and Ed25519 keys can be
+attested by the persistent RSA, EC, or Ed25519 key in slot F9 and its certificate
+in object `5FFF01`. PIV state is atomically replaced as `piv-<serial>.cbor` in
+the configured state directory.
 
 This is a YubiKey-compatible PIV applet rather than a claim of complete PIV Card
 conformance. The exact standards boundary, YubiKey extensions, and current gaps
 are recorded in [`docs/piv-conformance.md`](docs/piv-conformance.md). The
-remaining compatibility work includes PIN-protected data-object reads,
-attestation, CCID cancellation, and simulated fingerprint policy.
+remaining compatibility work includes CCID cancellation and simulated
+fingerprint policy.
 
 ## YubiHSM Auth development status
 

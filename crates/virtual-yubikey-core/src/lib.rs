@@ -569,7 +569,11 @@ impl VirtualYubiKey {
         configuration: FidoConfiguration,
     ) -> Self {
         let fido = FidoAuthenticator::with_configuration(profile.serial, configuration);
-        let piv = piv::PivApplet::new(profile.serial, profile.firmware);
+        let piv = piv::PivApplet::new_with_form_factor(
+            profile.serial,
+            profile.firmware,
+            profile.form_factor,
+        );
         let hsmauth = hsmauth::HsmAuthApplet::new(profile.serial, profile.firmware);
         Self::with_applets(profile, piv, hsmauth, fido)
     }
@@ -580,8 +584,12 @@ impl VirtualYubiKey {
         hsmauth_encoded: &[u8],
     ) -> Result<Self, &'static str> {
         let fido = FidoAuthenticator::for_serial(profile.serial);
-        let piv =
-            piv::PivApplet::from_persistent_state(profile.serial, profile.firmware, piv_encoded)?;
+        let piv = piv::PivApplet::from_persistent_state_with_form_factor(
+            profile.serial,
+            profile.firmware,
+            profile.form_factor,
+            piv_encoded,
+        )?;
         let hsmauth = hsmauth::HsmAuthApplet::from_persistent_state(
             profile.serial,
             profile.firmware,

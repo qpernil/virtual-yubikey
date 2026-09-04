@@ -3,6 +3,13 @@ use crate::{
     crypto::{AES_BLOCK_SIZE, Direction, TDES_BLOCK_SIZE, aes_ecb_block, tdes_ecb_block},
     presence::PresenceClient,
 };
+use const_oid::ObjectIdentifier;
+use der::{
+    Decode, Encode,
+    asn1::{Any, BitString, OctetString},
+};
+use rsa::{BigUint, RsaPublicKey, pkcs8::EncodePublicKey as EncodeRsaPublicKey};
+use signature::{Keypair, Signer};
 use software_key_core::{
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
@@ -10,8 +17,20 @@ use software_key_core::{
         EcCurve, EdwardsCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
     },
 };
-use std::{collections::BTreeMap, fmt};
+use spki::{
+    AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding,
+    SubjectPublicKeyInfoOwned,
+};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 use subtle::ConstantTimeEq;
+use x509_cert::{
+    builder::{Builder, CertificateBuilder, profile::BuilderProfile},
+    certificate::TbsCertificate,
+    ext::Extension,
+    name::Name,
+    serial_number::SerialNumber,
+    time::{Time, Validity},
+};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const PIV_AID: [u8; 11] = [
@@ -38,6 +57,7 @@ const INS_MOVE_KEY: u8 = 0xf6;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
+const INS_ATTEST: u8 = 0xf9;
 const INS_IMPORT_KEY: u8 = 0xfe;
 const INS_SET_RETRIES: u8 = 0xfa;
 const INS_RESET: u8 = 0xfb;
@@ -46,6 +66,8 @@ const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 const REFERENCE_PIN: u8 = 0x80;
 const REFERENCE_PUK: u8 = 0x81;
 const REFERENCE_MANAGEMENT_KEY: u8 = 0x9b;
+const SLOT_ATTESTATION: u8 = 0xf9;
+const OBJECT_ATTESTATION_CERTIFICATE: u32 = 0x5f_ff01;
 const ALGORITHM_PIN_OR_PUK: u8 = 0xff;
 const FACTORY_RETRIES: u8 = 3;
 const FACTORY_PIN: [u8; 8] = [b'1', b'2', b'3', b'4', b'5', b'6', 0xff, 0xff];
@@ -73,6 +95,10 @@ const PIN_POLICY_ALWAYS: u8 = 3;
 const TOUCH_POLICY_NEVER: u8 = 1;
 const TOUCH_POLICY_ALWAYS: u8 = 2;
 const TOUCH_POLICY_CACHED: u8 = 3;
+
+const PERSISTENT_STATE_VERSION: u8 = 4;
+const ATTESTATION_OID_PREFIX: &str = "1.3.6.1.4.1.41482.3";
+const FACTORY_ATTESTATION_PRIVATE_KEY: [u8; 32] = [0x42; 32];
 
 pub(crate) enum PivExchange {
     Complete(ResponseApdu),
@@ -224,6 +250,19 @@ impl PivAlgorithm {
             Self::X25519 => Some(0x08),
         }
     }
+
+    const fn supports_attestation(self) -> bool {
+        matches!(
+            self,
+            Self::Rsa1024
+                | Self::Rsa2048
+                | Self::Rsa3072
+                | Self::Rsa4096
+                | Self::EccP256
+                | Self::EccP384
+                | Self::Ed25519
+        )
+    }
 }
 
 fn generate_private_key(algorithm: PivAlgorithm) -> Result<SoftwarePrivateKey, ()> {
@@ -314,6 +353,316 @@ impl PivKey {
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
+
+    fn subject_public_key_info(&self) -> Result<SubjectPublicKeyInfoOwned, ()> {
+        match &self.private_key {
+            SoftwarePrivateKey::Signing(key) => signing_subject_public_key_info(key),
+            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+        }
+    }
+
+    fn signing_key(&self) -> Result<&SoftwareSigningKey, ()> {
+        match &self.private_key {
+            SoftwarePrivateKey::Signing(key) => Ok(key),
+            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CertificateVerifyingKey(SubjectPublicKeyInfoOwned);
+
+impl spki::EncodePublicKey for CertificateVerifyingKey {
+    fn to_public_key_der(&self) -> spki::Result<spki::Document> {
+        spki::Document::try_from(self.0.to_der()?).map_err(Into::into)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CertificateSignatureScheme {
+    RsaSha256,
+    EcdsaP256Sha256,
+    EcdsaP384Sha384,
+    Ed25519,
+}
+
+struct CertificateSigner {
+    key: SoftwareSigningKey,
+    verifying_key: CertificateVerifyingKey,
+    scheme: CertificateSignatureScheme,
+}
+
+impl CertificateSigner {
+    fn from_key(key: &SoftwareSigningKey) -> Result<Self, ()> {
+        let scheme = match key.public_key() {
+            SoftwarePublicKey::Rsa { .. } => CertificateSignatureScheme::RsaSha256,
+            SoftwarePublicKey::Ec {
+                curve: EcCurve::P256,
+                ..
+            } => CertificateSignatureScheme::EcdsaP256Sha256,
+            SoftwarePublicKey::Ec {
+                curve: EcCurve::P384,
+                ..
+            } => CertificateSignatureScheme::EcdsaP384Sha384,
+            SoftwarePublicKey::Edwards {
+                curve: EdwardsCurve::Ed25519,
+                ..
+            } => CertificateSignatureScheme::Ed25519,
+            _ => return Err(()),
+        };
+        Ok(Self {
+            key: key.clone(),
+            verifying_key: CertificateVerifyingKey(signing_subject_public_key_info(key)?),
+            scheme,
+        })
+    }
+}
+
+impl Keypair for CertificateSigner {
+    type VerifyingKey = CertificateVerifyingKey;
+
+    fn verifying_key(&self) -> Self::VerifyingKey {
+        self.verifying_key.clone()
+    }
+}
+
+impl DynSignatureAlgorithmIdentifier for CertificateSigner {
+    fn signature_algorithm_identifier(&self) -> spki::Result<AlgorithmIdentifierOwned> {
+        let (oid, parameters) = match self.scheme {
+            CertificateSignatureScheme::RsaSha256 => (
+                ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+                Some(Any::null()),
+            ),
+            CertificateSignatureScheme::EcdsaP256Sha256 => {
+                (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"), None)
+            }
+            CertificateSignatureScheme::EcdsaP384Sha384 => {
+                (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"), None)
+            }
+            CertificateSignatureScheme::Ed25519 => {
+                (ObjectIdentifier::new_unwrap("1.3.101.112"), None)
+            }
+        };
+        Ok(AlgorithmIdentifierOwned { oid, parameters })
+    }
+}
+
+struct CertificateSignature(Vec<u8>);
+
+impl SignatureBitStringEncoding for CertificateSignature {
+    fn to_bitstring(&self) -> der::Result<BitString> {
+        BitString::from_bytes(&self.0)
+    }
+}
+
+impl Signer<CertificateSignature> for CertificateSigner {
+    fn try_sign(
+        &self,
+        message: &[u8],
+    ) -> core::result::Result<CertificateSignature, signature::Error> {
+        let scheme = match self.scheme {
+            CertificateSignatureScheme::RsaSha256 => SignatureScheme::RsaPkcs1Sha256,
+            CertificateSignatureScheme::EcdsaP256Sha256 => SignatureScheme::EcdsaP256Sha256,
+            CertificateSignatureScheme::EcdsaP384Sha384 => SignatureScheme::EcdsaP384Sha384,
+            CertificateSignatureScheme::Ed25519 => SignatureScheme::Ed25519,
+        };
+        let signature = self
+            .key
+            .sign_message(scheme, message)
+            .map_err(|_| signature::Error::new())?;
+        let signature = match self.scheme {
+            CertificateSignatureScheme::EcdsaP256Sha256 => signature
+                .to_ecdsa_der(EcCurve::P256)
+                .map_err(|_| signature::Error::new())?,
+            CertificateSignatureScheme::EcdsaP384Sha384 => signature
+                .to_ecdsa_der(EcCurve::P384)
+                .map_err(|_| signature::Error::new())?,
+            CertificateSignatureScheme::RsaSha256 | CertificateSignatureScheme::Ed25519 => {
+                signature.into_bytes()
+            }
+        };
+        Ok(CertificateSignature(signature))
+    }
+}
+
+struct AttestationProfile {
+    subject: Name,
+    issuer: Name,
+    extensions: Vec<Extension>,
+}
+
+impl BuilderProfile for AttestationProfile {
+    fn get_issuer(&self, _subject: &Name) -> Name {
+        self.issuer.clone()
+    }
+
+    fn get_subject(&self) -> Name {
+        self.subject.clone()
+    }
+
+    fn build_extensions(
+        &self,
+        _subject_key: spki::SubjectPublicKeyInfoRef<'_>,
+        _issuer_key: spki::SubjectPublicKeyInfoRef<'_>,
+        _tbs: &TbsCertificate,
+    ) -> x509_cert::builder::Result<Vec<Extension>> {
+        Ok(self.extensions.clone())
+    }
+}
+
+fn signing_subject_public_key_info(
+    key: &SoftwareSigningKey,
+) -> Result<SubjectPublicKeyInfoOwned, ()> {
+    match key.public_key() {
+        SoftwarePublicKey::Ec {
+            curve,
+            uncompressed,
+        } => ec_subject_public_key_info(curve, &uncompressed),
+        SoftwarePublicKey::Edwards {
+            curve: EdwardsCurve::Ed25519,
+            public_key,
+        } => Ok(SubjectPublicKeyInfoOwned {
+            algorithm: AlgorithmIdentifierOwned {
+                oid: ObjectIdentifier::new_unwrap("1.3.101.112"),
+                parameters: None,
+            },
+            subject_public_key: BitString::from_bytes(&public_key).map_err(|_| ())?,
+        }),
+        SoftwarePublicKey::Rsa { modulus, exponent } => {
+            let public = RsaPublicKey::new(
+                BigUint::from_bytes_be(&modulus),
+                BigUint::from_bytes_be(&exponent),
+            )
+            .map_err(|_| ())?;
+            let encoded = public.to_public_key_der().map_err(|_| ())?;
+            SubjectPublicKeyInfoOwned::from_der(encoded.as_bytes()).map_err(|_| ())
+        }
+        SoftwarePublicKey::Edwards { .. } | SoftwarePublicKey::MlDsa { .. } => Err(()),
+    }
+}
+
+fn ec_subject_public_key_info(
+    curve: EcCurve,
+    uncompressed: &[u8],
+) -> Result<SubjectPublicKeyInfoOwned, ()> {
+    let curve_oid = match curve {
+        EcCurve::P256 => ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7"),
+        EcCurve::P384 => ObjectIdentifier::new_unwrap("1.3.132.0.34"),
+        _ => return Err(()),
+    };
+    Ok(SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned {
+            oid: ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+            parameters: Some(Any::encode_from(&curve_oid).map_err(|_| ())?),
+        },
+        subject_public_key: BitString::from_bytes(uncompressed).map_err(|_| ())?,
+    })
+}
+
+fn raw_attestation_extension(suffix: u8, value: Vec<u8>) -> Result<Extension, ()> {
+    Ok(Extension {
+        extn_id: ObjectIdentifier::new(&format!("{ATTESTATION_OID_PREFIX}.{suffix}"))
+            .map_err(|_| ())?,
+        critical: false,
+        extn_value: OctetString::new(value).map_err(|_| ())?,
+    })
+}
+
+fn device_attestation_extensions(
+    firmware: [u8; 3],
+    serial: u32,
+    form_factor: u8,
+) -> Result<Vec<Extension>, ()> {
+    Ok(vec![
+        raw_attestation_extension(3, firmware.to_vec())?,
+        raw_attestation_extension(7, serial.to_be_bytes().to_vec())?,
+        raw_attestation_extension(9, vec![form_factor])?,
+    ])
+}
+
+fn key_attestation_extensions(
+    firmware: [u8; 3],
+    serial: u32,
+    form_factor: u8,
+    key: &PivKey,
+) -> Result<Vec<Extension>, ()> {
+    let mut extensions = device_attestation_extensions(firmware, serial, form_factor)?;
+    extensions.insert(
+        2,
+        raw_attestation_extension(8, vec![key.pin_policy, key.touch_policy])?,
+    );
+    Ok(extensions)
+}
+
+fn build_certificate(
+    profile: AttestationProfile,
+    serial: &[u8],
+    validity: Validity,
+    subject_public_key: SubjectPublicKeyInfoOwned,
+    signer: &CertificateSigner,
+) -> Result<Vec<u8>, ()> {
+    let certificate = CertificateBuilder::new(
+        profile,
+        SerialNumber::new(serial).map_err(|_| ())?,
+        validity,
+        subject_public_key,
+    )
+    .map_err(|_| ())?
+    .build::<_, CertificateSignature>(signer)
+    .map_err(|_| ())?;
+    certificate.to_der().map_err(|_| ())
+}
+
+fn certificate_object(certificate: &[u8]) -> Vec<u8> {
+    [
+        encode_tlv(0x70, certificate),
+        encode_tlv(0x71, &[0]),
+        encode_tlv(0xfe, &[]),
+    ]
+    .concat()
+}
+
+fn factory_attestation_bundle(
+    serial: u32,
+    firmware: [u8; 3],
+    form_factor: u8,
+) -> Result<(PivKey, Vec<u8>), ()> {
+    let private_key = SoftwareSigningKey::from_serialized_for_kind(
+        KeyKind::Ec(EcCurve::P256),
+        &FACTORY_ATTESTATION_PRIVATE_KEY,
+    )
+    .map_err(|_| ())?;
+    let key = PivKey {
+        algorithm: PivAlgorithm::EccP256,
+        pin_policy: PIN_POLICY_NEVER,
+        touch_policy: TOUCH_POLICY_NEVER,
+        origin: ORIGIN_GENERATED,
+        private_key: SoftwarePrivateKey::Signing(private_key),
+    };
+    let signer = CertificateSigner::from_key(key.signing_key()?)?;
+    let subject = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation CA {serial}"))
+        .map_err(|_| ())?;
+    let profile = AttestationProfile {
+        subject: subject.clone(),
+        issuer: subject,
+        extensions: device_attestation_extensions(firmware, serial, form_factor)?,
+    };
+    let validity = Validity::new(
+        Time::from_str("2026-01-01T00:00:00Z").map_err(|_| ())?,
+        Time::from_str("2049-12-31T23:59:59Z").map_err(|_| ())?,
+    );
+    let mut certificate_serial = [0_u8; 8];
+    certificate_serial[..4].copy_from_slice(&serial.to_be_bytes());
+    certificate_serial[4] = SLOT_ATTESTATION;
+    certificate_serial[7] = 1;
+    let certificate = build_certificate(
+        profile,
+        &certificate_serial,
+        validity,
+        key.subject_public_key_info()?,
+        &signer,
+    )?;
+    Ok((key, certificate_object(&certificate)))
 }
 
 struct PinReference {
@@ -365,6 +714,7 @@ impl PinReference {
 pub(crate) struct PivApplet {
     serial: u32,
     firmware: [u8; 3],
+    form_factor: u8,
     pin: PinReference,
     puk: PinReference,
     pin_verified: bool,
@@ -399,10 +749,23 @@ impl fmt::Debug for PivApplet {
 }
 
 impl PivApplet {
+    #[cfg(test)]
     pub(crate) fn new(serial: u32, firmware: [u8; 3]) -> Self {
+        Self::new_with_form_factor(serial, firmware, 0x01)
+    }
+
+    pub(crate) fn new_with_form_factor(serial: u32, firmware: [u8; 3], form_factor: u8) -> Self {
+        let (attestation_key, attestation_certificate) =
+            factory_attestation_bundle(serial, firmware, form_factor)
+                .expect("built-in PIV attestation identity is valid");
+        let mut objects = BTreeMap::new();
+        objects.insert(OBJECT_ATTESTATION_CERTIFICATE, attestation_certificate);
+        let mut keys = BTreeMap::new();
+        keys.insert(SLOT_ATTESTATION, attestation_key);
         Self {
             serial,
             firmware,
+            form_factor,
             pin: PinReference::new(FACTORY_PIN),
             puk: PinReference::new(FACTORY_PUK),
             pin_verified: false,
@@ -412,8 +775,8 @@ impl PivApplet {
             management_challenge: None,
             management_authenticated: false,
             presence: PresenceClient::default(),
-            objects: BTreeMap::new(),
-            keys: BTreeMap::new(),
+            objects,
+            keys,
             persistent_change: false,
         }
     }
@@ -424,9 +787,19 @@ impl PivApplet {
         self.management_challenge = None;
     }
 
+    #[cfg(test)]
     pub(crate) fn from_persistent_state(
         serial: u32,
         firmware: [u8; 3],
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        Self::from_persistent_state_with_form_factor(serial, firmware, 0x01, encoded)
+    }
+
+    pub(crate) fn from_persistent_state_with_form_factor(
+        serial: u32,
+        firmware: [u8; 3],
+        form_factor: u8,
         encoded: &[u8],
     ) -> Result<Self, &'static str> {
         let mut decoder = minicbor::Decoder::new(encoded);
@@ -534,7 +907,7 @@ impl PivApplet {
         if decoder.position() != encoded.len() {
             return Err("persistent PIV state has trailing data");
         }
-        if version != Some(3) {
+        if !matches!(version, Some(3 | PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent PIV state version");
         }
         if stored_serial != Some(serial) {
@@ -564,9 +937,22 @@ impl PivApplet {
         let management_touch_policy = management_touch_policy
             .filter(|policy| valid_management_touch_policy(*policy))
             .ok_or("persistent PIV state has no valid management touch policy")?;
+        let legacy_state = version == Some(3);
+        let mut objects = objects.ok_or("persistent PIV state has no object store")?;
+        let mut keys = keys.ok_or("persistent PIV state has no key store")?;
+        if legacy_state {
+            let (attestation_key, attestation_certificate) =
+                factory_attestation_bundle(serial, firmware, form_factor)
+                    .map_err(|_| "cannot create the PIV attestation identity")?;
+            keys.entry(SLOT_ATTESTATION).or_insert(attestation_key);
+            objects
+                .entry(OBJECT_ATTESTATION_CERTIFICATE)
+                .or_insert(attestation_certificate);
+        }
         Ok(Self {
             serial,
             firmware,
+            form_factor,
             pin: PinReference {
                 value: Zeroizing::new(pin.ok_or("persistent PIV state has no PIN")?),
                 retries: pin_retries,
@@ -584,9 +970,9 @@ impl PivApplet {
             management_challenge: None,
             management_authenticated: false,
             presence: PresenceClient::default(),
-            objects: objects.ok_or("persistent PIV state has no object store")?,
-            keys: keys.ok_or("persistent PIV state has no key store")?,
-            persistent_change: false,
+            objects,
+            keys,
+            persistent_change: legacy_state,
         })
     }
 
@@ -597,7 +983,7 @@ impl PivApplet {
             .map_err(|_| "cannot encode persistent PIV state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent PIV state")?
-            .u8(3)
+            .u8(PERSISTENT_STATE_VERSION)
             .map_err(|_| "cannot encode persistent PIV state")?
             .u8(2)
             .map_err(|_| "cannot encode persistent PIV state")?
@@ -714,6 +1100,7 @@ impl PivApplet {
             INS_GET_METADATA if command.p1 == 0 && command.data.is_empty() => {
                 self.get_metadata(command.p2)
             }
+            INS_ATTEST if command.p2 == 0 && command.data.is_empty() => self.attest(command.p1),
             INS_GENERATE_ASYMMETRIC if command.p1 == 0 => {
                 self.generate_asymmetric(command.p2, command.data)
             }
@@ -746,6 +1133,7 @@ impl PivApplet {
             INS_GET_VERSION
             | INS_GET_SERIAL
             | INS_GET_METADATA
+            | INS_ATTEST
             | INS_GENERATE_ASYMMETRIC
             | INS_GET_DATA
             | INS_PUT_DATA
@@ -758,6 +1146,73 @@ impl PivApplet {
             _ => ResponseApdu::status(STATUS_INSTRUCTION_NOT_SUPPORTED),
         };
         response.into()
+    }
+
+    fn attest(&self, slot: u8) -> ResponseApdu {
+        if !valid_user_key_slot(slot) {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
+        }
+        let Some(target) = self.keys.get(&slot) else {
+            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+        };
+        if target.origin != ORIGIN_GENERATED || !target.algorithm.supports_attestation() {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        let Some(attestation_key) = self.keys.get(&SLOT_ATTESTATION) else {
+            return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
+        };
+        let Ok(signer) = attestation_key
+            .signing_key()
+            .and_then(CertificateSigner::from_key)
+        else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Some(certificate_object) = self.objects.get(&OBJECT_ATTESTATION_CERTIFICATE) else {
+            return ResponseApdu::status(STATUS_NOT_FOUND);
+        };
+        let Some(attestation_certificate) = certificate_der(certificate_object)
+            .and_then(|encoded| x509_cert::Certificate::from_der(encoded).ok())
+        else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let tbs = attestation_certificate.tbs_certificate();
+        let Ok(subject) = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation {slot:02x}"))
+        else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        let Ok(extensions) =
+            key_attestation_extensions(self.firmware, self.serial, self.form_factor, target)
+        else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        let profile = AttestationProfile {
+            subject,
+            // The generated certificate is issued by the identity represented
+            // by object 5FFF01, whose subject is therefore copied verbatim.
+            issuer: tbs.subject().clone(),
+            extensions,
+        };
+        let mut serial = [0_u8; 16];
+        if getrandom::fill(&mut serial).is_err() {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        }
+        serial[0] &= 0x7f;
+        if serial.iter().all(|byte| *byte == 0) {
+            serial[15] = 1;
+        }
+        let Ok(subject_public_key) = target.subject_public_key_info() else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Ok(certificate) = build_certificate(
+            profile,
+            &serial,
+            *tbs.validity(),
+            subject_public_key,
+            &signer,
+        ) else {
+            return ResponseApdu::status(STATUS_INTERNAL_ERROR);
+        };
+        ResponseApdu::success(certificate)
     }
 
     fn get_metadata(&self, reference: u8) -> ResponseApdu {
@@ -799,6 +1254,9 @@ impl PivApplet {
         let Some(object_id) = decode_object_id(request) else {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         };
+        if pin_protected_object_id(object_id) && !self.pin_verified {
+            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED);
+        }
         let mut response = Vec::new();
         if object_id == 0x7e {
             push_tlv(&mut response, 0x53, &DISCOVERY_OBJECT);
@@ -854,6 +1312,9 @@ impl PivApplet {
         else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
+        if slot == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
         let Some(pin_policy) = optional_policy(&fields, 0xaa, default_pin_policy(slot)) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
@@ -888,6 +1349,9 @@ impl PivApplet {
         let Some(algorithm) = PivAlgorithm::from_id(command.p1) else {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         };
+        if command.p2 == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
         let Some(fields) = decode_tlvs(command.data) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
@@ -984,6 +1448,14 @@ impl PivApplet {
         if command.p1 != 0xff && !valid_key_slot(command.p1) {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         }
+        if command.p1 == SLOT_ATTESTATION
+            && self
+                .keys
+                .get(&command.p2)
+                .is_some_and(|key| !key.algorithm.supports_attestation())
+        {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
         let Some(key) = self.keys.remove(&command.p2) else {
             return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
         };
@@ -1016,7 +1488,19 @@ impl PivApplet {
         if self.pin.retries != 0 || self.puk.retries != 0 {
             return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED);
         }
-        let mut reset = Self::new(self.serial, self.firmware);
+        let attestation_key = self.keys.get(&SLOT_ATTESTATION).cloned();
+        let attestation_certificate = self.objects.get(&OBJECT_ATTESTATION_CERTIFICATE).cloned();
+        let mut reset = Self::new_with_form_factor(self.serial, self.firmware, self.form_factor);
+        reset.keys.remove(&SLOT_ATTESTATION);
+        reset.objects.remove(&OBJECT_ATTESTATION_CERTIFICATE);
+        if let Some(key) = attestation_key {
+            reset.keys.insert(SLOT_ATTESTATION, key);
+        }
+        if let Some(certificate) = attestation_certificate {
+            reset
+                .objects
+                .insert(OBJECT_ATTESTATION_CERTIFICATE, certificate);
+        }
         reset.persistent_change = true;
         *self = reset;
         ResponseApdu::success(Vec::new())
@@ -1200,6 +1684,9 @@ impl PivApplet {
         command: &CommandApdu<'_>,
         presence: PresenceAuthorization,
     ) -> PivExchange {
+        if command.p2 == SLOT_ATTESTATION {
+            return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS).into();
+        }
         let Some(key) = self.keys.get(&command.p2) else {
             return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND).into();
         };
@@ -1452,6 +1939,9 @@ fn decode_persistent_keys(
                 .map_err(|_| "persistent PIV key has an invalid algorithm")?,
         )
         .ok_or("persistent PIV key algorithm is unsupported")?;
+        if slot == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+            return Err("persistent PIV attestation key algorithm is unsupported");
+        }
         let pin_policy = decoder
             .u8()
             .map_err(|_| "persistent PIV key has an invalid PIN policy")?;
@@ -1490,12 +1980,16 @@ fn decode_persistent_keys(
 }
 
 fn valid_key_slot(slot: u8) -> bool {
+    valid_user_key_slot(slot) || slot == SLOT_ATTESTATION
+}
+
+fn valid_user_key_slot(slot: u8) -> bool {
     matches!(slot, 0x9a | 0x9c | 0x9d | 0x9e | 0x82..=0x95)
 }
 
 fn default_pin_policy(slot: u8) -> u8 {
     match slot {
-        0x9e => PIN_POLICY_NEVER,
+        0x9e | SLOT_ATTESTATION => PIN_POLICY_NEVER,
         0x9c => PIN_POLICY_ALWAYS,
         _ => PIN_POLICY_ONCE,
     }
@@ -1571,6 +2065,22 @@ fn encode_der_integer(integer: &[u8]) -> Vec<u8> {
 
 fn writable_object_id(object_id: u32) -> bool {
     object_id <= 0x00ff_ffff && object_id != 0x7e
+}
+
+fn pin_protected_object_id(object_id: u32) -> bool {
+    matches!(object_id, 0x5f_c103 | 0x5f_c108 | 0x5f_c109 | 0x5f_c121)
+}
+
+fn certificate_der(object: &[u8]) -> Option<&[u8]> {
+    let fields = decode_tlvs(object)?;
+    if !matches!(unique_field(&fields, 0x71), None | Some([0]))
+        || fields
+            .iter()
+            .any(|(tag, _)| !matches!(*tag, 0x70 | 0x71 | 0xfe))
+    {
+        return None;
+    }
+    unique_field(&fields, 0x70)
 }
 
 fn unsigned_integer_equal(left: &[u8], right: &[u8]) -> bool {
@@ -1869,6 +2379,211 @@ mod tests {
                 .status,
             STATUS_REFERENCE_NOT_FOUND
         );
+        let attestation_metadata =
+            piv.transmit(&command(INS_GET_METADATA, 0, SLOT_ATTESTATION, &[]));
+        assert_eq!(attestation_metadata.status, 0x9000);
+        let fields = decode_tlvs(&attestation_metadata.data).unwrap();
+        assert_eq!(
+            unique_field(&fields, 0x01),
+            Some(&[PivAlgorithm::EccP256 as u8][..])
+        );
+        assert_eq!(
+            unique_field(&fields, 0x02),
+            Some(&[PIN_POLICY_NEVER, TOUCH_POLICY_NEVER][..])
+        );
+        let certificate = piv.transmit(&command(
+            INS_GET_DATA,
+            0x3f,
+            0xff,
+            &encode_tlv(0x5c, &[0x5f, 0xff, 0x01]),
+        ));
+        assert_eq!(certificate.status, 0x9000);
+        let object = decode_exact_tlv(&certificate.data, 0x53).unwrap();
+        x509_cert::Certificate::from_der(certificate_der(object).unwrap()).unwrap();
+    }
+
+    fn verify_certificate_signature(
+        certificate: &x509_cert::Certificate,
+        public_key: &SoftwarePublicKey,
+        scheme: SignatureScheme,
+        ecdsa_coordinate_length: Option<usize>,
+    ) {
+        let tbs = certificate.tbs_certificate().to_der().unwrap();
+        let encoded_signature = certificate.signature().as_bytes().unwrap();
+        let signature = ecdsa_coordinate_length.map_or_else(
+            || encoded_signature.to_vec(),
+            |length| decode_ecdsa_der(encoded_signature, length),
+        );
+        public_key.verify_message(scheme, &tbs, &signature).unwrap();
+    }
+
+    #[test]
+    fn attests_generated_rsa_ec_and_ed25519_keys_with_documented_fields() {
+        let mut piv = PivApplet::new_with_form_factor(0x01020304, [5, 8, 1], 0x03);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let factory_certificate = x509_cert::Certificate::from_der(
+            certificate_der(&piv.objects[&OBJECT_ATTESTATION_CERTIFICATE]).unwrap(),
+        )
+        .unwrap();
+        let factory_tbs = factory_certificate.tbs_certificate();
+        let factory_public = piv.keys[&SLOT_ATTESTATION]
+            .signing_key()
+            .unwrap()
+            .public_key();
+
+        for (slot, algorithm, subject_key_oid) in [
+            (
+                0x9a,
+                PivAlgorithm::Rsa2048,
+                ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1"),
+            ),
+            (
+                0x9c,
+                PivAlgorithm::EccP256,
+                ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+            ),
+            (
+                0x9d,
+                PivAlgorithm::EccP384,
+                ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
+            ),
+            (
+                0x9e,
+                PivAlgorithm::Ed25519,
+                ObjectIdentifier::new_unwrap("1.3.101.112"),
+            ),
+        ] {
+            let template = [
+                encode_tlv(0x80, &[algorithm as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_ONCE]),
+                encode_tlv(0xab, &[TOUCH_POLICY_CACHED]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    slot,
+                    &encode_tlv(0xac, &template),
+                ))
+                .status,
+                0x9000
+            );
+            let response = piv.transmit(&command(INS_ATTEST, slot, 0, &[]));
+            assert_eq!(response.status, 0x9000);
+            let certificate = x509_cert::Certificate::from_der(&response.data).unwrap();
+            let tbs = certificate.tbs_certificate();
+            assert_eq!(tbs.issuer(), factory_tbs.subject());
+            assert_eq!(tbs.validity(), factory_tbs.validity());
+            assert_eq!(tbs.subject_public_key_info().algorithm.oid, subject_key_oid);
+            assert_eq!(
+                tbs.subject_public_key_info(),
+                &piv.keys[&slot].subject_public_key_info().unwrap()
+            );
+            let extensions = tbs.extensions().unwrap();
+            assert_eq!(extensions.len(), 4);
+            for (extension, suffix, value) in [
+                (&extensions[0], 3, &[5, 8, 1][..]),
+                (&extensions[1], 7, &[1, 2, 3, 4][..]),
+                (
+                    &extensions[2],
+                    8,
+                    &[PIN_POLICY_ONCE, TOUCH_POLICY_CACHED][..],
+                ),
+                (&extensions[3], 9, &[0x03][..]),
+            ] {
+                assert_eq!(
+                    extension.extn_id,
+                    ObjectIdentifier::new(&format!("{ATTESTATION_OID_PREFIX}.{suffix}")).unwrap()
+                );
+                assert_eq!(extension.extn_value.as_bytes(), value);
+                assert!(!extension.critical);
+            }
+            assert_eq!(
+                certificate.signature_algorithm().oid,
+                ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2")
+            );
+            verify_certificate_signature(
+                &certificate,
+                &factory_public,
+                SignatureScheme::EcdsaP256Sha256,
+                Some(32),
+            );
+        }
+
+        piv.keys.get_mut(&0x9a).unwrap().origin = ORIGIN_IMPORTED;
+        assert_eq!(
+            piv.transmit(&command(INS_ATTEST, 0x9a, 0, &[])).status,
+            STATUS_INCORRECT_DATA
+        );
+    }
+
+    #[test]
+    fn rsa_ec_and_ed25519_keys_can_sign_attestation_certificates() {
+        let mut piv = PivApplet::new(0x01020304, [5, 8, 1]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let target_template = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]));
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9a, &target_template,))
+                .status,
+            0x9000
+        );
+
+        for (algorithm, signature_oid, scheme, coordinate_length) in [
+            (
+                PivAlgorithm::Rsa1024,
+                ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+                SignatureScheme::RsaPkcs1Sha256,
+                None,
+            ),
+            (
+                PivAlgorithm::EccP256,
+                ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
+                SignatureScheme::EcdsaP256Sha256,
+                Some(32),
+            ),
+            (
+                PivAlgorithm::EccP384,
+                ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"),
+                SignatureScheme::EcdsaP384Sha384,
+                Some(48),
+            ),
+            (
+                PivAlgorithm::Ed25519,
+                ObjectIdentifier::new_unwrap("1.3.101.112"),
+                SignatureScheme::Ed25519,
+                None,
+            ),
+        ] {
+            let private_key = generate_private_key(algorithm).unwrap();
+            let SoftwarePrivateKey::Signing(signing_key) = private_key else {
+                unreachable!()
+            };
+            let public_key = signing_key.public_key();
+            piv.keys.insert(
+                SLOT_ATTESTATION,
+                PivKey {
+                    algorithm,
+                    pin_policy: PIN_POLICY_NEVER,
+                    touch_policy: TOUCH_POLICY_NEVER,
+                    origin: ORIGIN_IMPORTED,
+                    private_key: SoftwarePrivateKey::Signing(signing_key),
+                },
+            );
+            let response = piv.transmit(&command(INS_ATTEST, 0x9a, 0, &[]));
+            assert_eq!(response.status, 0x9000);
+            let certificate = x509_cert::Certificate::from_der(&response.data).unwrap();
+            assert_eq!(certificate.signature_algorithm().oid, signature_oid);
+            verify_certificate_signature(&certificate, &public_key, scheme, coordinate_length);
+        }
     }
 
     #[test]
@@ -1955,6 +2670,91 @@ mod tests {
                 ))
                 .status,
             STATUS_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn protects_the_four_pin_gated_data_objects() {
+        let mut piv = PivApplet::new(10, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let protected: [u32; 4] = [0x5f_c103, 0x5f_c108, 0x5f_c109, 0x5f_c121];
+        for object_id in protected {
+            let object_id = object_id.to_be_bytes();
+            let request = [
+                encode_tlv(0x5c, &object_id[1..]),
+                encode_tlv(0x53, &[0x53, object_id[3]]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(INS_PUT_DATA, 0x3f, 0xff, &request))
+                    .status,
+                0x9000
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GET_DATA,
+                    0x3f,
+                    0xff,
+                    &encode_tlv(0x5c, &object_id[1..]),
+                ))
+                .status,
+                STATUS_SECURITY_NOT_SATISFIED
+            );
+        }
+
+        let pairing_code = 0x5f_c123_u32.to_be_bytes();
+        let pairing_value = [0x53, 0x01, 0x55];
+        let request = [
+            encode_tlv(0x5c, &pairing_code[1..]),
+            encode_tlv(0x53, &pairing_value),
+        ]
+        .concat();
+        assert_eq!(
+            piv.transmit(&command(INS_PUT_DATA, 0x3f, 0xff, &request))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GET_DATA,
+                0x3f,
+                0xff,
+                &encode_tlv(0x5c, &pairing_code[1..]),
+            )),
+            ResponseApdu::success(encode_tlv(0x53, &pairing_value))
+        );
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        for object_id in protected {
+            let object_id = object_id.to_be_bytes();
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GET_DATA,
+                    0x3f,
+                    0xff,
+                    &encode_tlv(0x5c, &object_id[1..]),
+                )),
+                ResponseApdu::success(encode_tlv(0x53, &[0x53, object_id[3]]))
+            );
+        }
+        piv.reset_connection();
+        assert_eq!(
+            piv.transmit(&command(
+                INS_GET_DATA,
+                0x3f,
+                0xff,
+                &encode_tlv(0x5c, &[0x5f, 0xc1, 0x09]),
+            ))
+            .status,
+            STATUS_SECURITY_NOT_SATISFIED
         );
     }
 
@@ -2083,7 +2883,7 @@ mod tests {
             piv.transmit(&command(
                 INS_GENERATE_ASYMMETRIC,
                 0,
-                0xf9,
+                0xf8,
                 &encode_tlv(0xac, &encode_tlv(0x80, &[0x11])),
             ))
             .status,
@@ -2829,10 +3629,20 @@ mod tests {
                 expected
             );
         }
+        let attestation_key = piv.keys[&SLOT_ATTESTATION].public_template().unwrap();
+        let attestation_certificate = piv.objects[&OBJECT_ATTESTATION_CERTIFICATE].clone();
         piv.objects.insert(0x5f_ff10, vec![1, 2, 3]);
         assert_eq!(piv.transmit(&command(INS_RESET, 0, 0, &[])).status, 0x9000);
-        assert!(piv.objects.is_empty());
-        assert!(piv.keys.is_empty());
+        assert_eq!(piv.objects.len(), 1);
+        assert_eq!(
+            piv.objects[&OBJECT_ATTESTATION_CERTIFICATE],
+            attestation_certificate
+        );
+        assert_eq!(piv.keys.len(), 1);
+        assert_eq!(
+            piv.keys[&SLOT_ATTESTATION].public_template().unwrap(),
+            attestation_key
+        );
         assert_eq!(piv.pin.maximum_retries, FACTORY_RETRIES);
         assert_eq!(piv.puk.maximum_retries, FACTORY_RETRIES);
         assert_eq!(piv.management_key.as_slice(), FACTORY_MANAGEMENT_KEY);
