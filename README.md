@@ -110,14 +110,17 @@ active on-disk format yet.
 
 The logical PIV applet starts empty and persists separately from FIDO and
 YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
-AES-192 management authentication, retry configuration/reset, data and
+3TDEA/AES management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
 Ed25519/X25519 key generation, matching algorithm-specific private-key import,
 metadata, signing, raw RSA private operations, ECDH/X25519 key agreement, and
 key move/delete. PIV state is atomically replaced as `piv-<serial>.cbor` in the
 configured state directory.
 
-The remaining PIV compatibility work is hardware transcript validation,
+This is a YubiKey-compatible PIV applet rather than a claim of complete PIV Card
+conformance. The exact standards boundary, YubiKey extensions, and current gaps
+are recorded in [`docs/piv-conformance.md`](docs/piv-conformance.md). The
+remaining compatibility work includes PIN-protected data-object reads,
 attestation, CCID cancellation, and simulated fingerprint policy.
 
 ## YubiHSM Auth development status
@@ -430,9 +433,15 @@ Transport behavior is checked against the
 [FIDO CTAP specification](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
 and the
 [USB CCID specification](https://www.usb.org/sites/default/files/DWG_Smart-Card_CCID_Rev110.pdf).
-PIV APDUs follow
-[NIST SP 800-73 Part 2](https://csrc.nist.gov/pubs/sp/800/73/pt2/5/final),
-with YubiKey-specific extensions matched to the
+The PIV data model and APDUs follow the current final
+[NIST SP 800-73-5 Part 1](https://csrc.nist.gov/pubs/sp/800/73/pt1/5/final)
+and
+[Part 2](https://csrc.nist.gov/pubs/sp/800/73/pt2/5/final).
+PIV algorithms follow the current final
+[NIST SP 800-78-5](https://csrc.nist.gov/pubs/sp/800/78/5/final): AES-128,
+AES-192, and AES-256 are standard PIV Card Application Administration Key
+algorithms, while 3TDEA is deprecated and permitted only through December 31,
+2030. YubiKey-specific extensions are matched to the
 [Yubico PIV command reference](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html).
 YubiHSM Auth APDUs follow the
 [Yubico YubiHSM Auth command reference](https://docs.yubico.com/yesdk/users-manual/application-yubihsm-auth/commands/yubihsm-auth-commands.html).

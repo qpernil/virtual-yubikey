@@ -390,6 +390,15 @@ This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
 
+The shared APDU router accepts one deliberate command-chaining compatibility
+exception. ISO 7816 command chaining normally omits `Le` from intermediate
+fragments and permits it on the final fragment. `libykpiv` appends short
+`Le = 0` to every T=1 APDU carrying command data, including intermediate
+fragments; physical YubiKeys accept that framing. The router therefore ignores
+`Le` on intermediate fragments while retaining the final fragment's `Le` for
+response handling. Applets receive only the reassembled command and do not need
+library-specific behavior.
+
 Each CCID command updates a shared command-active flag and increments a
 monotonic activity epoch. The device-neutral indicator scheduler in
 `display-backends` samples that state from its dedicated thread and invokes a

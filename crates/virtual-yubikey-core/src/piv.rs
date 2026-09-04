@@ -1,6 +1,6 @@
 use crate::{
     CommandApdu, PIV_TOUCH_CACHE_DURATION, PresenceAuthorization, ResponseApdu, UserPresencePolicy,
-    crypto::{AES_BLOCK_SIZE, Direction, aes_ecb_block},
+    crypto::{AES_BLOCK_SIZE, Direction, TDES_BLOCK_SIZE, aes_ecb_block, tdes_ecb_block},
     presence::PresenceClient,
 };
 use software_key_core::{
@@ -92,6 +92,7 @@ pub(crate) fn select_response() -> Vec<u8> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum ManagementAlgorithm {
+    TripleDes = 0x03,
     Aes128 = 0x08,
     Aes192 = 0x0a,
     Aes256 = 0x0c,
@@ -100,6 +101,7 @@ enum ManagementAlgorithm {
 impl ManagementAlgorithm {
     fn from_id(id: u8) -> Option<Self> {
         match id {
+            0x03 => Some(Self::TripleDes),
             0x08 => Some(Self::Aes128),
             0x0a => Some(Self::Aes192),
             0x0c => Some(Self::Aes256),
@@ -109,9 +111,23 @@ impl ManagementAlgorithm {
 
     const fn key_length(self) -> usize {
         match self {
+            Self::TripleDes | Self::Aes192 => 24,
             Self::Aes128 => 16,
-            Self::Aes192 => 24,
             Self::Aes256 => 32,
+        }
+    }
+
+    const fn block_size(self) -> usize {
+        match self {
+            Self::TripleDes => TDES_BLOCK_SIZE,
+            Self::Aes128 | Self::Aes192 | Self::Aes256 => AES_BLOCK_SIZE,
+        }
+    }
+
+    fn crypt_block(self, key: &[u8], block: &[u8], direction: Direction) -> Result<Vec<u8>, ()> {
+        match self {
+            Self::TripleDes => tdes_ecb_block(key, block, direction),
+            Self::Aes128 | Self::Aes192 | Self::Aes256 => aes_ecb_block(key, block, direction),
         }
     }
 }
@@ -1102,17 +1118,53 @@ impl PivApplet {
             {
                 return PivExchange::PresenceRequired(policy);
             }
-            let mut challenge = Zeroizing::new(vec![0_u8; AES_BLOCK_SIZE]);
+            let mut challenge = Zeroizing::new(vec![0_u8; self.management_algorithm.block_size()]);
             if getrandom::fill(challenge.as_mut()).is_err() {
                 return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
             }
-            let Ok(cryptogram) =
-                aes_ecb_block(&self.management_key, &challenge, Direction::Encrypt)
-            else {
+            let Ok(cryptogram) = self.management_algorithm.crypt_block(
+                &self.management_key,
+                &challenge,
+                Direction::Encrypt,
+            ) else {
                 return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
             };
             self.management_challenge = Some(challenge);
             return ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x80, &cryptogram))).into();
+        }
+
+        if fields.as_slice() == [(0x81, &[][..])] {
+            let mut challenge = Zeroizing::new(vec![0_u8; self.management_algorithm.block_size()]);
+            if getrandom::fill(challenge.as_mut()).is_err() {
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
+            }
+            let response = encode_tlv(0x7c, &encode_tlv(0x81, challenge.as_slice()));
+            self.management_challenge = Some(challenge);
+            self.management_authenticated = false;
+            return ResponseApdu::success(response).into();
+        }
+
+        if let [(0x82, host_response)] = fields.as_slice() {
+            let block_size = self.management_algorithm.block_size();
+            if host_response.len() != block_size {
+                return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
+            }
+            let Some(challenge) = self.management_challenge.take() else {
+                return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
+            };
+            let Ok(expected) = self.management_algorithm.crypt_block(
+                &self.management_key,
+                &challenge,
+                Direction::Encrypt,
+            ) else {
+                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
+            };
+            if !bool::from(expected.as_slice().ct_eq(*host_response)) {
+                self.management_authenticated = false;
+                return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
+            }
+            self.management_authenticated = true;
+            return ResponseApdu::success(Vec::new()).into();
         }
 
         let Some(card_response) = unique_field(&fields, 0x80) else {
@@ -1121,7 +1173,8 @@ impl PivApplet {
         let Some(host_challenge) = unique_field(&fields, 0x81) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
-        if card_response.len() != AES_BLOCK_SIZE || host_challenge.len() != AES_BLOCK_SIZE {
+        let block_size = self.management_algorithm.block_size();
+        if card_response.len() != block_size || host_challenge.len() != block_size {
             return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
         }
         let Some(expected) = self.management_challenge.take() else {
@@ -1131,9 +1184,11 @@ impl PivApplet {
             self.management_authenticated = false;
             return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
         }
-        let Ok(cryptogram) =
-            aes_ecb_block(&self.management_key, host_challenge, Direction::Encrypt)
-        else {
+        let Ok(cryptogram) = self.management_algorithm.crypt_block(
+            &self.management_key,
+            host_challenge,
+            Direction::Encrypt,
+        ) else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
         };
         self.management_authenticated = true;
@@ -1316,10 +1371,7 @@ fn split_reference_change(request: &[u8]) -> Option<(&[u8], &[u8])> {
 fn validate_pin_value(value: &[u8]) -> Option<[u8; 8]> {
     let bytes = value.try_into().ok()?;
     let length = value.iter().position(|byte| *byte == 0xff).unwrap_or(8);
-    if !(6..=8).contains(&length)
-        || !value[..length].iter().all(u8::is_ascii_digit)
-        || !value[length..].iter().all(|byte| *byte == 0xff)
-    {
+    if !(6..=8).contains(&length) || !value[length..].iter().all(|byte| *byte == 0xff) {
         return None;
     }
     Some(bytes)
@@ -1661,9 +1713,11 @@ mod tests {
         assert_eq!(response.status, 0x9000);
         let dynamic = decode_exact_tlv(&response.data, 0x7c).unwrap();
         let encrypted_challenge = decode_exact_tlv(dynamic, 0x80).unwrap();
-        let challenge = aes_ecb_block(key, encrypted_challenge, Direction::Decrypt).unwrap();
+        let challenge = algorithm
+            .crypt_block(key, encrypted_challenge, Direction::Decrypt)
+            .unwrap();
 
-        let host_challenge = [0x5a; AES_BLOCK_SIZE];
+        let host_challenge = vec![0x5a; algorithm.block_size()];
         let mut dynamic = encode_tlv(0x80, &challenge);
         dynamic.extend_from_slice(&encode_tlv(0x81, &host_challenge));
         let response = piv.transmit(&command(
@@ -1676,7 +1730,9 @@ mod tests {
         let dynamic = decode_exact_tlv(&response.data, 0x7c).unwrap();
         let cryptogram = decode_exact_tlv(dynamic, 0x82).unwrap();
         assert_eq!(
-            aes_ecb_block(key, cryptogram, Direction::Decrypt).unwrap(),
+            algorithm
+                .crypt_block(key, cryptogram, Direction::Decrypt)
+                .unwrap(),
             host_challenge
         );
     }
@@ -2612,7 +2668,7 @@ mod tests {
             0x9000
         );
 
-        let new_pin = [b'6', b'5', b'4', b'3', b'2', b'1', 0xff, 0xff];
+        let new_pin = [b'A', b'B', b'C', b'D', b'E', b'F', 0xff, 0xff];
         let change = [FACTORY_PIN.as_slice(), new_pin.as_slice()].concat();
         assert_eq!(
             piv.transmit(&command(INS_CHANGE_REFERENCE, 0, REFERENCE_PIN, &change))
@@ -2626,7 +2682,20 @@ mod tests {
             0x9000
         );
 
-        let restored = [FACTORY_PUK.as_slice(), FACTORY_PIN.as_slice()].concat();
+        let new_puk = *b"ABCDEFGH";
+        let change_puk = [FACTORY_PUK.as_slice(), new_puk.as_slice()].concat();
+        assert_eq!(
+            piv.transmit(&command(
+                INS_CHANGE_REFERENCE,
+                0,
+                REFERENCE_PUK,
+                &change_puk,
+            ))
+            .status,
+            0x9000
+        );
+
+        let restored = [new_puk.as_slice(), FACTORY_PIN.as_slice()].concat();
         assert_eq!(
             piv.transmit(&command(INS_RESET_RETRY, 0, REFERENCE_PIN, &restored))
                 .status,
@@ -2843,6 +2912,67 @@ mod tests {
             unique_field(&decode_tlvs(&metadata.data).unwrap(), 0x05),
             Some(&[0][..])
         );
+    }
+
+    #[test]
+    fn mutually_authenticates_and_persists_a_triple_des_management_key() {
+        let mut piv = PivApplet::new(1, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+
+        let new_key = [0x22; 24];
+        let mut set_key = vec![
+            ManagementAlgorithm::TripleDes as u8,
+            REFERENCE_MANAGEMENT_KEY,
+            new_key.len() as u8,
+        ];
+        set_key.extend_from_slice(&new_key);
+        assert_eq!(
+            piv.transmit(&command(INS_SET_MANAGEMENT_KEY, 0xff, 0xff, &set_key))
+                .status,
+            0x9000
+        );
+
+        let metadata = piv.transmit(&command(INS_GET_METADATA, 0, REFERENCE_MANAGEMENT_KEY, &[]));
+        assert_eq!(
+            unique_field(&decode_tlvs(&metadata.data).unwrap(), 0x01),
+            Some(&[ManagementAlgorithm::TripleDes as u8][..])
+        );
+
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(1, [5, 8, 0], &encoded).unwrap();
+        authenticate_management(&mut restored, ManagementAlgorithm::TripleDes, &new_key);
+
+        restored.reset_connection();
+        let request = encode_tlv(0x7c, &encode_tlv(0x81, &[]));
+        let challenge = restored.transmit(&command(
+            INS_AUTHENTICATE,
+            ManagementAlgorithm::TripleDes as u8,
+            REFERENCE_MANAGEMENT_KEY,
+            &request,
+        ));
+        assert_eq!(challenge.status, 0x9000);
+        let dynamic = decode_exact_tlv(&challenge.data, 0x7c).unwrap();
+        let challenge = decode_exact_tlv(dynamic, 0x81).unwrap();
+        let response = ManagementAlgorithm::TripleDes
+            .crypt_block(&new_key, challenge, Direction::Encrypt)
+            .unwrap();
+        let request = encode_tlv(0x7c, &encode_tlv(0x82, &response));
+        assert_eq!(
+            restored
+                .transmit(&command(
+                    INS_AUTHENTICATE,
+                    ManagementAlgorithm::TripleDes as u8,
+                    REFERENCE_MANAGEMENT_KEY,
+                    &request,
+                ))
+                .status,
+            0x9000
+        );
+        assert!(restored.management_authenticated);
     }
 
     #[test]
