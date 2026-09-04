@@ -3176,6 +3176,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rsa_components_larger_than_the_declared_algorithm() {
+        let oversized_component = [1u8; 256];
+        let mut request = Vec::new();
+        for tag in 0x01..=0x05 {
+            push_tlv(&mut request, tag, &oversized_component);
+        }
+        let mut piv = PivApplet::new(17, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::Rsa1024 as u8,
+                0x9a,
+                &request,
+            ))
+            .status,
+            STATUS_INCORRECT_DATA
+        );
+        assert!(!piv.keys.contains_key(&0x9a));
+    }
+
+    #[test]
     fn derives_matching_piv_ecdh_shared_secrets() {
         let mut piv = PivApplet::new(19, [5, 8, 0]);
         authenticate_management(
