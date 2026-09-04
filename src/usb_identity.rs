@@ -57,6 +57,7 @@ pub(crate) struct UsbIdentity {
 
 impl UsbIdentity {
     pub(crate) const VENDOR_ID: u16 = 0x1050;
+    pub(crate) const MANUFACTURER: &'static str = "Virtual";
 
     pub(crate) const fn yubikey_5_8(interfaces: UsbInterfaces) -> Self {
         Self {
@@ -77,14 +78,14 @@ impl UsbIdentity {
 
     pub(crate) const fn product(self) -> &'static str {
         match self.interfaces.mask() {
-            0x01 => "Virtual Yubico YubiKey OTP",
-            0x02 => "Virtual Yubico YubiKey FIDO",
-            0x03 => "Virtual Yubico YubiKey OTP+FIDO",
-            0x04 => "Virtual Yubico YubiKey CCID",
-            0x05 => "Virtual Yubico YubiKey OTP+CCID",
-            0x06 => "Virtual Yubico YubiKey FIDO+CCID",
-            0x07 => "Virtual Yubico YubiKey OTP+FIDO+CCID",
-            _ => "Virtual Yubico YubiKey",
+            0x01 => "YubiKey OTP",
+            0x02 => "YubiKey FIDO",
+            0x03 => "YubiKey OTP+FIDO",
+            0x04 => "YubiKey CCID",
+            0x05 => "YubiKey OTP+CCID",
+            0x06 => "YubiKey FIDO+CCID",
+            0x07 => "YubiKey OTP+FIDO+CCID",
+            _ => "YubiKey",
         }
     }
 }
@@ -105,7 +106,7 @@ pub(crate) fn personality() -> UsbPersonality {
         .with_string(StringDescriptor::new(
             1,
             0x0409,
-            string_descriptor("Virtual USB Gadget"),
+            string_descriptor(UsbIdentity::MANUFACTURER),
         ))
         .with_string(StringDescriptor::new(
             2,
@@ -201,8 +202,9 @@ mod tests {
     #[test]
     fn identity_is_derived_from_enabled_interfaces_and_firmware() {
         assert_eq!(UsbIdentity::VENDOR_ID, 0x1050);
+        assert_eq!(UsbIdentity::MANUFACTURER, "Virtual");
         assert_eq!(USB_IDENTITY.product_id(), 0x0406);
-        assert_eq!(USB_IDENTITY.product(), "Virtual Yubico YubiKey FIDO+CCID");
+        assert_eq!(USB_IDENTITY.product(), "YubiKey FIDO+CCID");
         assert_eq!(USB_IDENTITY.bcd_device(), 0x0580);
         let composite = UsbIdentity::yubikey_5_8(UsbInterfaces {
             otp: true,
@@ -210,7 +212,7 @@ mod tests {
             ccid: true,
         });
         assert_eq!(composite.product_id(), 0x0407);
-        assert_eq!(composite.product(), "Virtual Yubico YubiKey OTP+FIDO+CCID");
+        assert_eq!(composite.product(), "YubiKey OTP+FIDO+CCID");
     }
 
     #[test]
@@ -220,6 +222,17 @@ mod tests {
         assert_eq!(personality.configuration_descriptor.len(), 125);
         assert_eq!(personality.configuration_descriptor[4], 2);
         assert_eq!(personality.configuration_descriptor[8], 15);
+        assert_eq!(personality.device_descriptor[14..17], [1, 2, 0]);
+        assert_eq!(personality.strings[1].index, 1);
+        assert_eq!(
+            personality.strings[1].descriptor,
+            string_descriptor("Virtual")
+        );
+        assert_eq!(personality.strings[2].index, 2);
+        assert_eq!(
+            personality.strings[2].descriptor,
+            string_descriptor("YubiKey FIDO+CCID")
+        );
         for address in [FIDO_IN, FIDO_OUT, CCID_OUT, CCID_IN, CCID_INTERRUPT_IN] {
             assert!(
                 personality
