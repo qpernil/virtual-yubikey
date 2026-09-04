@@ -107,12 +107,11 @@ and card policy stays in `virtual-yubikey-core`.
 
 - Keep discovery and metadata, persistent objects and certificates, PIN/PUK and
   management authentication, retries and reset, RSA and EC key lifecycle,
-  signing, raw RSA operations, ECDH, Ed25519, and X25519 covered in the core.
-- Enforce the SP 800-73-5 Part 1 read rules for PIN-protected data objects and
-  cover both unauthenticated rejection and post-`VERIFY` access.
+  signing, raw RSA operations, ECDH, Ed25519, X25519, PIN-protected object
+  reads, and PIV attestation covered in the core.
 - Pass representative `yubico-piv-tool` workflows over USB CCID and preserve
   their transcripts as transport regression tests.
-- Add PIV attestation, CCID abort handling, and biometric policy events.
+- Add CCID abort handling and biometric policy events.
 - Keep the `pkcs11rs` adapter and its full-cycle tests running against the
   shared core.
 
