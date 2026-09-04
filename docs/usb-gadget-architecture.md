@@ -138,8 +138,8 @@ A simplified Virtual YubiKey tree looks like this:
 /sys/kernel/config/usb_gadget/virtual-yubikey/
 ├── idVendor                         # 0x1050
 ├── idProduct                        # 0x0406
-├── strings/0x409/manufacturer       # Virtual
-├── strings/0x409/product            # YubiKey FIDO+CCID
+├── strings/0x409/manufacturer       # Yubico
+├── strings/0x409/product            # YubiKey Gadget FIDO+CCID
 ├── functions/
 │   ├── hid.fido                     # kernel HID gadget function
 │   └── ffs.ccid                     # userspace FunctionFS function
@@ -157,12 +157,14 @@ enumeration.
 ConfigFS is therefore primarily a **configuration and lifecycle path**, not a
 path through which normal FIDO or CCID packets flow.
 
-The product string matches a YubiKey 5 in FIDO+CCID mode, while the `Virtual`
-manufacturer string keeps the implementation distinguishable in host USB and
-PC/SC interfaces. Stock Yubico Authenticator computes its visible model name
-from the compatibility identity and Management response, so it can display
-`YubiKey 5A`. The profile is a controlled local interoperability-test identity,
-not a claim of product origin.
+The manufacturer and product strings produce the PC/SC reader name `Yubico
+YubiKey Gadget FIDO+CCID`. The `Yubico YubiKey` prefix lets public Yubico tools
+classify the CCID transport as USB rather than NFC. These descriptor values
+exist only to placate name-based tooling; they do not claim that the project or
+device is made, assigned, approved, or endorsed by Yubico. `Gadget` keeps the
+implementation distinguishable from a physical YubiKey. Stock Yubico
+Authenticator computes its visible model name from the compatibility identity
+and Management response, so it can display `YubiKey 5A`.
 
 ### FunctionFS: implement a USB function in userspace
 
