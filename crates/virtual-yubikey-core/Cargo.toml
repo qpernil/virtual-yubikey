@@ -16,8 +16,5 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
-k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
-p384 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
-p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 signature = "3.0.0"

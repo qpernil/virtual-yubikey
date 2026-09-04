@@ -1,4 +1,4 @@
-# Reusing the `pkcs11rs` virtual YubiKey
+# PKCS #11 reuse boundary
 
 ## Decision
 
@@ -75,10 +75,10 @@ select only the combinations advertised by their COSE algorithms.
    against the core as applet coverage expands.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
    routed through the neutral APIs, retaining PKCS-specific mechanism parsing.
-6. Use workspace path dependencies during coordinated development. For independent
-   clones, publish the crates or pin Git dependencies to exact locked revisions.
+6. Use the documented sibling checkout set and workspace path dependencies
+   during coordinated development.
 
-Applet integration and secure-channel extraction are planned in
+Applet status and the secure-channel direction are described in
 [`applet-roadmap.md`](applet-roadmap.md).
 The future persistence and PKCS #11 key-fingerprint model is specified in
 [`future-storage-model.md`](future-storage-model.md).
@@ -89,4 +89,9 @@ The future persistence and PKCS #11 key-fingerprint model is specified in
 - `pkcs11rs` and the gadget generate identical Management and CTAP values from
   shared types rather than copied constants.
 - Capability advertisements are derived from installed emulator handlers.
-- `cargo build --release --locked` works from a standalone Pi clone.
+- `cargo build --release --locked` works from the documented sibling checkout
+  set on the Pi.
+
+An independently relocatable checkout requires versioned crate releases or Git
+dependencies pinned to exact revisions. That packaging boundary is separate
+from the coordinated sibling layout used by the current projects and CI.

@@ -1,146 +1,140 @@
-# Applet and secure-channel roadmap
+# Applet and secure-channel direction
 
-## Direction
+## Current boundary
 
-Develop logical YubiKey behavior in `virtual-yubikey-core`, prove it through
-the Raspberry Pi USB gadget and real host tools, and then make `pkcs11rs` reuse
-that behavior in its tests. Keep both projects working throughout integration;
-remove duplicated test code only after the shared core passes both projects'
-tests.
+`virtual-yubikey-core` is the transport-neutral implementation of the logical
+device. It owns the firmware profile, ISO 7816 routing, installed applets, and
+persistent applet state. The USB worker exposes that core through FIDO HID and
+CCID, while `pkcs11rs` consumes the same core through its `mock-yubikey`
+adapter.
 
-The planned order is:
+The core currently implements:
 
-1. Finish FIDO and `previewSign` compatibility.
-2. Add PIV and test it with `yubico-piv-tool`.
-3. Add YubiHSM Auth, including the Management behavior it needs. *(Implemented;
-   USB client compatibility validation remains.)*
-4. Add Issuer Security Domain behavior and target-side SCP03/SCP11.
-5. Add OpenPGP after the preceding CCID applets and secure channels are stable.
+- Management identity and capability reporting;
+- FIDO registration, assertions, PIN and credential management, resident
+  credentials, PPUAT, and `previewSign`;
+- PIV discovery, authentication, objects, certificates, key lifecycle, signing,
+  raw RSA operations, ECDH, Ed25519, and X25519;
+- YubiHSM Auth symmetric and asymmetric credentials, retry policy, touch,
+  SCP03 session derivation, and SCP11 key agreement; and
+- the OpenPGP `GET CHALLENGE` subset.
 
-HID can be added for another applet when a real client requires it. CCID remains
-the first transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
+The active priorities are:
+
+1. keep FIDO, PIV, and YubiHSM Auth behavior aligned across core, USB, and
+   `pkcs11rs` tests;
+2. qualify the implemented applets against real host tools over USB;
+3. add Issuer Security Domain behavior and target-side SCP03/SCP11; and
+4. expand OpenPGP after the common CCID and secure-channel behavior is stable.
+
+HID support is added when an applet or real client requires it. CCID remains the
+primary transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
 
 ## Integration pattern
 
-For each applet:
+Applet behavior is developed as transport-neutral APDU or CTAP behavior in the
+core. Each feature is then exercised at three boundaries:
 
-1. Identify the working host implementation, test mock, vectors, and crypto in
-   `pkcs11rs`.
-2. Manually promote the target-side behavior into transport-neutral
-   `virtual-yubikey-core` code without breaking `pkcs11rs`.
-3. Test the logical applet directly with APDU vectors.
-4. Test it through USB CCID against the relevant Yubico or OpenPGP tool.
-5. Add or update a `pkcs11rs` adapter and run its full-cycle tests against the
-   core.
-6. Remove the superseded test-only implementation once both repositories use
-   the shared code.
+1. direct protocol vectors against `virtual-yubikey-core`;
+2. FIDO HID or CCID transport tests in the USB worker; and
+3. full-cycle PKCS #11 tests through the `pkcs11rs` adapter where applicable.
+
+Capability advertisements derive from installed handlers so the Management
+application and USB profile do not promise unavailable behavior. Shared
+protocol code stays in the core; transport lifecycle and PKCS #11 policy remain
+in their owning projects.
 
 ## Cryptographic boundary
 
-Keep `software-key-core` protocol-neutral and limited to behavior both
-repositories actually share: key serialization, public projection, raw and
-profiled signing/verification, RSA encodings, ML-DSA policy, and ECDH. It should
-compose RustCrypto and other established upstream crates rather than duplicate
-their primitives. PIV, FIDO, USB, and PKCS #11 identifiers and policy stay in
-their respective protocol layers.
+`software-key-core` owns protocol-neutral cryptographic behavior shared by the
+provider and emulators: key serialization, public projection, signing and
+verification, RSA encodings, ML-DSA policy, symmetric operations, ECDH, and
+ARKG-P256 derivation. It composes established upstream cryptographic crates.
 
-The future immutable, content-addressed token generations and cross-token key
-fingerprints are specified in [`future-storage-model.md`](future-storage-model.md).
-That design is deliberately deferred while the current applet behavior is
-finished and remains separate from the active atomic state files.
+PIV, FIDO, USB, and PKCS #11 identifiers and policy remain in their protocol
+layers. Direct RustCrypto dev-dependencies are appropriate in protocol tests
+when they independently verify an encoded signature or public key; production
+cryptography continues to flow through `software-key-core`.
 
-Share code when it implements substantial protocol behavior that must agree
-byte-for-byte between host and card. Likely candidates are:
+Role-neutral secure-channel components belong in focused shared modules when
+both sides require byte-identical behavior. These include:
 
-- `previewSign`/ARKG derivation and encoding;
-- SCP03 key derivation, cryptograms, command/response protection, padding,
-  counters, and MAC chaining;
-- SCP11 key agreement, receipts, authentication transcripts, and variants;
-- certificate-chain encoding, parsing, verification, and trust-anchor handling;
+- SCP03 derivation, cryptograms, padding, counters, and MAC chaining;
+- SCP11 key agreement, receipts, transcripts, and variants;
+- certificate-chain encoding, parsing, verification, and trust anchors; and
 - common GlobalPlatform TLV and key/certificate formats.
 
-PKCS #11 mechanism policy and error mapping stay in `pkcs11rs`. USB transports,
-privilege separation, and gadget lifecycle stay in `virtual-yubikey`. Applet
-installation, key slots, and persistent card state stay in
-`virtual-yubikey-core`.
+Callers retain their own key stores, randomness, trust policy, session state,
+persistence, transport, and error mapping.
 
-## SCP and Issuer SD starting point
+The content-addressed token-generation and cross-token fingerprint model is
+specified separately in [`future-storage-model.md`](future-storage-model.md).
+Current FIDO, PIV, and YubiHSM Auth state remains in independent, atomically
+replaced versioned files.
 
-`pkcs11rs` already has production host-side SCP03 and SCP11 support, secure
-messaging, certificate-chain handling, and Issuer SD operations. Its tests also
-contain the calculations needed to act as the other side: deterministic card
-challenges, card cryptograms, SCP11 receipts, generated certificate chains,
-protected responses, and complete published exchange vectors.
+## Issuer SD and secure channels
 
-That test-side code is not yet a reusable virtual card. Test connectors mostly
-return scripted or precomputed responses. The missing target-side layer is an
-APDU-driven state machine that:
+`pkcs11rs` owns the host-side SCP03 and SCP11 implementation, secure messaging,
+certificate-chain handling, and Issuer SD operations. The target-side core needs
+an APDU-driven state machine that:
 
 - selects and exposes the Issuer Security Domain;
 - handles SCP03 `INITIALIZE UPDATE` and `EXTERNAL AUTHENTICATE`;
 - handles the applicable SCP11 authentication variants;
 - receives and validates OCE certificate chains where required;
 - owns static keys, trust anchors, session keys, counters, chaining values, and
-  authentication state;
-- unwraps protected commands and wraps protected responses;
+  authorization state;
+- unwraps protected commands and wraps protected responses; and
 - connects authenticated sessions to Issuer SD and applet operations.
 
-Implementation should promote the existing test calculations and vectors into
-library code rather than reimplementing them independently. Once the first
-complete host/card exchange is working, extract the proven role-neutral pieces
-into a focused secure-channel protocol crate or module. It should expose host
-and card state machines while allowing each caller to supply its own key store,
-randomness, trust policy, persistence, transport, and error mapping.
+Existing host/card vectors provide the conformance inputs. Shared calculations
+are extracted only at a role-neutral boundary; host policy stays in `pkcs11rs`
+and card policy stays in `virtual-yubikey-core`.
 
-## Near-term completion criteria
+## Applet priorities
 
 ### FIDO
 
-- Keep registration, credential management, multiple resident signing keys,
-  PPUAT, and `previewSign` working through core tests, USB HID, Yubico
-  Authenticator, and ignored PKCS #11 hardware tests.
-- Keep CTAPHID cancellation and `UP_NEEDED`/`PROCESSING` keepalives covered as
-  new touch-gated or computationally expensive operations are introduced.
-- Keep the atomic on-disk FIDO store explicitly versioned as credential fields
-  evolve. A missing file creates an empty 100-slot authenticator; unsupported or
-  corrupt state fails closed instead of silently discarding credentials. Test
-  schema changes may deliberately require an announced empty-state reset.
+- Keep registration, credential management, resident credentials, PPUAT, and
+  `previewSign` covered through core, USB HID, and PKCS #11 tests.
+- Keep CTAPHID cancellation and `UP_NEEDED`/`PROCESSING` keepalives covered
+  for touch-gated and computationally expensive operations.
+- Preserve explicit state versions and fail closed on unsupported or corrupt
+  state.
+- Extend real-client USB qualification as behavior changes.
 
 ### PIV
 
-- The core implements discovery and metadata, persistent objects and
-  certificates, PIN/PUK and management-key authentication, retry configuration
-  and reset, RSA and P-256/P-384 key generation/import, move/delete, signing,
-  raw RSA private operations, ECDH, Ed25519 message signing, and X25519 key
-  agreement. Ed25519 and X25519 support their YubiKey 5.7 generation, import,
-  metadata, public-key, operation, and persistence encodings.
-- Next, pass representative `yubico-piv-tool` workflows over USB CCID and turn
-  the observed transcripts into transport-level regression tests.
-- Add PIV attestation, CCID abort handling, and biometric policy events. Private
-  and management-key operations already use an applet-local presence client
-  for `Always` and the 15-second `Cached` touch policy; the client delegates
-  physical waits to the shared presence service.
-- Move `pkcs11rs` tests to the shared core only after standalone compatibility
-  is established.
+- Keep discovery and metadata, persistent objects and certificates, PIN/PUK and
+  management authentication, retries and reset, RSA and EC key lifecycle,
+  signing, raw RSA operations, ECDH, Ed25519, and X25519 covered in the core.
+- Pass representative `yubico-piv-tool` workflows over USB CCID and preserve
+  their transcripts as transport regression tests.
+- Add PIV attestation, CCID abort handling, and biometric policy events.
+- Keep the `pkcs11rs` adapter and its full-cycle tests running against the
+  shared core.
 
 ### YubiHSM Auth
 
-- The core implements persistent symmetric and P-256 credentials, management
-  and credential retry counters, touch-required calculation with a 15-second
-  wait timeout, all firmware 5.8
-  administration commands, symmetric SCP03 session derivation, and asymmetric
-  SCP11 key agreement and receipt validation.
-- Command chaining and `61xx`/`GET RESPONSE` response chaining live in the
-  common ISO 7816 router. PIV and YubiHSM Auth use independently scheduled,
-  atomically replaced state images while transient challenges and authorization
-  state are never persisted.
-- Next, validate with `ykman`, the real `pkcs11rs` YubiHSM Auth client path, and
-  a YubiHSM, then reuse the core from `pkcs11rs` tests.
+- Keep symmetric and P-256 credentials, management and credential retries,
+  touch policy, SCP03 session derivation, and SCP11 agreement covered in the
+  core.
+- Preserve independent applet state and common ISO 7816 command/response
+  chaining.
+- Qualify the CCID path with `ykman`, the `pkcs11rs` YubiHSM Auth client, and
+  a physical YubiHSM.
+- Keep `pkcs11rs` mock-device tests running against the shared core.
+
+### Issuer Security Domain
+
+- Implement target-side SCP03 and the required SCP11 variants.
+- Add protected command and response vectors at the core boundary.
+- Exercise authenticated applet operations through CCID and the provider.
 
 ### OpenPGP
 
-- Reuse upstream cryptographic implementations and focus work on the OpenPGP
-  card APDU model, data objects, PIN policy, key lifecycle, formats, and client
-  compatibility.
-- Begin only after the shared CCID applet and secure-channel patterns are
+- Keep the current `GET CHALLENGE` behavior covered.
+- Add the OpenPGP card APDU model, data objects, PIN policy, key lifecycle, and
+  client-compatible encodings.
+- Qualify the applet through CCID after the shared secure-channel patterns are
   stable.

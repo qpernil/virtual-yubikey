@@ -529,10 +529,10 @@ The connector is a server at the HTTP layer and a USB host-side client of the
 device protocol. It is optional: direct USB and connector-mediated access are
 two alternative host architectures.
 
-A future `virtual-yubihsm-worker` would naturally publish its vendor-specific
-personality and read/write its bulk FunctionFS endpoint files. The generic
-supervisor would not need YubiHSM knowledge; only the launch profile and worker
-would change.
+`virtual-yubihsm-worker` publishes its vendor-specific personality and
+reads/writes its bulk FunctionFS endpoint files. The generic supervisor has no
+YubiHSM protocol knowledge; the launch profile selects the worker and its
+resources.
 
 ### Host-side comparison
 
@@ -585,10 +585,9 @@ selected device worker
     policy, UI, state
 ```
 
-The Virtual YubiKey and Virtual Trezor workers implement this resource boundary.
-The Trezor host-facing behavior and the future YubiHSM worker must still be
-validated against the real applications listed above before compatibility is
-claimed.
+The Virtual YubiKey, Virtual Trezor, and Virtual YubiHSM workers implement this
+resource boundary. Their host-facing behavior is validated against the real
+applications listed above before compatibility is claimed.
 
 ## UDC discovery and binding
 

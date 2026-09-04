@@ -98,9 +98,9 @@ applications. USB descriptors and Management capability reports must continue
 to derive from the same profile so the device never advertises behavior its
 firmware does not implement.
 
-See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the planned FIDO,
-PIV, YubiHSM Auth, secure-channel/Issuer SD, and OpenPGP work, including the
-code-sharing boundary with `pkcs11rs`.
+See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the current FIDO,
+PIV, and YubiHSM Auth boundary and the next secure-channel, Issuer SD, OpenPGP,
+and host-qualification steps.
 The planned content-addressed persistence and cross-token PKCS #11 key identity
 model is recorded separately in
 [`docs/future-storage-model.md`](docs/future-storage-model.md); it is not the
