@@ -1,8 +1,9 @@
 use software_key_core::software_symmetric::{
-    decrypt_aes_block, decrypt_aes_cbc, encrypt_aes_block, encrypt_aes_cbc,
+    decrypt_aes_block, decrypt_aes_cbc, decrypt_tdes_ecb, encrypt_aes_block, encrypt_aes_cbc,
+    encrypt_tdes_ecb,
 };
 
-pub(crate) use software_key_core::software_symmetric::AES_BLOCK_SIZE;
+pub(crate) use software_key_core::software_symmetric::{AES_BLOCK_SIZE, TDES_BLOCK_SIZE};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
@@ -17,6 +18,15 @@ pub(crate) fn aes_ecb_block(key: &[u8], data: &[u8], direction: Direction) -> Re
         Direction::Decrypt => decrypt_aes_block(key, block),
     }
     .map(|block| block.to_vec())
+    .map_err(|_| ())
+}
+
+pub(crate) fn tdes_ecb_block(key: &[u8], data: &[u8], direction: Direction) -> Result<Vec<u8>, ()> {
+    let _: &[u8; TDES_BLOCK_SIZE] = data.try_into().map_err(|_| ())?;
+    match direction {
+        Direction::Encrypt => encrypt_tdes_ecb(key, data),
+        Direction::Decrypt => decrypt_tdes_ecb(key, data),
+    }
     .map_err(|_| ())
 }
 

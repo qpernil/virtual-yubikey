@@ -760,6 +760,11 @@ impl VirtualYubiKey {
         let chaining = command.cla & 0x10 != 0;
         let base_cla = command.cla & !0x10;
         if chaining {
+            // ISO 7816 command chaining normally omits Le from intermediate
+            // fragments. libykpiv nevertheless appends short Le=0 to every T=1
+            // APDU carrying data, including intermediate fragments, and physical
+            // YubiKeys accept it. Ignore that intermediate Le for compatibility;
+            // the final fragment's Le is retained below.
             let pending = self.chained_command.get_or_insert_with(|| ChainedCommand {
                 selected: self.selected,
                 command: OwnedCommandApdu {
@@ -776,7 +781,6 @@ impl VirtualYubiKey {
                 || pending.command.ins != command.ins
                 || pending.command.p1 != command.p1
                 || pending.command.p2 != command.p2
-                || command.le.is_some()
             {
                 self.chained_command = None;
                 return Err(0x6883);
@@ -1165,6 +1169,36 @@ mod tests {
             remainder = device.transmit(&[0, INS_GET_RESPONSE, 0, 0, 0]);
         }
         assert_eq!(&remainder[remainder.len() - 2..], &[0x90, 0]);
+    }
+
+    #[test]
+    fn command_chaining_accepts_an_intermediate_le() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        device.selected = Some(Applet::Piv);
+
+        let first_data = [1, 2];
+        let first = CommandApdu {
+            cla: 0x10,
+            ins: 0xdb,
+            p1: 0x3f,
+            p2: 0xff,
+            data: &first_data,
+            le: Some(256),
+        };
+        assert!(device.reassemble_command(first).unwrap().is_none());
+
+        let final_data = [3, 4];
+        let final_fragment = CommandApdu {
+            cla: 0,
+            ins: 0xdb,
+            p1: 0x3f,
+            p2: 0xff,
+            data: &final_data,
+            le: Some(256),
+        };
+        let command = device.reassemble_command(final_fragment).unwrap().unwrap();
+        assert_eq!(command.data, [1, 2, 3, 4]);
+        assert_eq!(command.le, Some(256));
     }
 
     #[test]

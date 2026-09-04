@@ -7,6 +7,8 @@
   applet work.
 - [PKCS #11 reuse](pkcs11rs-reuse.md) - boundary between the reusable logical
   device and Linux USB transports.
+- [PIV standards and compatibility](piv-conformance.md) - current NIST
+  baseline, YubiKey extensions, and explicit conformance gaps.
 - [Future storage model](future-storage-model.md) - proposed persistent-storage
   and cross-token key identity design.
 
