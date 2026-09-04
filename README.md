@@ -25,7 +25,7 @@ authorization, credential management, resident credentials, and `previewSign`.
 
 | Layer | Behavior |
 | --- | --- |
-| USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Virtual`, product `YubiKey FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
+| USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
@@ -35,16 +35,19 @@ authorization, credential management, resident credentials, and `previewSign`.
 | Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
-The development profile uses the USB VID/PID and product string of a YubiKey 5
-in FIDO+CCID mode solely for controlled, local compatibility testing while the
-project owner seeks Yubico's guidance. Its `Virtual` manufacturer string keeps
-the implementation distinguishable in host USB and PC/SC interfaces. Stock
-Yubico Authenticator derives its visible model name from the compatibility
-identity and the Management response, so it may display `YubiKey 5A`. This is
-an interoperability-test identity, not a project assignment or a claim that
-the implementation is a Yubico product, and it must not be used for a
-redistributed, manufactured, or commercial device without permission from the
-VID and trademark owner.
+The development profile uses the USB VID/PID, manufacturer string, and product
+naming pattern of a YubiKey 5 solely for controlled, local compatibility
+testing while the project owner seeks Yubico's guidance. These descriptor
+values exist only to placate public tooling which identifies compatible USB
+devices from their USB or PC/SC names; they do not claim that this project or
+device is made, assigned, approved, or endorsed by Yubico. `Gadget` in the
+product string keeps the implementation distinguishable in host USB and PC/SC
+interfaces, while the resulting `Yubico YubiKey` reader-name prefix lets public
+Yubico tools classify the CCID transport correctly. Stock Yubico Authenticator
+derives its visible model name from the compatibility identity and the
+Management response, so it may display `YubiKey 5A`. The identity must not be
+used for a redistributed, manufactured, or commercial device without
+permission from the VID and trademark owner.
 
 Implementation provenance and public sources are recorded in
 [`PROVENANCE.md`](PROVENANCE.md). Dependency and trademark notices are in
