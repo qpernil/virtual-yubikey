@@ -17,6 +17,8 @@ use software_key_core::{
 use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
+mod token;
+use token::{CM, GA, MC, PCMR, Token};
 
 fn sha256(data: &[u8]) -> Vec<u8> {
     software_key_core::digest::HashAlgorithm::Sha256.digest(data)
@@ -31,6 +33,8 @@ const AUTHENTICATOR_CREDENTIAL_MANAGEMENT: u8 = 0x0a;
 const AUTHENTICATOR_SELECTION: u8 = 0x0b;
 const CTAP2_OK: u8 = 0;
 const CTAP1_ERR_INVALID_COMMAND: u8 = 0x01;
+const CTAP1_ERR_INVALID_PARAMETER: u8 = 0x02;
+const CTAP2_ERR_UNAUTHORIZED_PERMISSION: u8 = 0x40;
 const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
 const CTAP2_ERR_MISSING_PARAMETER: u8 = 0x14;
 const CTAP2_ERR_CREDENTIAL_EXCLUDED: u8 = 0x19;
@@ -47,7 +51,7 @@ const CTAP2_ERR_OTHER: u8 = 0x7f;
 const PIN_RETRIES: u8 = 8;
 pub(crate) const MAX_RESIDENT_CREDENTIALS: usize = 100;
 const MAX_CTAP_MESSAGE_SIZE: u16 = 7609;
-const PERSISTENT_STATE_VERSION: u8 = 3;
+const PERSISTENT_STATE_VERSION: u8 = 4;
 
 const CKR_ARGUMENTS_BAD: u64 = 1;
 const CKR_DEVICE_ERROR: u64 = 2;
@@ -67,14 +71,16 @@ impl From<()> for Error {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct FidoState {
     device_identifier: [u8; 16],
     pin: Option<Zeroizing<Vec<u8>>>,
     pin_retries: u8,
     consecutive_pin_failures: u8,
     key_agreement: Option<SoftwareSigningKey>,
-    pin_uv_auth_token: Zeroizing<Vec<u8>>,
+    persistent_pin_uv_auth_token: Zeroizing<Vec<u8>>,
+    operation_token: Option<Token>,
+    persistent_token_granted: bool,
     pin_uv_auth_protocols: Vec<u8>,
     permissioned_pin_uv_auth_tokens: bool,
     credential_algorithms: Vec<FidoCredentialAlgorithm>,
@@ -88,6 +94,16 @@ pub(crate) struct FidoState {
     assertion_client_data_hash: Vec<u8>,
     assertion_user_verified: bool,
     persistent_change: bool,
+}
+
+impl fmt::Debug for FidoState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FidoState")
+            .field("pin_configured", &self.pin.is_some())
+            .field("pin_retries", &self.pin_retries)
+            .field("credential_count", &self.credentials.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -205,18 +221,17 @@ struct PreviewCredential {
 
 impl FidoState {
     pub(crate) fn new(device_identifier: [u8; 16], configuration: FidoConfiguration) -> Self {
-        let pin_uv_auth_token_length = if configuration.pin_uv_auth_protocols.contains(&2) {
-            32
-        } else {
-            16
-        };
+        let mut persistent_token = Zeroizing::new(vec![0; 32]);
+        getrandom::fill(&mut persistent_token).expect("FIDO requires operating-system randomness");
         Self {
             device_identifier,
             pin: configuration.initial_pin.map(Zeroizing::new),
             pin_retries: PIN_RETRIES,
             consecutive_pin_failures: 0,
             key_agreement: None,
-            pin_uv_auth_token: Zeroizing::new(vec![0x5a; pin_uv_auth_token_length]),
+            persistent_pin_uv_auth_token: persistent_token,
+            operation_token: None,
+            persistent_token_granted: false,
             pin_uv_auth_protocols: configuration.pin_uv_auth_protocols,
             permissioned_pin_uv_auth_tokens: configuration.permissioned_pin_uv_auth_tokens,
             credential_algorithms: configuration.credential_algorithms,
@@ -234,6 +249,7 @@ impl FidoState {
     }
 
     pub(crate) fn reset_connection(&mut self) {
+        self.operation_token = None;
         self.key_agreement = None;
         self.rp_enumeration.clear();
         self.credential_enumeration.clear();
@@ -254,6 +270,39 @@ impl FidoState {
         } else {
             None
         }
+    }
+
+    fn authorize_operation(
+        &mut self,
+        protocol: u8,
+        permission: u8,
+        rp_id: &str,
+        message: &[u8],
+        auth: &[u8],
+    ) -> Result<(), u8> {
+        let token = self
+            .operation_token
+            .as_mut()
+            .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
+        if !token.verify(protocol, message, Some(auth)) {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+        }
+        if token.permissions & permission == 0
+            || token.rp_id.as_deref().is_some_and(|rp| rp != rp_id)
+        {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+        }
+        // Legacy tokens acquire their RP binding on the first MC/GA use.
+        token.rp_id = Some(rp_id.to_owned());
+        Ok(())
+    }
+
+    fn invalidate_pin_tokens(&mut self) -> Result<(), Error> {
+        self.reset_connection();
+        self.persistent_token_granted = false;
+        getrandom::fill(&mut self.persistent_pin_uv_auth_token).map_err(|_| Error)?;
+        self.persistent_change = true;
+        Ok(())
     }
 
     // CTAP ClientPIN decrements the durable counter before checking pinHashEnc.
@@ -285,7 +334,7 @@ impl FidoState {
         let mut output = Vec::new();
         let mut encoder = Encoder::new(&mut output);
         encoder
-            .map(5)
+            .map(7)
             .map_err(|_| "cannot encode persistent FIDO state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent FIDO state")?
@@ -374,6 +423,14 @@ impl FidoState {
             .u8(5)
             .map_err(|_| "cannot encode persistent PIN retries")?
             .u8(self.pin_retries)
+            .map_err(|_| "cannot encode persistent PIN retries")?
+            .u8(6)
+            .map_err(|_| "cannot encode persistent PIN token")?
+            .bytes(&self.persistent_pin_uv_auth_token)
+            .map_err(|_| "cannot encode persistent PIN token")?
+            .u8(7)
+            .map_err(|_| "cannot encode persistent PIN permission")?
+            .bool(self.persistent_token_granted)
             .map_err(|_| "cannot encode persistent PIN retries")?;
         Ok(output)
     }
@@ -393,6 +450,8 @@ impl FidoState {
         let mut pin = None;
         let mut credentials = None;
         let mut pin_retries = None;
+        let mut persistent_token = None;
+        let mut persistent_token_granted = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -435,6 +494,21 @@ impl FidoState {
                 5 if pin_retries.is_none() => {
                     pin_retries = Some(decoder.u8().map_err(|_| "invalid persistent PIN retries")?);
                 }
+                6 if persistent_token.is_none() => {
+                    persistent_token = Some(Zeroizing::new(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid persistent PIN token")?
+                            .to_vec(),
+                    ));
+                }
+                7 if persistent_token_granted.is_none() => {
+                    persistent_token_granted = Some(
+                        decoder
+                            .bool()
+                            .map_err(|_| "invalid persistent PIN permission")?,
+                    );
+                }
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent FIDO state contains invalid data")?,
@@ -443,7 +517,7 @@ impl FidoState {
         if decoder.position() != encoded.len() {
             return Err("persistent FIDO state has trailing data");
         }
-        if !matches!(version, Some(2 | PERSISTENT_STATE_VERSION)) {
+        if !matches!(version, Some(2 | 3 | PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent FIDO state version");
         }
         if identifier.as_deref() != Some(expected_identifier.as_slice()) {
@@ -476,6 +550,15 @@ impl FidoState {
         };
         if state.pin_retries > PIN_RETRIES {
             return Err("persistent FIDO state has invalid PIN retries");
+        }
+        if version == Some(PERSISTENT_STATE_VERSION) {
+            let token = persistent_token.ok_or("missing persistent PIN token")?;
+            if token.len() != 32 {
+                return Err("invalid persistent PIN token length");
+            }
+            state.persistent_pin_uv_auth_token = token;
+            state.persistent_token_granted =
+                persistent_token_granted.ok_or("missing persistent PIN permission")?;
         }
         state.credentials = credentials;
         Ok(state)
@@ -629,7 +712,14 @@ pub(crate) fn exchange(state: &mut FidoState, request: &[u8]) -> Vec<u8> {
 }
 
 fn exchange_inner(state: &mut FidoState, request: &[u8]) -> Result<Vec<u8>, Error> {
+    if state.operation_token.as_ref().is_some_and(Token::expired) {
+        state.reset_connection();
+    }
     let (&command, payload) = request.split_first().ok_or(CKR_ARGUMENTS_BAD)?;
+    if command != AUTHENTICATOR_CREDENTIAL_MANAGEMENT {
+        state.rp_enumeration.clear();
+        state.credential_enumeration.clear();
+    }
     match command {
         AUTHENTICATOR_GET_INFO if payload.is_empty() => authenticator_get_info(state),
         AUTHENTICATOR_CLIENT_PIN => authenticator_client_pin(state, payload),
@@ -1261,6 +1351,8 @@ fn authenticator_credential_management(
     };
     match request.subcommand {
         1 | 2 | 4 | 6 | 7 => {
+            state.rp_enumeration.clear();
+            state.credential_enumeration.clear();
             let Some(protocol) = request.protocol else {
                 return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
             };
@@ -1271,13 +1363,41 @@ fn authenticator_credential_management(
             if let Some(parameters) = request.parameters.as_deref() {
                 authenticated.extend_from_slice(parameters);
             }
-            if !authenticate(
-                protocol,
-                state.pin_uv_auth_token.as_ref(),
-                &authenticated,
-                request.auth.as_deref(),
-            ) {
-                return Ok(vec![CTAP2_ERR_PIN_INVALID]);
+            let persistent = protocol == 2
+                && state.persistent_token_granted
+                && matches!(request.subcommand, 1 | 2 | 4)
+                && authenticate(
+                    protocol,
+                    &state.persistent_pin_uv_auth_token,
+                    &authenticated,
+                    request.auth.as_deref(),
+                );
+            if !persistent {
+                let Some(token) = state.operation_token.as_mut() else {
+                    return Ok(vec![CTAP2_ERR_PIN_AUTH_INVALID]);
+                };
+                if !token.verify(protocol, &authenticated, request.auth.as_deref())
+                    || token.permissions & CM == 0
+                {
+                    return Ok(vec![CTAP2_ERR_PIN_AUTH_INVALID]);
+                }
+                if let Some(rp) = token.rp_id.as_deref() {
+                    let permitted = match (request.subcommand, request.parameters.as_deref()) {
+                        (4, Some(parameters)) => decode_management_rp_id_hash(parameters)
+                            .is_ok_and(|hash| sha256(rp.as_bytes()) == hash),
+                        (6 | 7, Some(parameters)) => decode_management_credential_id(parameters)
+                            .is_ok_and(|id| {
+                                state
+                                    .credentials
+                                    .iter()
+                                    .any(|c| c.credential_id == id && c.rp_id == rp)
+                            }),
+                        _ => false,
+                    };
+                    if !permitted {
+                        return Ok(vec![CTAP2_ERR_PIN_AUTH_INVALID]);
+                    }
+                }
             }
         }
         _ => {}
@@ -1561,15 +1681,14 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
     }
     let user_verified = match (request.protocol, request.pin_uv_auth.as_deref()) {
         (Some(protocol), Some(auth)) => {
-            if !state.pin_uv_auth_protocols.contains(&protocol)
-                || !authenticate(
-                    protocol,
-                    state.pin_uv_auth_token.as_ref(),
-                    client_data_hash,
-                    Some(auth),
-                )
-            {
-                return Ok(vec![CTAP2_ERR_PIN_INVALID]);
+            if let Err(status) = state.authorize_operation(
+                protocol,
+                MC,
+                request.rp_id.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+                client_data_hash,
+                auth,
+            ) {
+                return Ok(vec![status]);
             }
             true
         }
@@ -1717,6 +1836,7 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
         preview,
     });
     state.persistent_change = true;
+    state.reset_connection();
     Ok(response)
 }
 
@@ -1734,15 +1854,14 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
     }
     let user_verified = match (request.protocol, request.pin_uv_auth.as_deref()) {
         (Some(protocol), Some(auth)) => {
-            if !state.pin_uv_auth_protocols.contains(&protocol)
-                || !authenticate(
-                    protocol,
-                    state.pin_uv_auth_token.as_ref(),
-                    client_data_hash,
-                    Some(auth),
-                )
-            {
-                return Ok(vec![CTAP2_ERR_PIN_INVALID]);
+            if let Err(status) = state.authorize_operation(
+                protocol,
+                GA,
+                request.rp_id.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+                client_data_hash,
+                auth,
+            ) {
+                return Ok(vec![status]);
             }
             true
         }
@@ -1767,6 +1886,7 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
     let Some(&index) = candidates.first() else {
         return Ok(vec![CTAP2_ERR_NO_CREDENTIALS]);
     };
+    state.reset_connection();
     if request.preview_requested || request.signing_key_handle.is_some() {
         let credential = &state.credentials[index];
         let Some(preview) = credential.preview.as_ref() else {
@@ -1973,7 +2093,7 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("perCredMgmtRO")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(true)
+        .bool(state.permissioned_pin_uv_auth_tokens && state.pin_uv_auth_protocols.contains(&2))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("pinUvAuthToken")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -2040,7 +2160,7 @@ fn encrypted_device_identifier(state: &FidoState) -> Result<Vec<u8>, Error> {
         software_key_core::digest::HashAlgorithm::Sha256,
         true,
         true,
-        state.pin_uv_auth_token.as_ref(),
+        state.persistent_pin_uv_auth_token.as_ref(),
         Some(&[0u8; 32]),
         b"encIdentifier",
         key.len(),
@@ -2068,6 +2188,8 @@ struct ClientPinRequest {
     auth: Option<Vec<u8>>,
     new_pin: Option<Vec<u8>>,
     pin_hash: Option<Vec<u8>>,
+    permissions: Option<u8>,
+    rp_id: Option<String>,
 }
 
 fn authenticator_client_pin(state: &mut FidoState, payload: &[u8]) -> Result<Vec<u8>, Error> {
@@ -2075,14 +2197,16 @@ fn authenticator_client_pin(state: &mut FidoState, payload: &[u8]) -> Result<Vec
         Ok(request) => request,
         Err(status) => return Ok(vec![status]),
     };
+    if request.subcommand == Some(1) {
+        return pin_retries_response(state);
+    }
     let Some(protocol) = request.protocol else {
         return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
     };
     if !state.pin_uv_auth_protocols.contains(&protocol) {
-        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+        return Ok(vec![CTAP1_ERR_INVALID_PARAMETER]);
     }
     match request.subcommand {
-        Some(1) => pin_retries_response(state),
         Some(2) => key_agreement_response(state),
         Some(3) => set_pin(state, request),
         Some(4) => change_pin(state, request),
@@ -2145,6 +2269,17 @@ fn decode_client_pin(payload: &[u8]) -> Result<ClientPinRequest, u8> {
                         .bytes()
                         .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
                         .to_vec(),
+                )
+            }
+            9 if request.permissions.is_none() => {
+                request.permissions = Some(decoder.u8().map_err(|_| CTAP2_ERR_INVALID_CBOR)?)
+            }
+            10 if request.rp_id.is_none() => {
+                request.rp_id = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_owned(),
                 )
             }
             _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
@@ -2250,6 +2385,7 @@ fn set_pin(state: &mut FidoState, request: ClientPinRequest) -> Result<Vec<u8>, 
         return Ok(vec![CTAP2_ERR_PIN_POLICY_VIOLATION]);
     };
     state.pin = Some(Zeroizing::new(pin));
+    state.invalidate_pin_tokens()?;
     state.key_agreement = None;
     state.persistent_change = true;
     Ok(vec![CTAP2_OK])
@@ -2292,12 +2428,38 @@ fn change_pin(state: &mut FidoState, request: ClientPinRequest) -> Result<Vec<u8
         return Ok(vec![CTAP2_ERR_PIN_POLICY_VIOLATION]);
     };
     state.pin = Some(Zeroizing::new(pin));
+    state.invalidate_pin_tokens()?;
     state.key_agreement = None;
     state.persistent_change = true;
     Ok(vec![CTAP2_OK])
 }
 
 fn pin_token(state: &mut FidoState, request: ClientPinRequest) -> Result<Vec<u8>, Error> {
+    let permissions = if request.subcommand == Some(5) {
+        if request.permissions.is_some() || request.rp_id.is_some() {
+            return Ok(vec![CTAP1_ERR_INVALID_PARAMETER]);
+        }
+        MC | GA
+    } else {
+        if !state.permissioned_pin_uv_auth_tokens {
+            return Ok(vec![CTAP1_ERR_INVALID_COMMAND]);
+        }
+        let Some(permissions) = request.permissions else {
+            return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+        };
+        if permissions == 0 {
+            return Ok(vec![CTAP1_ERR_INVALID_PARAMETER]);
+        }
+        if permissions & 0x38 != 0
+            || (permissions & PCMR != 0 && (permissions & 0x3f != 0 || request.protocol != Some(2)))
+        {
+            return Ok(vec![CTAP2_ERR_UNAUTHORIZED_PERMISSION]);
+        }
+        if permissions & (MC | GA) != 0 && request.rp_id.is_none() {
+            return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+        }
+        permissions & (MC | GA | CM | PCMR)
+    };
     if state.pin.is_none() {
         return Ok(vec![CTAP2_ERR_PIN_NOT_SET]);
     }
@@ -2315,7 +2477,16 @@ fn pin_token(state: &mut FidoState, request: ClientPinRequest) -> Result<Vec<u8>
     if let Err(status) = state.verify_pin_hash(protocol, &shared, &hash) {
         return Ok(vec![status]);
     }
-    let encrypted = encrypt(protocol, &shared, state.pin_uv_auth_token.as_ref())?;
+    let encrypted = if permissions == PCMR {
+        state.persistent_token_granted = true;
+        encrypt(protocol, &shared, &state.persistent_pin_uv_auth_token)?
+    } else {
+        state.reset_connection();
+        let token = Token::new(protocol, permissions, request.rp_id)?;
+        let encrypted = encrypt(protocol, &shared, &token.secret)?;
+        state.operation_token = Some(token);
+        encrypted
+    };
     let mut response = vec![CTAP2_OK];
     Encoder::new(&mut response)
         .map(1)
@@ -2493,6 +2664,198 @@ fn pin_hash_matches(protocol: u8, shared: &[u8], encrypted: &[u8], pin: &[u8]) -
 mod tests {
     use super::*;
 
+    // Credential/algorithm vectors below use a deterministic authorization
+    // fixture. Authorization-policy tests call super::exchange directly.
+    fn exchange_with_vector_authorization(state: &mut FidoState, request: &[u8]) -> Vec<u8> {
+        if matches!(request.first(), Some(0x01 | 0x02 | 0x0a)) {
+            let mut token = Token::new(2, MC | GA | CM, None).unwrap();
+            token.secret.fill(0x5a);
+            state.operation_token = Some(token);
+        }
+        super::exchange(state, request)
+    }
+
+    fn issue_authorization(
+        state: &mut FidoState,
+        protocol: u8,
+        permissions: u8,
+        rp: Option<&str>,
+    ) -> Result<Zeroizing<Vec<u8>>, u8> {
+        let mut request = pin_request(state, protocol, 9, b"123456", false);
+        let decoded = decode_client_pin(&request[1..]).unwrap();
+        let shared = shared_secret(state, decoded.peer.as_ref(), protocol).unwrap();
+        request.truncate(request.len() - 2);
+        request[1] = if rp.is_some() { 0xa6 } else { 0xa5 };
+        let mut encoder = Encoder::new(&mut request);
+        encoder.u8(9).unwrap().u8(permissions).unwrap();
+        if let Some(rp) = rp {
+            encoder.u8(10).unwrap().str(rp).unwrap();
+        }
+        let response = super::exchange(state, &request);
+        if response[0] != 0 {
+            return Err(response[0]);
+        }
+        let mut decoder = minicbor::Decoder::new(&response[1..]);
+        assert_eq!(decoder.map().unwrap(), Some(1));
+        assert_eq!(decoder.u8().unwrap(), 2);
+        decrypt(protocol, &shared, decoder.bytes().unwrap())
+    }
+
+    fn sign_fixture_request(mut request: Vec<u8>, token: &[u8], message: &[u8]) -> Vec<u8> {
+        let position = request
+            .windows(32)
+            .position(|window| window == pin_auth(message))
+            .unwrap();
+        let mac = software_key_core::digest::hmac(
+            software_key_core::digest::HashAlgorithm::Sha256,
+            token,
+            message,
+        )
+        .unwrap();
+        request[position..position + 32].copy_from_slice(&mac);
+        request
+    }
+
+    #[test]
+    fn permissioned_tokens_enforce_operation_rp_and_single_touch_use() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        let request = make_credential_request("example.com", 0x61, &[-7]);
+        assert_eq!(
+            super::exchange(&mut state, &request),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        for (permission, rp) in [(GA, "example.com"), (MC, "other.example")] {
+            let token = issue_authorization(&mut state, 2, permission, Some(rp)).unwrap();
+            let request = sign_fixture_request(request.clone(), &token, &[0x61; 32]);
+            assert_eq!(
+                super::exchange(&mut state, &request),
+                [CTAP2_ERR_PIN_AUTH_INVALID]
+            );
+            assert!(state.credentials.is_empty());
+        }
+        let old = issue_authorization(&mut state, 2, MC, Some("example.com")).unwrap();
+        let token = issue_authorization(&mut state, 2, MC, Some("example.com")).unwrap();
+        assert_ne!(old, token);
+        assert_eq!(
+            super::exchange(
+                &mut state,
+                &sign_fixture_request(request.clone(), &old, &[0x61; 32])
+            ),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        let request = sign_fixture_request(request, &token, &[0x61; 32]);
+        assert_eq!(super::exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            super::exchange(&mut state, &request),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        assert_eq!(state.credentials.len(), 1);
+    }
+
+    #[test]
+    fn persistent_read_only_token_survives_restart_but_not_pin_change() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        state
+            .credentials
+            .push(test_credential(vec![0x22; 32], "example.com", None));
+        let token = issue_authorization(&mut state, 2, PCMR, None).unwrap();
+        let read = sign_fixture_request(management_request(1, None), &token, &[1]);
+        assert_eq!(super::exchange(&mut state, &read)[0], CTAP2_OK);
+        let delete = sign_fixture_request(management_request(6, None), &token, &[6]);
+        assert_eq!(
+            super::exchange(&mut state, &delete),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        let make = sign_fixture_request(
+            make_credential_request("example.com", 0x61, &[-7]),
+            &token,
+            &[0x61; 32],
+        );
+        assert_eq!(
+            super::exchange(&mut state, &make),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        state = FidoState::decode_persistent(
+            &state.encode_persistent().unwrap(),
+            [0x11; 16],
+            FidoConfiguration::default(),
+        )
+        .unwrap();
+        assert_eq!(super::exchange(&mut state, &read)[0], CTAP2_OK);
+        let operation = issue_authorization(&mut state, 2, CM, None).unwrap();
+        assert_ne!(operation, token);
+        assert_eq!(super::exchange(&mut state, &read)[0], CTAP2_OK);
+        let change = pin_request(&mut state, 2, 4, b"123456", false);
+        assert_eq!(super::exchange(&mut state, &change), [CTAP2_OK]);
+        assert_eq!(
+            super::exchange(&mut state, &read),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        assert!(state.operation_token.is_none());
+        assert!(!state.persistent_token_granted);
+        assert_ne!(state.persistent_pin_uv_auth_token, token);
+    }
+
+    #[test]
+    fn invalid_permission_requests_do_not_consume_pin_retries() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        for permissions in [8, 16, 32, PCMR | CM, PCMR | MC] {
+            assert_eq!(
+                issue_authorization(&mut state, 2, permissions, None),
+                Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION)
+            );
+        }
+        assert_eq!(
+            issue_authorization(&mut state, 2, 0, None),
+            Err(CTAP1_ERR_INVALID_PARAMETER)
+        );
+        assert_eq!(
+            issue_authorization(&mut state, 2, MC, None),
+            Err(CTAP2_ERR_MISSING_PARAMETER)
+        );
+        assert_eq!(state.pin_retries, PIN_RETRIES);
+        assert_eq!(
+            issue_authorization(&mut state, 1, PCMR, None),
+            Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION)
+        );
+    }
+
+    #[test]
+    fn scoped_management_cannot_read_global_metadata_or_other_rps() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        let token = issue_authorization(&mut state, 2, CM, Some("example.com")).unwrap();
+        let read = sign_fixture_request(management_request(1, None), &token, &[1]);
+        assert_eq!(
+            super::exchange(&mut state, &read),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        for rp in ["example.com", "other.example"] {
+            let mut parameters = Vec::new();
+            Encoder::new(&mut parameters)
+                .map(1)
+                .unwrap()
+                .u8(1)
+                .unwrap()
+                .bytes(&sha256(rp.as_bytes()))
+                .unwrap();
+            let mut message = vec![4];
+            message.extend_from_slice(&parameters);
+            let read =
+                sign_fixture_request(management_request(4, Some(&parameters)), &token, &message);
+            let status = if rp == "example.com" {
+                CTAP2_ERR_NO_CREDENTIALS
+            } else {
+                CTAP2_ERR_PIN_AUTH_INVALID
+            };
+            assert_eq!(super::exchange(&mut state, &read), [status]);
+        }
+        state.power_cycle();
+        assert_eq!(
+            super::exchange(&mut state, &read),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+    }
+
     fn pin_request(
         state: &mut FidoState,
         protocol: u8,
@@ -2514,7 +2877,13 @@ mod tests {
         let mut output = vec![AUTHENTICATOR_CLIENT_PIN];
         let mut encoder = Encoder::new(&mut output);
         encoder
-            .map(if subcommand == 4 { 6 } else { 4 })
+            .map(if subcommand == 4 {
+                6
+            } else if subcommand == 9 {
+                5
+            } else {
+                4
+            })
             .unwrap()
             .u8(1)
             .unwrap()
@@ -2556,6 +2925,9 @@ mod tests {
                 .unwrap();
         }
         encoder.u8(6).unwrap().bytes(&hash).unwrap();
+        if subcommand == 9 {
+            encoder.u8(9).unwrap().u8(CM).unwrap();
+        }
         output
     }
 
@@ -2572,14 +2944,20 @@ mod tests {
                 } else {
                     CTAP2_ERR_PIN_INVALID
                 };
-                assert_eq!(exchange(&mut state, &request), [expected]);
+                assert_eq!(
+                    exchange_with_vector_authorization(&mut state, &request),
+                    [expected]
+                );
                 assert_eq!(state.pin_retries, remaining);
                 assert!(state.key_agreement.is_none());
                 assert!(state.take_persistent_change());
                 if expected == CTAP2_ERR_PIN_AUTH_BLOCKED {
                     state.reset_connection();
                     let correct = pin_request(&mut state, protocol, 5, b"123456", false);
-                    assert_eq!(exchange(&mut state, &correct), [CTAP2_ERR_PIN_AUTH_BLOCKED]);
+                    assert_eq!(
+                        exchange_with_vector_authorization(&mut state, &correct),
+                        [CTAP2_ERR_PIN_AUTH_BLOCKED]
+                    );
                     assert_eq!(
                         pin_retries_response(&state).unwrap(),
                         [0, 0xa2, 3, remaining, 4, 0xf5]
@@ -2603,7 +2981,10 @@ mod tests {
             state.power_cycle();
             for subcommand in [4, 5, 9] {
                 let request = pin_request(&mut state, protocol, subcommand, b"123456", false);
-                assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_PIN_BLOCKED]);
+                assert_eq!(
+                    exchange_with_vector_authorization(&mut state, &request),
+                    [CTAP2_ERR_PIN_BLOCKED]
+                );
             }
         }
     }
@@ -2613,14 +2994,23 @@ mod tests {
         for protocol in [1, 2] {
             let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
             let request = pin_request(&mut state, protocol, 4, b"wrong", true);
-            assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_PIN_AUTH_INVALID]);
+            assert_eq!(
+                exchange_with_vector_authorization(&mut state, &request),
+                [CTAP2_ERR_PIN_AUTH_INVALID]
+            );
             assert_eq!(state.pin_retries, PIN_RETRIES);
             assert!(!state.take_persistent_change());
             let request = pin_request(&mut state, protocol, 4, b"wrong", false);
-            assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_PIN_INVALID]);
+            assert_eq!(
+                exchange_with_vector_authorization(&mut state, &request),
+                [CTAP2_ERR_PIN_INVALID]
+            );
             assert_eq!(state.pin_retries, PIN_RETRIES - 1);
             let request = pin_request(&mut state, protocol, 4, b"123456", false);
-            assert_eq!(exchange(&mut state, &request), [CTAP2_OK]);
+            assert_eq!(
+                exchange_with_vector_authorization(&mut state, &request),
+                [CTAP2_OK]
+            );
             assert_eq!(state.pin_retries, PIN_RETRIES);
             assert_eq!(state.consecutive_pin_failures, 0);
             assert_eq!(
@@ -2636,9 +3026,15 @@ mod tests {
             let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
             for subcommand in [5, 9] {
                 let request = pin_request(&mut state, protocol, subcommand, b"wrong", false);
-                assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_PIN_INVALID]);
+                assert_eq!(
+                    exchange_with_vector_authorization(&mut state, &request),
+                    [CTAP2_ERR_PIN_INVALID]
+                );
                 let request = pin_request(&mut state, protocol, subcommand, b"123456", false);
-                assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+                assert_eq!(
+                    exchange_with_vector_authorization(&mut state, &request)[0],
+                    CTAP2_OK
+                );
                 assert_eq!(state.pin_retries, PIN_RETRIES);
                 assert_eq!(state.consecutive_pin_failures, 0);
             }
@@ -2665,7 +3061,7 @@ mod tests {
         state.pin_retries = PIN_RETRIES;
         let mut encoded = state.encode_persistent().unwrap();
         encoded[0] = 0xa4;
-        encoded.truncate(encoded.len() - 2);
+        encoded.truncate(encoded.len() - 39);
         assert!(
             FidoState::decode_persistent(&encoded, [0x11; 16], FidoConfiguration::default())
                 .is_err()
@@ -2681,9 +3077,12 @@ mod tests {
     #[test]
     fn selection_accepts_an_empty_request_for_transport_gated_touch() {
         let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
-        assert_eq!(exchange(&mut state, &[AUTHENTICATOR_SELECTION]), [CTAP2_OK]);
         assert_eq!(
-            exchange(&mut state, &[AUTHENTICATOR_SELECTION, 0xa0]),
+            exchange_with_vector_authorization(&mut state, &[AUTHENTICATOR_SELECTION]),
+            [CTAP2_OK]
+        );
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &[AUTHENTICATOR_SELECTION, 0xa0]),
             [CTAP1_ERR_INVALID_COMMAND]
         );
     }
@@ -2726,7 +3125,7 @@ mod tests {
                 software_key_core::digest::HashAlgorithm::Sha256,
                 true,
                 true,
-                state.pin_uv_auth_token.as_ref(),
+                state.persistent_pin_uv_auth_token.as_ref(),
                 Some(&[0u8; 32]),
                 b"encIdentifier",
                 16,
@@ -2759,7 +3158,7 @@ mod tests {
             .u8(1)
             .unwrap();
 
-        let response = exchange(&mut state, &request);
+        let response = exchange_with_vector_authorization(&mut state, &request);
         assert_eq!(response[0], CTAP2_OK);
         let mut decoder = minicbor::Decoder::new(&response[1..]);
         assert_eq!(decoder.map().unwrap(), Some(2));
@@ -2772,7 +3171,7 @@ mod tests {
     #[test]
     fn get_info_uses_canonical_option_key_order() {
         let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
-        let response = exchange(&mut state, &[AUTHENTICATOR_GET_INFO]);
+        let response = exchange_with_vector_authorization(&mut state, &[AUTHENTICATOR_GET_INFO]);
         assert_eq!(response[0], CTAP2_OK);
 
         let mut decoder = minicbor::Decoder::new(&response[1..]);
@@ -2834,7 +3233,7 @@ mod tests {
             .bytes(&pin_auth(&[1]))
             .unwrap();
 
-        let response = exchange(&mut state, &request);
+        let response = exchange_with_vector_authorization(&mut state, &request);
         assert_eq!(response[0], CTAP2_OK);
         let mut decoder = minicbor::Decoder::new(&response[1..]);
         assert_eq!(decoder.map().unwrap(), Some(2));
@@ -2895,9 +3294,15 @@ mod tests {
             .bytes(&pin_auth(&authenticated))
             .unwrap();
 
-        assert_eq!(exchange(&mut state, &request), [CTAP2_OK]);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request),
+            [CTAP2_OK]
+        );
         assert!(state.credentials.is_empty());
-        assert_eq!(exchange(&mut state, &request), [CTAP2_ERR_NO_CREDENTIALS]);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request),
+            [CTAP2_ERR_NO_CREDENTIALS]
+        );
     }
 
     #[test]
@@ -2979,7 +3384,7 @@ mod tests {
             .unwrap()
             .u8(2)
             .unwrap();
-        let assertion = exchange(&mut restored, &assertion);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion);
         assert_eq!(assertion[0], CTAP2_OK);
         let auth_data = assertion_authenticator_data(&assertion[1..]);
         let signature =
@@ -3021,12 +3426,18 @@ mod tests {
         );
 
         assert_eq!(
-            exchange(&mut state, &management_request(2, None))[0],
+            exchange_with_vector_authorization(&mut state, &management_request(2, None))[0],
             CTAP2_OK
         );
         let next_rp = management_request(3, None);
-        assert_eq!(exchange(&mut state, &next_rp)[0], CTAP2_OK);
-        assert_eq!(exchange(&mut state, &next_rp), [CTAP2_ERR_NO_CREDENTIALS]);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &next_rp)[0],
+            CTAP2_OK
+        );
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &next_rp),
+            [CTAP2_ERR_NO_CREDENTIALS]
+        );
 
         let mut parameters = Vec::new();
         Encoder::new(&mut parameters)
@@ -3037,13 +3448,19 @@ mod tests {
             .bytes(&sha256(b"one.example"))
             .unwrap();
         assert_eq!(
-            exchange(&mut state, &management_request(4, Some(&parameters)))[0],
+            exchange_with_vector_authorization(
+                &mut state,
+                &management_request(4, Some(&parameters))
+            )[0],
             CTAP2_OK
         );
         let next_credential = management_request(5, None);
-        assert_eq!(exchange(&mut state, &next_credential)[0], CTAP2_OK);
         assert_eq!(
-            exchange(&mut state, &next_credential),
+            exchange_with_vector_authorization(&mut state, &next_credential)[0],
+            CTAP2_OK
+        );
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &next_credential),
             [CTAP2_ERR_NO_CREDENTIALS]
         );
     }
@@ -3124,7 +3541,7 @@ mod tests {
             .unwrap()
             .u8(2)
             .unwrap();
-        let registration_response = exchange(&mut state, &registration);
+        let registration_response = exchange_with_vector_authorization(&mut state, &registration);
         assert_eq!(registration_response[0], CTAP2_OK);
         let seed = crate::preview_sign::seed_cose().unwrap();
         assert!(
@@ -3215,7 +3632,7 @@ mod tests {
             .u8(2)
             .unwrap();
 
-        let assertion_response = exchange(&mut state, &assertion);
+        let assertion_response = exchange_with_vector_authorization(&mut state, &assertion);
         assert_eq!(assertion_response[0], CTAP2_OK);
         let authenticator_data = assertion_authenticator_data(&assertion_response[1..]);
         let signature = preview_signature(&authenticator_data);
@@ -3237,7 +3654,7 @@ mod tests {
 
     fn create_standard_credential(state: &mut FidoState, rp_id: &str, marker: u8) -> Vec<u8> {
         let request = make_credential_request(rp_id, marker, &[-7]);
-        exchange(state, &request)
+        exchange_with_vector_authorization(state, &request)
     }
 
     fn make_credential_request(rp_id: &str, marker: u8, algorithms: &[i64]) -> Vec<u8> {
@@ -3403,7 +3820,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request("esp256.example", 0x09, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_eq!(state.credentials[0].private_key.algorithm(), algorithm);
         assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 1, 32);
 
@@ -3421,7 +3841,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3441,7 +3861,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request("ed25519.example", 0x19, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_okp_public_key(&state.credentials[0].public_key_cose, algorithm, 6, 32);
 
         let encoded = state.encode_persistent().unwrap();
@@ -3464,7 +3887,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3486,7 +3909,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request("esp384.example", 0x51, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 2, 48);
 
         let encoded = state.encode_persistent().unwrap();
@@ -3503,7 +3929,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3523,7 +3949,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request("esp512.example", 0x52, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 3, 66);
 
         let encoded = state.encode_persistent().unwrap();
@@ -3540,7 +3969,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3560,7 +3989,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request("es256k.example", 0x47, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_ec2_public_key(&state.credentials[0].public_key_cose, algorithm, 8, 32);
 
         let encoded = state.encode_persistent().unwrap();
@@ -3577,7 +4009,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3625,7 +4057,10 @@ mod tests {
         let mut state = FidoState::new(identifier, configuration);
         let request =
             make_credential_request(rp_id, request_marker, &[algorithm.cose_identifier()]);
-        assert_eq!(exchange(&mut state, &request)[0], CTAP2_OK);
+        assert_eq!(
+            exchange_with_vector_authorization(&mut state, &request)[0],
+            CTAP2_OK
+        );
         assert_rsa_public_key(&state.credentials[0].public_key_cose, algorithm, 256);
 
         let encoded = state.encode_persistent().unwrap();
@@ -3640,7 +4075,7 @@ mod tests {
             &restored.credentials[0].credential_id,
             &client_data_hash,
         );
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let mut signed = assertion_authenticator_data(&assertion[1..]);
         signed.extend_from_slice(&client_data_hash);
@@ -3674,7 +4109,7 @@ mod tests {
             u8::try_from(-algorithm.cose_identifier()).unwrap(),
             &[algorithm.cose_identifier()],
         );
-        let registration = exchange(&mut state, &request);
+        let registration = exchange_with_vector_authorization(&mut state, &request);
         assert_eq!(registration[0], CTAP2_OK);
         assert_eq!(state.credentials.len(), 1);
         assert_eq!(state.credentials[0].private_key.algorithm(), algorithm);
@@ -3707,7 +4142,7 @@ mod tests {
         let credential_id = restored.credentials[0].credential_id.clone();
         let assertion_request =
             get_assertion_request("ml-dsa.example", &credential_id, &client_data_hash);
-        let assertion = exchange(&mut restored, &assertion_request);
+        let assertion = exchange_with_vector_authorization(&mut restored, &assertion_request);
         assert_eq!(assertion[0], CTAP2_OK);
         let auth_data = assertion_authenticator_data(&assertion[1..]);
         let signature = assertion_signature_bytes(&assertion[1..]);
