@@ -4,7 +4,8 @@
 
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
 enumerate as a composite FIDO HID and CCID, YubiKey-compatible test device.
-HID carries FIDO/CTAP; CCID exposes YubiKey Management, PIV, and YubiHSM Auth.
+HID carries FIDO/CTAP; CCID exposes YubiKey Management, PIV, YubiHSM Auth, and
+the Issuer Security Domain.
 The USB CCID reader deliberately rejects the FIDO AID.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
@@ -18,8 +19,9 @@ state, worker-owned USB personality, and declarative launch profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
-YubiKey Management, PIV, YubiHSM Auth, and CTAP 2.1 behavior including PIN
-authorization, credential management, resident credentials, and `previewSign`.
+YubiKey Management, PIV, YubiHSM Auth, Issuer Security Domain, and CTAP 2.1
+behavior including GlobalPlatform secure messaging, PIN authorization,
+credential management, resident credentials, and `previewSign`.
 
 ## Current behavior
 
@@ -31,8 +33,10 @@ authorization, credential management, resident credentials, and `previewSign`.
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | PIV | Persistent objects, PIN/PUK and management authentication, and RSA, NIST EC, Ed25519, and X25519 key operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
+| Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
+| GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
 | FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
-| Persistent state | Starts empty; credentials, private keys, PIN changes and counters are atomically stored per serial under `/var/lib/virtual-yubikey` |
+| Persistent state | Starts with factory applet identities; credentials, private keys, PIN changes, counters, and Security Domain keys and policy are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
 The development profile uses the USB VID/PID, manufacturer string, and product
@@ -52,13 +56,16 @@ permission from the VID and trademark owner.
 Implementation provenance and public sources are recorded in
 [`PROVENANCE.md`](PROVENANCE.md). Dependency and trademark notices are in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The card-side channel model, factory selectors, trust boundary, and host-tool
+behavior are documented in
+[`docs/globalplatform-secure-messaging.md`](docs/globalplatform-secure-messaging.md).
 
 ## Source layout
 
 | Module | Responsibility |
 | --- | --- |
 | `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA controls, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
-| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, and persistent Management, FIDO, PIV, and YubiHSM Auth applet state |
+| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, shared secure messaging, and persistent FIDO, PIV, YubiHSM Auth, and Security Domain state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
@@ -100,9 +107,8 @@ applications. USB descriptors and Management capability reports must continue
 to derive from the same profile so the device never advertises behavior its
 firmware does not implement.
 
-See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the current FIDO,
-PIV, and YubiHSM Auth boundary and the next secure-channel, Issuer SD, OpenPGP,
-and host-qualification steps.
+See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the current applet and
+secure-channel boundary, OpenPGP direction, and host-qualification steps.
 The planned content-addressed persistence and cross-token PKCS #11 key identity
 model is recorded separately in
 [`docs/future-storage-model.md`](docs/future-storage-model.md); it is not the

@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "derive", "std"] }
-software-key-core = { path = "../../../software-key-core" }
+software-key-core = { path = "../../../software-key-core", features = ["x509"] }
 getrandom = "0.4.3"
 minicbor = { version = "2.3.0", features = ["alloc"] }
 rsa = { version = "0.9.10", default-features = false, features = ["std"] }

@@ -1,15 +1,11 @@
 use crate::{
     CommandApdu, PIV_TOUCH_CACHE_DURATION, PresenceAuthorization, ResponseApdu, UserPresencePolicy,
+    certificate::{self, CertificateSigner},
     crypto::{AES_BLOCK_SIZE, Direction, TDES_BLOCK_SIZE, aes_ecb_block, tdes_ecb_block},
     presence::PresenceClient,
 };
 use const_oid::ObjectIdentifier;
-use der::{
-    Decode, Encode,
-    asn1::{Any, BitString, OctetString},
-};
-use rsa::{BigUint, RsaPublicKey, pkcs8::EncodePublicKey as EncodeRsaPublicKey};
-use signature::{Keypair, Signer};
+use der::{Decode, asn1::OctetString};
 use software_key_core::{
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
@@ -17,18 +13,14 @@ use software_key_core::{
         EcCurve, EdwardsCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
     },
 };
-use spki::{
-    AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding,
-    SubjectPublicKeyInfoOwned,
-};
+use spki::SubjectPublicKeyInfoOwned;
 use std::{collections::BTreeMap, fmt, str::FromStr};
 use subtle::ConstantTimeEq;
 use x509_cert::{
-    builder::{Builder, CertificateBuilder, profile::BuilderProfile},
+    builder::profile::BuilderProfile,
     certificate::TbsCertificate,
     ext::Extension,
     name::Name,
-    serial_number::SerialNumber,
     time::{Time, Validity},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -356,7 +348,7 @@ impl PivKey {
 
     fn subject_public_key_info(&self) -> Result<SubjectPublicKeyInfoOwned, ()> {
         match &self.private_key {
-            SoftwarePrivateKey::Signing(key) => signing_subject_public_key_info(key),
+            SoftwarePrivateKey::Signing(key) => certificate::subject_public_key_info(key),
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
@@ -366,122 +358,6 @@ impl PivKey {
             SoftwarePrivateKey::Signing(key) => Ok(key),
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
-    }
-}
-
-#[derive(Clone)]
-struct CertificateVerifyingKey(SubjectPublicKeyInfoOwned);
-
-impl spki::EncodePublicKey for CertificateVerifyingKey {
-    fn to_public_key_der(&self) -> spki::Result<spki::Document> {
-        spki::Document::try_from(self.0.to_der()?).map_err(Into::into)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CertificateSignatureScheme {
-    RsaSha256,
-    EcdsaP256Sha256,
-    EcdsaP384Sha384,
-    Ed25519,
-}
-
-struct CertificateSigner {
-    key: SoftwareSigningKey,
-    verifying_key: CertificateVerifyingKey,
-    scheme: CertificateSignatureScheme,
-}
-
-impl CertificateSigner {
-    fn from_key(key: &SoftwareSigningKey) -> Result<Self, ()> {
-        let scheme = match key.public_key() {
-            SoftwarePublicKey::Rsa { .. } => CertificateSignatureScheme::RsaSha256,
-            SoftwarePublicKey::Ec {
-                curve: EcCurve::P256,
-                ..
-            } => CertificateSignatureScheme::EcdsaP256Sha256,
-            SoftwarePublicKey::Ec {
-                curve: EcCurve::P384,
-                ..
-            } => CertificateSignatureScheme::EcdsaP384Sha384,
-            SoftwarePublicKey::Edwards {
-                curve: EdwardsCurve::Ed25519,
-                ..
-            } => CertificateSignatureScheme::Ed25519,
-            _ => return Err(()),
-        };
-        Ok(Self {
-            key: key.clone(),
-            verifying_key: CertificateVerifyingKey(signing_subject_public_key_info(key)?),
-            scheme,
-        })
-    }
-}
-
-impl Keypair for CertificateSigner {
-    type VerifyingKey = CertificateVerifyingKey;
-
-    fn verifying_key(&self) -> Self::VerifyingKey {
-        self.verifying_key.clone()
-    }
-}
-
-impl DynSignatureAlgorithmIdentifier for CertificateSigner {
-    fn signature_algorithm_identifier(&self) -> spki::Result<AlgorithmIdentifierOwned> {
-        let (oid, parameters) = match self.scheme {
-            CertificateSignatureScheme::RsaSha256 => (
-                ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
-                Some(Any::null()),
-            ),
-            CertificateSignatureScheme::EcdsaP256Sha256 => {
-                (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"), None)
-            }
-            CertificateSignatureScheme::EcdsaP384Sha384 => {
-                (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"), None)
-            }
-            CertificateSignatureScheme::Ed25519 => {
-                (ObjectIdentifier::new_unwrap("1.3.101.112"), None)
-            }
-        };
-        Ok(AlgorithmIdentifierOwned { oid, parameters })
-    }
-}
-
-struct CertificateSignature(Vec<u8>);
-
-impl SignatureBitStringEncoding for CertificateSignature {
-    fn to_bitstring(&self) -> der::Result<BitString> {
-        BitString::from_bytes(&self.0)
-    }
-}
-
-impl Signer<CertificateSignature> for CertificateSigner {
-    fn try_sign(
-        &self,
-        message: &[u8],
-    ) -> core::result::Result<CertificateSignature, signature::Error> {
-        let scheme = match self.scheme {
-            CertificateSignatureScheme::RsaSha256 => SignatureScheme::RsaPkcs1Sha256,
-            CertificateSignatureScheme::EcdsaP256Sha256 => SignatureScheme::EcdsaP256Sha256,
-            CertificateSignatureScheme::EcdsaP384Sha384 => SignatureScheme::EcdsaP384Sha384,
-            CertificateSignatureScheme::Ed25519 => SignatureScheme::Ed25519,
-        };
-        let signature = self
-            .key
-            .sign_message(scheme, message)
-            .map_err(|_| signature::Error::new())?;
-        let signature = match self.scheme {
-            CertificateSignatureScheme::EcdsaP256Sha256 => signature
-                .to_ecdsa_der(EcCurve::P256)
-                .map_err(|_| signature::Error::new())?,
-            CertificateSignatureScheme::EcdsaP384Sha384 => signature
-                .to_ecdsa_der(EcCurve::P384)
-                .map_err(|_| signature::Error::new())?,
-            CertificateSignatureScheme::RsaSha256 | CertificateSignatureScheme::Ed25519 => {
-                signature.into_bytes()
-            }
-        };
-        Ok(CertificateSignature(signature))
     }
 }
 
@@ -508,55 +384,6 @@ impl BuilderProfile for AttestationProfile {
     ) -> x509_cert::builder::Result<Vec<Extension>> {
         Ok(self.extensions.clone())
     }
-}
-
-fn signing_subject_public_key_info(
-    key: &SoftwareSigningKey,
-) -> Result<SubjectPublicKeyInfoOwned, ()> {
-    match key.public_key() {
-        SoftwarePublicKey::Ec {
-            curve,
-            uncompressed,
-        } => ec_subject_public_key_info(curve, &uncompressed),
-        SoftwarePublicKey::Edwards {
-            curve: EdwardsCurve::Ed25519,
-            public_key,
-        } => Ok(SubjectPublicKeyInfoOwned {
-            algorithm: AlgorithmIdentifierOwned {
-                oid: ObjectIdentifier::new_unwrap("1.3.101.112"),
-                parameters: None,
-            },
-            subject_public_key: BitString::from_bytes(&public_key).map_err(|_| ())?,
-        }),
-        SoftwarePublicKey::Rsa { modulus, exponent } => {
-            let public = RsaPublicKey::new(
-                BigUint::from_bytes_be(&modulus),
-                BigUint::from_bytes_be(&exponent),
-            )
-            .map_err(|_| ())?;
-            let encoded = public.to_public_key_der().map_err(|_| ())?;
-            SubjectPublicKeyInfoOwned::from_der(encoded.as_bytes()).map_err(|_| ())
-        }
-        SoftwarePublicKey::Edwards { .. } | SoftwarePublicKey::MlDsa { .. } => Err(()),
-    }
-}
-
-fn ec_subject_public_key_info(
-    curve: EcCurve,
-    uncompressed: &[u8],
-) -> Result<SubjectPublicKeyInfoOwned, ()> {
-    let curve_oid = match curve {
-        EcCurve::P256 => ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7"),
-        EcCurve::P384 => ObjectIdentifier::new_unwrap("1.3.132.0.34"),
-        _ => return Err(()),
-    };
-    Ok(SubjectPublicKeyInfoOwned {
-        algorithm: AlgorithmIdentifierOwned {
-            oid: ObjectIdentifier::new_unwrap("1.2.840.10045.2.1"),
-            parameters: Some(Any::encode_from(&curve_oid).map_err(|_| ())?),
-        },
-        subject_public_key: BitString::from_bytes(uncompressed).map_err(|_| ())?,
-    })
 }
 
 fn raw_attestation_extension(suffix: u8, value: Vec<u8>) -> Result<Extension, ()> {
@@ -592,25 +419,6 @@ fn key_attestation_extensions(
         raw_attestation_extension(8, vec![key.pin_policy, key.touch_policy])?,
     );
     Ok(extensions)
-}
-
-fn build_certificate(
-    profile: AttestationProfile,
-    serial: &[u8],
-    validity: Validity,
-    subject_public_key: SubjectPublicKeyInfoOwned,
-    signer: &CertificateSigner,
-) -> Result<Vec<u8>, ()> {
-    let certificate = CertificateBuilder::new(
-        profile,
-        SerialNumber::new(serial).map_err(|_| ())?,
-        validity,
-        subject_public_key,
-    )
-    .map_err(|_| ())?
-    .build::<_, CertificateSignature>(signer)
-    .map_err(|_| ())?;
-    certificate.to_der().map_err(|_| ())
 }
 
 fn certificate_object(certificate: &[u8]) -> Vec<u8> {
@@ -655,7 +463,7 @@ fn factory_attestation_bundle(
     certificate_serial[..4].copy_from_slice(&serial.to_be_bytes());
     certificate_serial[4] = SLOT_ATTESTATION;
     certificate_serial[7] = 1;
-    let certificate = build_certificate(
+    let certificate = certificate::build(
         profile,
         &certificate_serial,
         validity,
@@ -1203,7 +1011,7 @@ impl PivApplet {
         let Ok(subject_public_key) = target.subject_public_key_info() else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        let Ok(certificate) = build_certificate(
+        let Ok(certificate) = certificate::build(
             profile,
             &serial,
             *tbs.validity(),
@@ -2200,6 +2008,7 @@ fn push_tlv(output: &mut Vec<u8>, tag: u32, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use der::Encode;
 
     fn command(ins: u8, p1: u8, p2: u8, data: &[u8]) -> CommandApdu<'_> {
         CommandApdu {
@@ -2209,6 +2018,7 @@ mod tests {
             p2,
             data,
             le: Some(256),
+            extended: false,
         }
     }
 

@@ -35,12 +35,14 @@ impl Card {
         serial: u32,
         piv_encoded: &[u8],
         hsmauth_encoded: &[u8],
+        security_domain_encoded: &[u8],
     ) -> Result<Self, &'static str> {
         Ok(Self {
             device: VirtualYubiKey::from_persistent_states(
                 DeviceProfile::yubikey_5_8_ccid(serial),
                 piv_encoded,
                 hsmauth_encoded,
+                security_domain_encoded,
             )?,
         })
     }
@@ -56,6 +58,11 @@ impl Card {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn security_domain_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.device.security_domain_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
         self.device.take_piv_persistent_change()
     }
@@ -63,6 +70,11 @@ impl Card {
     #[cfg(target_os = "linux")]
     pub(crate) fn take_hsmauth_persistent_change(&mut self) -> bool {
         self.device.take_hsmauth_persistent_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_security_domain_persistent_change(&mut self) -> bool {
+        self.device.take_security_domain_persistent_change()
     }
 
     pub(crate) fn reset(&mut self) {

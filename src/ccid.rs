@@ -60,11 +60,13 @@ impl Device {
         serial: u32,
         piv_encoded: &[u8],
         hsmauth_encoded: &[u8],
+        security_domain_encoded: &[u8],
     ) -> Result<Self, &'static str> {
         Ok(Self::with_card(Card::from_persistent_states(
             serial,
             piv_encoded,
             hsmauth_encoded,
+            security_domain_encoded,
         )?))
     }
 
@@ -94,6 +96,11 @@ impl Device {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn security_domain_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.card.security_domain_persistent_state()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
         self.card.take_piv_persistent_change()
     }
@@ -101,6 +108,11 @@ impl Device {
     #[cfg(target_os = "linux")]
     pub(crate) fn take_hsmauth_persistent_change(&mut self) -> bool {
         self.card.take_hsmauth_persistent_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_security_domain_persistent_change(&mut self) -> bool {
+        self.card.take_security_domain_persistent_change()
     }
 
     #[cfg(test)]
