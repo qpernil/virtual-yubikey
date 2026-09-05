@@ -155,6 +155,18 @@ response chaining are handled once in the shared APDU router rather than by the
 applet. Its state is independently scheduled and atomically replaced as
 `hsmauth-<serial>.cbor`.
 
+## FIDO PIN handling
+
+Client PIN protocols 1 and 2 enforce an eight-attempt persistent retry counter.
+Three consecutive wrong PINs require a device power cycle; reaching zero blocks
+PIN authentication even after restart. Successful PIN verification restores eight
+attempts. Invalid change-PIN MACs are rejected without consuming a PIN attempt.
+Transport resets and CTAPHID INIT do not clear the temporary block; restarting
+the worker or reinserting the gadget starts a new power cycle. PIN-counter
+changes are persisted before the HID response and cannot be undone by CANCEL.
+These retry and error-code rules follow
+[CTAP ClientPIN](https://fidoalliance.org/specs/fido-v2.3-rd-20251023/fido-client-to-authenticator-protocol-v2.3-rd-20251023.html#authenticatorClientPIN).
+
 ## Credential algorithms
 
 The FIDO applet can create, persist, restore, assert with, and independently

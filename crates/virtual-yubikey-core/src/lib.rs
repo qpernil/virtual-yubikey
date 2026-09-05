@@ -503,6 +503,12 @@ impl FidoAuthenticator {
     pub fn reset_connection(&mut self) {
         self.state.reset_connection();
     }
+
+    /// Start a new device power cycle, clearing only the volatile PIN block.
+    /// Transport reconnects and CTAPHID INIT must not call this method.
+    pub fn power_cycle(&mut self) {
+        self.state.power_cycle();
+    }
 }
 
 fn device_identifier(serial: u32) -> [u8; 16] {
@@ -766,6 +772,7 @@ impl VirtualYubiKey {
 
     pub fn power_on(&mut self) {
         self.reset();
+        self.fido.power_cycle();
     }
 
     pub fn power_off(&mut self) {
