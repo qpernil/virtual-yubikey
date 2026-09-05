@@ -167,6 +167,16 @@ changes are persisted before the HID response and cannot be undone by CANCEL.
 These retry and error-code rules follow
 [CTAP ClientPIN](https://fidoalliance.org/specs/fido-v2.3-rd-20251023/fido-client-to-authenticator-protocol-v2.3-rd-20251023.html#authenticatorClientPIN).
 
+Operation tokens are random, protocol-bound, permission-checked, and RP-scoped.
+They expire after 30 seconds without first use, or 600 seconds after issuance,
+and are invalidated by a new operation token, PIN change, transport reset, or
+completed touch-authorized credential creation/assertion. Legacy tokens grant
+only make-credential/get-assertion permissions, not modern credential management.
+Protocol 2 supports a separate persistent read-only credential-management token;
+it survives restart but cannot create, sign, delete, or update credentials, and
+PIN changes invalidate it. Its secret also protects the encrypted device identifier.
+Protocol-1-only configurations use ordinary credential-management tokens.
+
 ## Credential algorithms
 
 The FIDO applet can create, persist, restore, assert with, and independently
