@@ -17,6 +17,10 @@ The core currently implements:
   raw RSA operations, ECDH, Ed25519, and X25519;
 - YubiHSM Auth symmetric and asymmetric credentials, retry policy, touch,
   SCP03 session derivation, and SCP11 key agreement; and
+- Issuer Security Domain discovery, factory SCP03 keys, a persistent
+  certificate-backed SCP11b card identity, authenticated key/certificate/CA
+  administration, and shared SCP03/SCP11a/b/c secure messaging around selectable
+  CCID applets; and
 - the OpenPGP `GET CHALLENGE` subset.
 
 The active priorities are:
@@ -24,8 +28,9 @@ The active priorities are:
 1. keep FIDO, PIV, and YubiHSM Auth behavior aligned across core, USB, and
    `pkcs11rs` tests;
 2. qualify the implemented applets against real host tools over USB;
-3. add Issuer Security Domain behavior and target-side SCP03/SCP11; and
-4. expand OpenPGP after the common CCID and secure-channel behavior is stable.
+3. qualify Issuer Security Domain administration and SCP11a/c provisioning
+   with public host tools, including failure and recovery workflows; and
+4. expand OpenPGP on the established common CCID and secure-channel layer.
 
 HID support is added when an applet or real client requires it. CCID remains the
 primary transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
@@ -56,7 +61,7 @@ layers. Direct RustCrypto dev-dependencies are appropriate in protocol tests
 when they independently verify an encoded signature or public key; production
 cryptography continues to flow through `software-key-core`.
 
-Role-neutral secure-channel components belong in focused shared modules when
+Role-neutral secure-channel calculations belong in focused shared modules when
 both sides require byte-identical behavior. These include:
 
 - SCP03 derivation, cryptograms, padding, counters, and MAC chaining;
@@ -74,22 +79,26 @@ replaced versioned files.
 
 ## Issuer SD and secure channels
 
-`pkcs11rs` owns the host-side SCP03 and SCP11 implementation, secure messaging,
-certificate-chain handling, and Issuer SD operations. The target-side core needs
-an APDU-driven state machine that:
+`pkcs11rs` owns host-side SCP03 and SCP11, host trust policy, and Issuer SD
+administration clients. `virtual-yubikey-core` owns the corresponding card-side
+state and policy. The card-side secure-messaging layer handles SCP03
+`INITIALIZE UPDATE`/`EXTERNAL AUTHENTICATE`, SCP11b `INTERNAL AUTHENTICATE`,
+SCP11a/c certificate upload and `EXTERNAL AUTHENTICATE`,
+command authentication and decryption, response encryption and authentication,
+and long command/response reassembly. It is below applet dispatch, so the same
+channel semantics apply to every selectable CCID applet.
 
-- selects and exposes the Issuer Security Domain;
-- handles SCP03 `INITIALIZE UPDATE` and `EXTERNAL AUTHENTICATE`;
-- handles the applicable SCP11 authentication variants;
-- receives and validates OCE certificate chains where required;
-- owns static keys, trust anchors, session keys, counters, chaining values, and
-  authorization state;
-- unwraps protected commands and wraps protected responses; and
-- connects authenticated sessions to Issuer SD and applet operations.
+The factory Security Domain exposes the published YubiKey SCP03 key set at KVN
+`FF` and a generated, persistent P-256 SCP11b identity at KID `13`, KVN `1`.
+Its certificate store uses the conventional issuer-to-leaf order expected by
+`libykpiv`; the final certificate carries the card key. The virtual certificate
+chain identifies this project and does not chain to a Yubico trust anchor.
 
-Existing host/card vectors provide the conformance inputs. Shared calculations
-are extracted only at a role-neutral boundary; host policy stays in `pkcs11rs`
-and card policy stays in `virtual-yubikey-core`.
+SCP11b authenticates the card to the host but does not authenticate the
+off-card entity. It therefore provides protected applet traffic without
+granting privileged Security Domain administration. SCP03 is OCE-authenticated.
+SCP11a/c require an explicit card-side OCE trust store and certificate-chain
+validation before they can authorize the same administrative operations.
 
 ## Applet priorities
 
@@ -128,9 +137,17 @@ and card policy stays in `virtual-yubikey-core`.
 
 ### Issuer Security Domain
 
-- Implement target-side SCP03 and the required SCP11 variants.
-- Add protected command and response vectors at the core boundary.
-- Exercise authenticated applet operations through CCID and the provider.
+- Keep factory SCP03, persistent SCP11b provisioning, certificate discovery,
+  protected command/response vectors, and all-applet dispatch covered in the
+  core and provider.
+- Keep authenticated SCP03 key rotation and SCP11 key, certificate, issuer,
+  allowlist, and deletion operations covered through persisted state roundtrips.
+- Keep SCP11a/c explicit OCE trust, certificate validation, and negative
+  authorization tests aligned with the shared validator.
+- Qualify public-tool provisioning and define the remaining retry-counter and
+  reset behavior without weakening authenticated administration.
+- Exercise both `yubico-piv-tool --enc` and `pkcs11rs` secure-channel workflows
+  through real USB CCID.
 
 ### OpenPGP
 

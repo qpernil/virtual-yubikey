@@ -79,6 +79,7 @@ pub(crate) fn run_worker(
         fido_state: state_directory.join(format!("fido-{serial}.cbor")),
         piv_state: state_directory.join(format!("piv-{serial}.cbor")),
         hsmauth_state: state_directory.join(format!("hsmauth-{serial}.cbor")),
+        security_domain_state: state_directory.join(format!("security-domain-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
     let fido_persistence = StatePersistence::start(
@@ -93,6 +94,7 @@ pub(crate) fn run_worker(
         serial,
         &storage.piv_state,
         &storage.hsmauth_state,
+        &storage.security_domain_state,
     )?));
     let piv_persistence = StatePersistence::start(
         SharedCcidState(Arc::clone(&ccid_state)),
@@ -108,10 +110,18 @@ pub(crate) fn run_worker(
         encode_shared_hsmauth_state,
         || STOP_REQUESTED.store(true, Ordering::Relaxed),
     )?;
+    let security_domain_persistence = StatePersistence::start(
+        SharedCcidState(Arc::clone(&ccid_state)),
+        storage.security_domain_state.clone(),
+        persistence_mode,
+        encode_shared_security_domain_state,
+        || STOP_REQUESTED.store(true, Ordering::Relaxed),
+    )?;
     let smartcard = CcidPersistenceHandle {
         state: ccid_state,
         piv: piv_persistence.handle(),
         hsmauth: hsmauth_persistence.handle(),
+        security_domain: security_domain_persistence.handle(),
     };
     let buttons = crate::buttons::Controller::start(
         resources.touch_button,
@@ -323,6 +333,7 @@ struct WorkerStorage {
     fido_state: PathBuf,
     piv_state: PathBuf,
     hsmauth_state: PathBuf,
+    security_domain_state: PathBuf,
     touch_socket: PathBuf,
 }
 
@@ -336,6 +347,7 @@ struct CcidPersistenceHandle {
     state: Arc<Mutex<crate::ccid::Device>>,
     piv: StatePersistenceHandle<SharedCcidState>,
     hsmauth: StatePersistenceHandle<SharedCcidState>,
+    security_domain: StatePersistenceHandle<SharedCcidState>,
 }
 
 #[cfg(target_os = "linux")]
@@ -863,7 +875,7 @@ fn serve_ccid(
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
-                    let (replies, piv_mutation, hsmauth_mutation) = {
+                    let (replies, piv_mutation, hsmauth_mutation, security_domain_mutation) = {
                         let mut state = ccid
                             .state
                             .lock()
@@ -890,12 +902,24 @@ fn serve_ccid(
                             .take_hsmauth_persistent_change()
                             .then(|| ccid.hsmauth.record_mutation())
                             .transpose()?;
-                        (replies, piv_mutation, hsmauth_mutation)
+                        let security_domain_mutation = state
+                            .take_security_domain_persistent_change()
+                            .then(|| ccid.security_domain.record_mutation())
+                            .transpose()?;
+                        (
+                            replies,
+                            piv_mutation,
+                            hsmauth_mutation,
+                            security_domain_mutation,
+                        )
                     };
                     if let Some(mutation) = piv_mutation {
                         mutation.wait()?;
                     }
                     if let Some(mutation) = hsmauth_mutation {
+                        mutation.wait()?;
+                    }
+                    if let Some(mutation) = security_domain_mutation {
                         mutation.wait()?;
                     }
                     for reply in replies {
@@ -1377,18 +1401,27 @@ fn load_ccid_state(
     serial: u32,
     piv_path: &Path,
     hsmauth_path: &Path,
+    security_domain_path: &Path,
 ) -> io::Result<crate::ccid::Device> {
     let factory = crate::ccid::Device::new(serial);
     let piv_factory = encode_piv_state(&factory)?;
     let hsmauth_factory = encode_hsmauth_state(&factory)?;
+    let security_domain_factory = encode_security_domain_state(&factory)?;
     let piv = load_applet_state(piv_path, "piv", &piv_factory)?;
     let hsmauth = load_applet_state(hsmauth_path, "hsmauth", &hsmauth_factory)?;
-    crate::ccid::Device::from_persistent_states(serial, &piv, &hsmauth).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("load persistent smart-card applet state: {error}"),
-        )
-    })
+    let security_domain = load_applet_state(
+        security_domain_path,
+        "security-domain",
+        &security_domain_factory,
+    )?;
+    crate::ccid::Device::from_persistent_states(serial, &piv, &hsmauth, &security_domain).map_err(
+        |error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("load persistent smart-card applet state: {error}"),
+            )
+        },
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -1441,6 +1474,15 @@ fn encode_shared_hsmauth_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
+fn encode_shared_security_domain_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
+    let ccid = state
+        .0
+        .lock()
+        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
+    encode_security_domain_state(&ccid)
+}
+
+#[cfg(target_os = "linux")]
 fn encode_piv_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
     ccid.piv_persistent_state()
         .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))
@@ -1450,6 +1492,13 @@ fn encode_piv_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
 fn encode_hsmauth_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
     ccid.hsmauth_persistent_state()
         .map_err(|error| io::Error::other(format!("encode persistent YubiHSM Auth state: {error}")))
+}
+
+#[cfg(target_os = "linux")]
+fn encode_security_domain_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
+    ccid.security_domain_persistent_state().map_err(|error| {
+        io::Error::other(format!("encode persistent Security Domain state: {error}"))
+    })
 }
 
 #[cfg(target_os = "linux")]

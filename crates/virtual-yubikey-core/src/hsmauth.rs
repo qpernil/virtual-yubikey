@@ -1047,6 +1047,7 @@ mod tests {
                 p2,
                 data,
                 le: None,
+                extended: false,
             },
             presence,
         )
