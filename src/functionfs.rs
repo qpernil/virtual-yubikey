@@ -176,6 +176,12 @@ pub(crate) fn run_worker(
         let endpoints = Endpoints::from_record(endpoints_record)?;
         STOP_REQUESTED.store(false, Ordering::Relaxed);
         let lifecycle = Arc::new(EndpointLifecycle::new());
+        // A new gadget generation represents reinsertion. Ordinary USB bus
+        // events and CTAPHID INIT must not clear the temporary PIN block.
+        fido.state()
+            .lock()
+            .map_err(|_| io::Error::other("FIDO state lock poisoned"))?
+            .power_cycle();
         let endpoint_runtime = endpoints.start(
             fido.clone(),
             smartcard.clone(),
@@ -1184,6 +1190,12 @@ fn exchange_persistent_fido_with_keepalives(
         .take_persistent_change()
         .then(|| fido.record_mutation())
         .transpose()?;
+    drop(state);
+    if request.first() == Some(&0x06) && mutation.is_some() {
+        // PIN retries must survive power loss after a response, including when
+        // ordinary credential writes use batched persistence.
+        fido.flush()?;
+    }
     Ok((response, mutation))
 }
 
@@ -1197,6 +1209,12 @@ fn exchange_fido_with_keepalives(
     follows_user_presence: bool,
     clock: &crate::keepalive::Handle,
 ) -> io::Result<Vec<u8>> {
+    // ClientPIN has no user-presence wait. Execute it on the authoritative
+    // state: cancelling a speculative clone must not roll back a wrong PIN
+    // attempt or a PIN change. The caller persists mutations before replying.
+    if request.first() == Some(&0x06) {
+        return Ok(fido.exchange(request));
+    }
     let initial_delay = if follows_user_presence {
         Duration::ZERO
     } else {
