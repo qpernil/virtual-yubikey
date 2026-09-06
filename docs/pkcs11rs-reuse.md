@@ -21,10 +21,12 @@ CCID framing, direct FunctionFS data-endpoint I/O, and device behavior. PC/SC,
 CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
 The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
-The physical USB CCID reader exposes Management, PIV, and YubiHSM Auth.
-`pkcs11rs` should use HID or its direct-USB connector for FIDO and CCID for the
-smart-card applets. The core retains ISO 7816 FIDO routing for unit tests and
-possible future NFC work.
+The physical USB CCID reader also exposes the FIDO2 applet alongside Management,
+PIV, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
+authoritative authenticator state. `pkcs11rs` should normally use HID or its
+direct-USB connector for FIDO and CCID for the smart-card applets, matching
+ordinary host-tool behavior, while CCID remains available for FIDO qualification
+and secure-messaging coverage.
 
 ## Current boundary
 
@@ -69,8 +71,8 @@ select only the combinations advertised by their COSE algorithms.
    `pkcs11rs` as conformance fixtures.
 2. Run the core's FIDO, PIN, credential-management and `previewSign`
    registration/signing tests through the standalone logical device.
-3. Exercise FIDO through the Pi's USB HID transport and Management, PIV, and
-   YubiHSM Auth through CCID.
+3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
+   PIV, and YubiHSM Auth through CCID.
 4. Keep the `pkcs11rs` mock adapter and its full-cycle PKCS #11 tests running
    against the core as applet coverage expands.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`

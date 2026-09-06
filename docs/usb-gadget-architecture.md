@@ -382,12 +382,21 @@ ykman or yubico-piv-tool
   -> USB bulk CCID message
   -> Pi FunctionFS endpoint
   -> virtual-yubikey-worker
-  -> CCID framing -> APDU -> Management, PIV, or YubiHSM Auth applet
+  -> CCID framing -> APDU -> Management, PIV, YubiHSM Auth, Issuer SD, or FIDO2 applet
 ```
 
 This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
+
+The FIDO2 AID routes CTAP CBOR APDUs to the same persistent authenticator used by
+the HID interface. One worker-wide operation lock covers touch authorization,
+command execution, and mutation recording. If one transport already owns a FIDO
+operation, a request arriving through the other receives the CTAP channel-busy
+status. A single touch therefore cannot authorize concurrent HID and CCID
+operations, and PIN counters, operation tokens, and resident credentials have
+one serialization order. CCID uses ordinary time-extension frames while its
+FIDO operation or touch wait is pending.
 
 The shared APDU router accepts one deliberate command-chaining compatibility
 exception. ISO 7816 command chaining normally omits `Le` from intermediate

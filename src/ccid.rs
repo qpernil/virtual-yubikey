@@ -42,6 +42,8 @@ const TIME_EXTENSION_DELAY: Duration = Duration::from_millis(500);
 const TIME_EXTENSION_INTERVAL: Duration = Duration::from_millis(500);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+type FidoHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + Send + 'a;
+
 pub(crate) struct Device {
     active: bool,
     card: Card,
@@ -117,8 +119,16 @@ impl Device {
 
     #[cfg(test)]
     pub(crate) fn receive(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.receive_inner(bytes, None, &mut || Ok(false), &mut |_| Ok(()))
+        self.receive_inner(bytes, None, &mut || Ok(false), &mut None, &mut |_| Ok(()))
             .expect("direct CCID receive has an infallible time-extension sink")
+    }
+
+    #[cfg(test)]
+    fn receive_with_fido(&mut self, bytes: &[u8], fido: &mut FidoHandler<'_>) -> Vec<Vec<u8>> {
+        self.receive_inner(bytes, None, &mut || Ok(false), &mut Some(fido), &mut |_| {
+            Ok(())
+        })
+        .expect("test CCID receive has infallible service callbacks")
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -127,9 +137,16 @@ impl Device {
         bytes: &[u8],
         clock: &keepalive::Handle,
         mut authorize: impl FnMut() -> io::Result<bool> + Send,
+        fido: &mut FidoHandler<'_>,
         mut send: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
-        self.receive_inner(bytes, Some(clock), &mut authorize, &mut send)
+        self.receive_inner(
+            bytes,
+            Some(clock),
+            &mut authorize,
+            &mut Some(fido),
+            &mut send,
+        )
     }
 
     fn receive_inner(
@@ -137,6 +154,7 @@ impl Device {
         bytes: &[u8],
         clock: Option<&keepalive::Handle>,
         authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
+        fido: &mut Option<&mut FidoHandler<'_>>,
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<Vec<u8>>> {
         self.buffered.extend_from_slice(bytes);
@@ -175,7 +193,7 @@ impl Device {
                 break;
             }
             let message = self.buffered.drain(..total).collect::<Vec<_>>();
-            responses.push(self.handle(&message, clock, authorize, send)?);
+            responses.push(self.handle(&message, clock, authorize, fido, send)?);
         }
         Ok(responses)
     }
@@ -185,6 +203,7 @@ impl Device {
         message: &[u8],
         clock: Option<&keepalive::Handle>,
         authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
+        fido: &mut Option<&mut FidoHandler<'_>>,
         send: &mut impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<u8>> {
         let message_type = message[0];
@@ -377,11 +396,17 @@ impl Device {
                     transmit_with_keepalives(
                         &mut self.card,
                         &command,
-                        slot,
-                        sequence,
+                        (slot, sequence),
                         clock,
                         authorize,
+                        fido,
                         send,
+                    )?
+                } else if let Some(handler) = fido {
+                    self.card.transmit_with_presence_and_fido(
+                        &command,
+                        &mut *authorize,
+                        &mut **handler,
                     )?
                 } else {
                     self.card.transmit(&command)
@@ -514,14 +539,21 @@ impl Device {
 fn transmit_with_keepalives(
     card: &mut Card,
     data: &[u8],
-    slot: u8,
-    sequence: u8,
+    address: (u8, u8),
     clock: &keepalive::Handle,
     authorize: &mut (impl FnMut() -> io::Result<bool> + Send),
+    fido: &mut Option<&mut FidoHandler<'_>>,
     send: &mut impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
+    let (slot, sequence) = address;
     run_with_keepalives(
-        || card.transmit_with_presence(data, authorize),
+        || {
+            if let Some(handler) = fido {
+                card.transmit_with_presence_and_fido(data, authorize, &mut **handler)
+            } else {
+                card.transmit_with_presence(data, authorize)
+            }
+        },
         slot,
         sequence,
         clock,
@@ -657,7 +689,7 @@ fn request_name(message_type: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::smartcard::{MANAGEMENT_AID, OPENPGP_AID};
-    use virtual_yubikey_core::HSMAUTH_AID;
+    use virtual_yubikey_core::{FIDO2_AID, HSMAUTH_AID};
 
     fn openpgp_device(serial: u32) -> Device {
         let mut profile = virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial);
@@ -749,6 +781,35 @@ mod tests {
             &responses[0][10..],
             [b"Virtual mgr - FW version 5.8.0".as_slice(), &[0x90, 0]].concat()
         );
+    }
+
+    #[test]
+    fn routes_fido_apdus_through_the_runtime_authenticator() {
+        let mut device = Device::new(1);
+        device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+        let select = [
+            vec![0, 0xa4, 4, 0, FIDO2_AID.len() as u8],
+            FIDO2_AID.to_vec(),
+        ]
+        .concat();
+        let mut requests = Vec::new();
+        let mut handler = |request: &[u8]| {
+            requests.push(request.to_vec());
+            vec![0x2e]
+        };
+        let selected = device.receive_with_fido(
+            &request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select),
+            &mut handler,
+        );
+        assert_eq!(&selected[0][CCID_HEADER_LENGTH..], b"U2F_V2\x90\0");
+
+        let cbor = [0x80, 0x10, 0, 0, 2, 0xaa, 0xbb];
+        let response = device.receive_with_fido(
+            &request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &cbor),
+            &mut handler,
+        );
+        assert_eq!(requests, [vec![0xaa, 0xbb]]);
+        assert_eq!(&response[0][CCID_HEADER_LENGTH..], &[0x2e, 0x90, 0x00]);
     }
 
     #[test]

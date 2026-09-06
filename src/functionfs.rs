@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 #[cfg(target_os = "linux")]
 use std::{
     thread,
@@ -369,6 +369,7 @@ struct EndpointServices<'a> {
 struct HidRuntime {
     serial: u32,
     presence: crate::presence::Service,
+    operations: Arc<Mutex<()>>,
     clock: crate::keepalive::Handle,
     lifecycle: Arc<EndpointLifecycle>,
 }
@@ -477,6 +478,7 @@ impl Endpoints {
         let (notification_tx, notification_rx) = mpsc::sync_channel(1);
         let presence =
             crate::presence::Service::new(storage.touch_socket.clone(), display_activity.clone());
+        let fido_operations = Arc::new(Mutex::new(()));
 
         let notification_thread = thread::Builder::new()
             .name("ccid-notify".to_owned())
@@ -508,12 +510,16 @@ impl Endpoints {
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
             let presence = presence.clone();
+            let fido = fido.clone();
+            let fido_operations = Arc::clone(&fido_operations);
             let lifecycle = Arc::clone(&lifecycle);
             move || {
                 if let Err(error) = serve_ccid(
                     ccid_out,
                     ccid_in,
                     ccid,
+                    fido,
+                    fido_operations,
                     presence,
                     clock,
                     display_activity,
@@ -534,6 +540,7 @@ impl Endpoints {
             let runtime = HidRuntime {
                 serial,
                 presence,
+                operations: fido_operations,
                 clock: keepalive.handle(),
                 lifecycle,
             };
@@ -864,6 +871,8 @@ fn serve_ccid(
     mut output: File,
     mut input: File,
     ccid: CcidPersistenceHandle,
+    fido: StatePersistenceHandle<FidoAuthenticator>,
+    fido_operations: Arc<Mutex<()>>,
     presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
@@ -881,11 +890,19 @@ fn serve_ccid(
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
-                    let (replies, piv_mutation, hsmauth_mutation, security_domain_mutation) = {
+                    let (
+                        replies,
+                        piv_mutation,
+                        hsmauth_mutation,
+                        security_domain_mutation,
+                        fido_mutations,
+                    ) = {
                         let mut state = ccid
                             .state
                             .lock()
                             .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
+                        let mut fido_error = None;
+                        let mut fido_mutations = Vec::new();
                         let replies = state.receive_with_keepalives(
                             &request[..length],
                             &clock,
@@ -898,8 +915,26 @@ fn serve_ccid(
                                     })
                                 })
                             },
+                            &mut |request| match exchange_ccid_fido(
+                                &fido,
+                                &fido_operations,
+                                &presence,
+                                request,
+                            ) {
+                                Ok((response, mutation)) => {
+                                    fido_mutations.extend(mutation);
+                                    response
+                                }
+                                Err(error) => {
+                                    fido_error = Some(error);
+                                    vec![0x7f]
+                                }
+                            },
                             |keepalive| write_transfer(&mut input, keepalive),
                         )?;
+                        if let Some(error) = fido_error {
+                            return Err(error);
+                        }
                         let piv_mutation = state
                             .take_piv_persistent_change()
                             .then(|| ccid.piv.record_mutation())
@@ -917,6 +952,7 @@ fn serve_ccid(
                             piv_mutation,
                             hsmauth_mutation,
                             security_domain_mutation,
+                            fido_mutations,
                         )
                     };
                     if let Some(mutation) = piv_mutation {
@@ -926,6 +962,9 @@ fn serve_ccid(
                         mutation.wait()?;
                     }
                     if let Some(mutation) = security_domain_mutation {
+                        mutation.wait()?;
+                    }
+                    for mutation in fido_mutations {
                         mutation.wait()?;
                     }
                     for reply in replies {
@@ -951,6 +990,7 @@ fn serve_hid(
     let HidRuntime {
         serial,
         presence,
+        operations,
         clock,
         lifecycle,
     } = runtime;
@@ -1013,6 +1053,23 @@ fn serve_hid(
                                 request.len().saturating_sub(1)
                             ),
                         );
+                        let _operation = match operations.try_lock() {
+                            Ok(operation) => operation,
+                            Err(TryLockError::WouldBlock) => {
+                                diagnostics::log(
+                                    Level::Info,
+                                    "ctap2",
+                                    "request_busy",
+                                    format_args!("command=0x{command:02x} transport=hid"),
+                                );
+                                return vec![0x06];
+                            }
+                            Err(TryLockError::Poisoned(_)) => {
+                                command_error =
+                                    Some(io::Error::other("FIDO operation lock poisoned"));
+                                return vec![0x7f];
+                            }
+                        };
                         if let Some(algorithms) =
                             FidoAuthenticator::make_credential_algorithms(request)
                         {
@@ -1194,6 +1251,58 @@ fn exchange_persistent_fido_with_keepalives(
     if request.first() == Some(&0x06) && mutation.is_some() {
         // PIN retries must survive power loss after a response, including when
         // ordinary credential writes use batched persistence.
+        fido.flush()?;
+    }
+    Ok((response, mutation))
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_ccid_fido(
+    fido: &StatePersistenceHandle<FidoAuthenticator>,
+    operations: &Mutex<()>,
+    presence: &crate::presence::Service,
+    request: &[u8],
+) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
+    let command = request.first().copied().unwrap_or_default();
+    let _operation = match operations.try_lock() {
+        Ok(operation) => operation,
+        Err(TryLockError::WouldBlock) => {
+            diagnostics::log(
+                Level::Info,
+                "ctap2",
+                "request_busy",
+                format_args!("command=0x{command:02x} transport=ccid"),
+            );
+            return Ok((vec![0x06], None));
+        }
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(io::Error::other("FIDO operation lock poisoned"));
+        }
+    };
+
+    if matches!(command, 0x01 | 0x02 | 0x0b)
+        && !presence.wait_for(CCID_TOUCH_TIMEOUT, || {
+            Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
+                crate::presence::WaitControl::Cancel
+            } else {
+                crate::presence::WaitControl::Continue
+            })
+        })?
+    {
+        return Ok((vec![0x2d], None));
+    }
+
+    let mut state = fido
+        .state()
+        .lock()
+        .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
+    let response = state.exchange(request);
+    let mutation = state
+        .take_persistent_change()
+        .then(|| fido.record_mutation())
+        .transpose()?;
+    drop(state);
+    if command == 0x06 && mutation.is_some() {
         fido.flush()?;
     }
     Ok((response, mutation))
@@ -1544,6 +1653,7 @@ fn ctap_status_name(status: u8) -> &'static str {
         0x01 => "invalid_command",
         0x02 => "invalid_parameter",
         0x03 => "invalid_length",
+        0x06 => "channel_busy",
         0x11 => "cbor_unexpected_type",
         0x12 => "invalid_cbor",
         0x14 => "missing_parameter",

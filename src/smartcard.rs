@@ -12,6 +12,8 @@ pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
 pub(crate) use virtual_yubikey_core::{MANAGEMENT_AID, OPENPGP_AID};
 
+type FidoHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + 'a;
+
 pub(crate) struct Card {
     device: VirtualYubiKey,
 }
@@ -88,7 +90,7 @@ impl Card {
     }
 
     pub(crate) fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
-        self.transmit_inner(raw, || Ok(false))
+        self.transmit_inner(raw, || Ok(false), &mut None)
             .expect("the direct smart-card transport has an infallible presence policy")
     }
 
@@ -97,13 +99,23 @@ impl Card {
         raw: &[u8],
         authorize: impl FnMut() -> io::Result<bool>,
     ) -> io::Result<Vec<u8>> {
-        self.transmit_inner(raw, authorize)
+        self.transmit_inner(raw, authorize, &mut None)
+    }
+
+    pub(crate) fn transmit_with_presence_and_fido(
+        &mut self,
+        raw: &[u8],
+        authorize: impl FnMut() -> io::Result<bool>,
+        fido: &mut FidoHandler<'_>,
+    ) -> io::Result<Vec<u8>> {
+        self.transmit_inner(raw, authorize, &mut Some(fido))
     }
 
     fn transmit_inner(
         &mut self,
         raw: &[u8],
         mut authorize: impl FnMut() -> io::Result<bool>,
+        fido: &mut Option<&mut FidoHandler<'_>>,
     ) -> io::Result<Vec<u8>> {
         if diagnostics::enabled(Level::Trace) {
             diagnostics::log(
@@ -138,30 +150,20 @@ impl Card {
             ),
         }
 
-        let response = if command.as_ref().is_ok_and(|command| {
-            command.ins == 0xa4
-                && command.p1 == 0x04
-                && self.device.applet_for_aid(command.data) == Some(Applet::Fido2)
-        }) {
-            self.device.reset();
-            diagnostics::log(
-                Level::Info,
-                "fido2",
-                "ccid_transport_unavailable",
-                format_args!("use=fido_hid"),
-            );
-            vec![0x6a, 0x82]
-        } else {
-            match self
-                .device
-                .exchange_apdu(raw, PresenceAuthorization::Absent)
-            {
+        let response = {
+            let exchange = |device: &mut VirtualYubiKey,
+                            presence: PresenceAuthorization,
+                            fido: &mut Option<&mut FidoHandler<'_>>| {
+                if let Some(handler) = fido {
+                    device.exchange_apdu_with_fido(raw, presence, &mut **handler)
+                } else {
+                    device.exchange_apdu(raw, presence)
+                }
+            };
+            match exchange(&mut self.device, PresenceAuthorization::Absent, fido) {
                 ApduExchange::Complete(response) => response,
                 ApduExchange::PresenceRequired(_) if authorize()? => {
-                    match self
-                        .device
-                        .exchange_apdu(raw, PresenceAuthorization::Granted)
-                    {
+                    match exchange(&mut self.device, PresenceAuthorization::Granted, fido) {
                         ApduExchange::Complete(response) => response,
                         ApduExchange::PresenceRequired(_) => {
                             return Err(io::Error::other(
@@ -369,14 +371,44 @@ mod tests {
     }
 
     #[test]
-    fn directs_usb_fido_clients_to_hid() {
+    fn routes_fido_over_the_smart_card_transport() {
         let mut card = Card::new(1);
-        assert_eq!(card.transmit(&select(&FIDO2_AID)), [0x6a, 0x82]);
+        assert_eq!(
+            card.transmit(&select(&FIDO2_AID)),
+            [b"U2F_V2".as_slice(), &[0x90, 0x00]].concat()
+        );
         assert_eq!(
             card.transmit(&select(&[0xa0, 0x00, 0x00, 0x06])),
-            [0x6a, 0x82]
+            [b"U2F_V2".as_slice(), &[0x90, 0x00]].concat()
         );
-        assert_eq!(card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04, 0]), [0x69, 0x99]);
+        let mut response = card.transmit(&[0x80, 0x10, 0, 0, 1, 0x04]);
+        assert_eq!(response.first(), Some(&0));
+        while response[response.len() - 2] == 0x61 {
+            response = card.transmit(&[0, 0xc0, 0, 0, 0]);
+        }
+        assert_eq!(&response[response.len() - 2..], &[0x90, 0x00]);
+    }
+
+    #[test]
+    fn runtime_fido_handler_replaces_the_embedded_fixture() {
+        let mut card = Card::new(1);
+        assert_eq!(
+            card.transmit(&select(&FIDO2_AID)),
+            [b"U2F_V2".as_slice(), &[0x90, 0x00]].concat()
+        );
+        let mut requests = Vec::new();
+        let response = card
+            .transmit_with_presence_and_fido(
+                &[0x80, 0x10, 0, 0, 2, 0xaa, 0xbb, 0],
+                || Ok(false),
+                &mut |request| {
+                    requests.push(request.to_vec());
+                    vec![0x2e]
+                },
+            )
+            .unwrap();
+        assert_eq!(requests, [vec![0xaa, 0xbb]]);
+        assert_eq!(response, [0x2e, 0x90, 0x00]);
     }
 
     #[test]
