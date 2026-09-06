@@ -4,9 +4,8 @@
 
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
 enumerate as a composite FIDO HID and CCID, YubiKey-compatible test device.
-HID carries FIDO/CTAP; CCID exposes YubiKey Management, PIV, YubiHSM Auth, and
-the Issuer Security Domain.
-The USB CCID reader deliberately rejects the FIDO AID.
+FIDO/CTAP is available through both HID and the FIDO2 CCID applet; CCID also
+exposes YubiKey Management, PIV, YubiHSM Auth, and the Issuer Security Domain.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -29,13 +28,13 @@ credential management, resident credentials, and `previewSign`.
 | --- | --- |
 | USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
-| CCID transport | Class `0x0b`, T=1, one inserted Management slot, bulk OUT/IN and interrupt IN |
+| CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | PIV | Persistent objects, PIN/PUK and management authentication, and RSA, NIST EC, Ed25519, and X25519 key operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
-| FIDO2 | CTAPHID/CBOR, CTAP 2.1, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
+| FIDO2 | Shared CTAP 2.1 authenticator over HID and CCID, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
 | Persistent state | Starts with factory applet identities; credentials, private keys, PIN changes, counters, and Security Domain keys and policy are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 

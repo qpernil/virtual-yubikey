@@ -598,6 +598,21 @@ struct PresenceCommand {
     protected: bool,
 }
 
+type FidoExchangeHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + 'a;
+
+struct FidoDispatch<'a> {
+    handler: Option<&'a mut FidoExchangeHandler<'a>>,
+}
+
+impl FidoDispatch<'_> {
+    fn exchange(&mut self, fallback: &mut FidoAuthenticator, request: &[u8]) -> Vec<u8> {
+        match self.handler.as_mut() {
+            Some(handler) => handler(request),
+            None => fallback.exchange(request),
+        }
+    }
+}
+
 impl VirtualYubiKey {
     pub fn new(profile: DeviceProfile) -> Self {
         Self::with_fido_configuration(profile, FidoConfiguration::default())
@@ -798,6 +813,32 @@ impl VirtualYubiKey {
     }
 
     pub fn exchange_apdu(&mut self, raw: &[u8], presence: PresenceAuthorization) -> ApduExchange {
+        self.exchange_apdu_inner(raw, presence, &mut FidoDispatch { handler: None })
+    }
+
+    /// Route decoded FIDO commands to a shared authenticator, retaining ISO
+    /// chaining, secure messaging and response framing in the logical device.
+    pub fn exchange_apdu_with_fido<'a>(
+        &mut self,
+        raw: &[u8],
+        presence: PresenceAuthorization,
+        handler: &'a mut FidoExchangeHandler<'a>,
+    ) -> ApduExchange {
+        self.exchange_apdu_inner(
+            raw,
+            presence,
+            &mut FidoDispatch {
+                handler: Some(handler),
+            },
+        )
+    }
+
+    fn exchange_apdu_inner(
+        &mut self,
+        raw: &[u8],
+        presence: PresenceAuthorization,
+        fido: &mut FidoDispatch<'_>,
+    ) -> ApduExchange {
         let command = match CommandApdu::decode(raw) {
             Ok(command) => command,
             Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
@@ -810,7 +851,12 @@ impl VirtualYubiKey {
             if pending.selected != self.selected || !pending.final_fragment.matches(&command) {
                 return ApduExchange::Complete(ResponseApdu::status(0x6985).encode());
             }
-            return self.dispatch_apdu(&pending.command.borrowed(), presence, pending.protected);
+            return self.dispatch_apdu(
+                &pending.command.borrowed(),
+                presence,
+                pending.protected,
+                fido,
+            );
         }
         self.presence_command = None;
 
@@ -859,7 +905,7 @@ impl VirtualYubiKey {
                 .upload_host_certificate(&command.borrowed(), &self.security_domain);
             return ApduExchange::Complete(response.encode());
         }
-        let result = self.dispatch_apdu(&command.borrowed(), presence, protected);
+        let result = self.dispatch_apdu(&command.borrowed(), presence, protected, fido);
         if matches!(result, ApduExchange::PresenceRequired(_)) {
             self.presence_command = Some(PresenceCommand {
                 selected: self.selected,
@@ -876,6 +922,7 @@ impl VirtualYubiKey {
         command: &CommandApdu<'_>,
         presence: PresenceAuthorization,
         protected: bool,
+        fido: &mut FidoDispatch<'_>,
     ) -> ApduExchange {
         let response = match self.selected {
             Some(Applet::IssuerSecurityDomain) => self
@@ -895,7 +942,7 @@ impl VirtualYubiKey {
                     return ApduExchange::PresenceRequired(policy);
                 }
             },
-            Some(Applet::Fido2) => self.fido2(command),
+            Some(Applet::Fido2) => self.fido2(command, fido),
             None => ResponseApdu::status(0x6999),
         };
         let response = if protected {
@@ -1022,12 +1069,12 @@ impl VirtualYubiKey {
             .unwrap_or_else(|| ResponseApdu::status(0x6a86))
     }
 
-    fn fido2(&mut self, command: &CommandApdu<'_>) -> ResponseApdu {
+    fn fido2(&mut self, command: &CommandApdu<'_>, fido: &mut FidoDispatch<'_>) -> ResponseApdu {
         if command.ins != INS_CTAP_CBOR || command.p2 != 0 {
             return ResponseApdu::status(0x6d00);
         }
 
-        let response = self.fido.exchange(command.data);
+        let response = fido.exchange(&mut self.fido, command.data);
         ResponseApdu::success(response)
     }
 
