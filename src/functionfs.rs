@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 #[cfg(target_os = "linux")]
 use std::{
     thread,
@@ -369,9 +369,26 @@ struct EndpointServices<'a> {
 struct HidRuntime {
     serial: u32,
     presence: crate::presence::Service,
-    operations: Arc<Mutex<()>>,
+    operations: Arc<FidoOperationCoordinator>,
     clock: crate::keepalive::Handle,
     lifecycle: Arc<EndpointLifecycle>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct FidoOperationCoordinator {
+    active: Mutex<()>,
+}
+
+#[cfg(target_os = "linux")]
+impl FidoOperationCoordinator {
+    fn try_begin(&self) -> io::Result<Option<MutexGuard<'_, ()>>> {
+        match self.active.try_lock() {
+            Ok(operation) => Ok(Some(operation)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Poisoned(_)) => Err(io::Error::other("FIDO operation lock poisoned")),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -478,7 +495,7 @@ impl Endpoints {
         let (notification_tx, notification_rx) = mpsc::sync_channel(1);
         let presence =
             crate::presence::Service::new(storage.touch_socket.clone(), display_activity.clone());
-        let fido_operations = Arc::new(Mutex::new(()));
+        let fido_operations = Arc::new(FidoOperationCoordinator::default());
 
         let notification_thread = thread::Builder::new()
             .name("ccid-notify".to_owned())
@@ -872,7 +889,7 @@ fn serve_ccid(
     mut input: File,
     ccid: CcidPersistenceHandle,
     fido: StatePersistenceHandle<FidoAuthenticator>,
-    fido_operations: Arc<Mutex<()>>,
+    fido_operations: Arc<FidoOperationCoordinator>,
     presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
     display_activity: crate::display::Activity,
@@ -1053,9 +1070,9 @@ fn serve_hid(
                                 request.len().saturating_sub(1)
                             ),
                         );
-                        let _operation = match operations.try_lock() {
-                            Ok(operation) => operation,
-                            Err(TryLockError::WouldBlock) => {
+                        let _operation = match operations.try_begin() {
+                            Ok(Some(operation)) => operation,
+                            Ok(None) => {
                                 diagnostics::log(
                                     Level::Info,
                                     "ctap2",
@@ -1064,9 +1081,8 @@ fn serve_hid(
                                 );
                                 return vec![0x06];
                             }
-                            Err(TryLockError::Poisoned(_)) => {
-                                command_error =
-                                    Some(io::Error::other("FIDO operation lock poisoned"));
+                            Err(error) => {
+                                command_error = Some(error);
                                 return vec![0x7f];
                             }
                         };
@@ -1259,14 +1275,14 @@ fn exchange_persistent_fido_with_keepalives(
 #[cfg(target_os = "linux")]
 fn exchange_ccid_fido(
     fido: &StatePersistenceHandle<FidoAuthenticator>,
-    operations: &Mutex<()>,
+    operations: &FidoOperationCoordinator,
     presence: &crate::presence::Service,
     request: &[u8],
 ) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
     let command = request.first().copied().unwrap_or_default();
-    let _operation = match operations.try_lock() {
-        Ok(operation) => operation,
-        Err(TryLockError::WouldBlock) => {
+    let _operation = match operations.try_begin()? {
+        Some(operation) => operation,
+        None => {
             diagnostics::log(
                 Level::Info,
                 "ctap2",
@@ -1274,9 +1290,6 @@ fn exchange_ccid_fido(
                 format_args!("command=0x{command:02x} transport=ccid"),
             );
             return Ok((vec![0x06], None));
-        }
-        Err(TryLockError::Poisoned(_)) => {
-            return Err(io::Error::other("FIDO operation lock poisoned"));
         }
     };
 
@@ -1724,4 +1737,19 @@ fn data_error(message: impl Into<String>) -> io::Error {
 #[cfg(target_os = "linux")]
 fn with_context(error: io::Error, operation: &str) -> io::Error {
     io::Error::new(error.kind(), format!("{operation}: {error}"))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fido_operations_are_exclusive_across_transports() {
+        let operations = FidoOperationCoordinator::default();
+        let hid = operations.try_begin().unwrap().unwrap();
+        assert!(operations.try_begin().unwrap().is_none());
+
+        drop(hid);
+        assert!(operations.try_begin().unwrap().is_some());
+    }
 }
