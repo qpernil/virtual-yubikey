@@ -375,6 +375,16 @@ struct HidRuntime {
 }
 
 #[cfg(target_os = "linux")]
+struct CcidRuntime {
+    fido: StatePersistenceHandle<FidoAuthenticator>,
+    fido_operations: Arc<FidoOperationCoordinator>,
+    presence: crate::presence::Service,
+    clock: crate::keepalive::Handle,
+    display_activity: crate::display::Activity,
+    lifecycle: Arc<EndpointLifecycle>,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct FidoOperationCoordinator {
     active: Mutex<()>,
@@ -531,17 +541,15 @@ impl Endpoints {
             let fido_operations = Arc::clone(&fido_operations);
             let lifecycle = Arc::clone(&lifecycle);
             move || {
-                if let Err(error) = serve_ccid(
-                    ccid_out,
-                    ccid_in,
-                    ccid,
+                let runtime = CcidRuntime {
                     fido,
                     fido_operations,
                     presence,
                     clock,
                     display_activity,
                     lifecycle,
-                ) {
+                };
+                if let Err(error) = serve_ccid(ccid_out, ccid_in, ccid, runtime) {
                     diagnostics::log(
                         Level::Info,
                         "ccid",
@@ -888,13 +896,16 @@ fn serve_ccid(
     mut output: File,
     mut input: File,
     ccid: CcidPersistenceHandle,
-    fido: StatePersistenceHandle<FidoAuthenticator>,
-    fido_operations: Arc<FidoOperationCoordinator>,
-    presence: crate::presence::Service,
-    clock: crate::keepalive::Handle,
-    display_activity: crate::display::Activity,
-    lifecycle: Arc<EndpointLifecycle>,
+    runtime: CcidRuntime,
 ) -> io::Result<()> {
+    let CcidRuntime {
+        fido,
+        fido_operations,
+        presence,
+        clock,
+        display_activity,
+        lifecycle,
+    } = runtime;
     let mut request = [0_u8; MAX_TRANSFER];
     let mut activation = 0;
     while let Some(next_activation) = lifecycle.wait_for_activation_after(activation) {
