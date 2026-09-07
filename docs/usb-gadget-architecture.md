@@ -623,7 +623,8 @@ Typical controller names are:
 | Raspberry Pi 5 | `1000480000.usb` |
 
 The supervisor reads every directory entry, sorts the names, and selects the
-first one. If `--udc NAME` is supplied, it instead requires that exact entry.
+first one. If the root-owned profile specifies `udc = "NAME"`, it instead
+requires that exact entry.
 It fails closed if no UDC is present. Binding consists of writing the selected
 name to:
 
@@ -633,7 +634,7 @@ name to:
 
 More than one UDC is unusual on a standard Pi. It can occur with virtual test
 drivers such as `dummy_hcd`, custom carrier hardware, an additional device
-controller, or a virtualized test environment. Use `--udc` when selection must
+controller, or a virtualized test environment. Set `udc` in the profile when selection must
 be deterministic in a multi-UDC system.
 
 ## Lifecycle and failure containment
