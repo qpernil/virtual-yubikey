@@ -391,16 +391,15 @@ impl SecureChannel {
             pending.data.extend_from_slice(command.data);
             return None;
         }
-        if let Some(mut pending) = self.chained_protected.take() {
-            if pending.cla == command.cla
-                && pending.ins == command.ins
-                && pending.p1 == command.p1
-                && pending.p2 == command.p2
-            {
-                pending.data.extend_from_slice(command.data);
-                pending.le = command.le;
-                return Some(pending);
-            }
+        if let Some(mut pending) = self.chained_protected.take()
+            && pending.cla == command.cla
+            && pending.ins == command.ins
+            && pending.p1 == command.p1
+            && pending.p2 == command.p2
+        {
+            pending.data.extend_from_slice(command.data);
+            pending.le = command.le;
+            return Some(pending);
         }
         Some(OwnedCommandApdu::from_command(command))
     }
@@ -519,32 +518,53 @@ mod tests {
         counter: u128,
     }
 
+    struct HostCommand<'a> {
+        cla: u8,
+        ins: u8,
+        p1: u8,
+        p2: u8,
+        data: &'a [u8],
+        le: Option<u8>,
+    }
+
+    impl<'a> HostCommand<'a> {
+        fn short(ins: u8, p2: u8, data: &'a [u8], le: u8) -> Self {
+            Self {
+                cla: 0,
+                ins,
+                p1: 0,
+                p2,
+                data,
+                le: Some(le),
+            }
+        }
+    }
+
+    type SecureMessagingCase = (&'static [u8], Applet, HostCommand<'static>);
+
     impl HostSession {
         fn exchange(
             &mut self,
             device: &mut VirtualYubiKey,
-            cla: u8,
-            ins: u8,
-            p1: u8,
-            p2: u8,
-            clear: &[u8],
-            le: Option<u8>,
+            command: &HostCommand<'_>,
         ) -> ResponseApdu {
             self.counter += 1;
-            let protected_cla = (cla & !0x0c) | 0x04;
-            let mut data = if clear.is_empty() {
+            let protected_cla = (command.cla & !0x0c) | 0x04;
+            let mut data = if command.data.is_empty() {
                 Vec::new()
             } else {
                 let iv = self.command_iv(false);
-                encrypt_aes_cbc(&self.s_enc, &iv, &pad_iso7816(clear)).unwrap()
+                encrypt_aes_cbc(&self.s_enc, &iv, &pad_iso7816(command.data)).unwrap()
             };
             let header = CommandApdu {
                 cla: protected_cla,
-                ins,
-                p1,
-                p2,
+                ins: command.ins,
+                p1: command.p1,
+                p2: command.p2,
                 data: &data,
-                le: le.map(|value| if value == 0 { 256 } else { u32::from(value) }),
+                le: command
+                    .le
+                    .map(|value| if value == 0 { 256 } else { u32::from(value) }),
                 extended: false,
             };
             let mut mac_input = self.chain.to_vec();
@@ -553,9 +573,15 @@ mod tests {
             let mac = aes_cmac(&self.s_mac, &mac_input).unwrap();
             self.chain = mac;
             data.extend_from_slice(&mac[..MAC_LENGTH]);
-            let mut raw = vec![protected_cla, ins, p1, p2, data.len() as u8];
+            let mut raw = vec![
+                protected_cla,
+                command.ins,
+                command.p1,
+                command.p2,
+                data.len() as u8,
+            ];
             raw.extend_from_slice(&data);
-            if let Some(le) = le {
+            if let Some(le) = command.le {
                 raw.push(le);
             }
             let response = send(device, &raw);
@@ -675,37 +701,39 @@ mod tests {
         let mut profile = DeviceProfile::yubikey_5_8_ccid(0x0102_0304);
         profile.applets.openpgp = true;
         let mut device = VirtualYubiKey::new(profile);
-        let cases: &[(&[u8], Applet, u8, u8, u8, u8, &[u8], Option<u8>)] = &[
+        let cases: &[SecureMessagingCase] = &[
             (
                 &MANAGEMENT_AID,
                 Applet::Management,
-                0,
-                0x1d,
-                0,
-                0,
-                &[],
-                Some(0),
+                HostCommand::short(0x1d, 0, &[], 0),
             ),
-            (&HSMAUTH_AID, Applet::HsmAuth, 0, 0x07, 0, 0, &[], Some(0)),
-            (&OPENPGP_AID, Applet::OpenPgp, 0, 0x84, 0, 0, &[], Some(8)),
-            (&PIV_AID, Applet::Piv, 0, 0xfd, 0, 0, &[], Some(0)),
-            (&FIDO2_AID, Applet::Fido2, 0, 0x10, 0, 0, &[0x04], Some(0)),
+            (
+                &HSMAUTH_AID,
+                Applet::HsmAuth,
+                HostCommand::short(0x07, 0, &[], 0),
+            ),
+            (
+                &OPENPGP_AID,
+                Applet::OpenPgp,
+                HostCommand::short(0x84, 0, &[], 8),
+            ),
+            (&PIV_AID, Applet::Piv, HostCommand::short(0xfd, 0, &[], 0)),
+            (
+                &FIDO2_AID,
+                Applet::Fido2,
+                HostCommand::short(0x10, 0, &[0x04], 0),
+            ),
             (
                 &ISSUER_SECURITY_DOMAIN_AID,
                 Applet::IssuerSecurityDomain,
-                0,
-                0xca,
-                0,
-                0xe0,
-                &[],
-                Some(0),
+                HostCommand::short(0xca, 0xe0, &[], 0),
             ),
         ];
-        for &(aid, applet, cla, ins, p1, p2, data, le) in cases {
+        for (aid, applet, command) in cases {
             assert_eq!(send(&mut device, &select(aid)).status, 0x9000);
-            assert_eq!(device.selected_applet(), Some(applet));
+            assert_eq!(device.selected_applet(), Some(*applet));
             let mut channel = establish_scp03(&mut device);
-            let response = channel.exchange(&mut device, cla, ins, p1, p2, data, le);
+            let response = channel.exchange(&mut device, command);
             assert_eq!(response.status, 0x9000, "{applet:?}");
             assert!(!response.data.is_empty(), "{applet:?}");
         }
@@ -726,7 +754,7 @@ mod tests {
         assert_eq!(send(&mut restored, &select(&PIV_AID)).status, 0x9000);
         let mut channel = establish_scp11b(&mut restored);
         assert_eq!(
-            channel.exchange(&mut restored, 0, 0xfd, 0, 0, &[], Some(0)),
+            channel.exchange(&mut restored, &HostCommand::short(0xfd, 0, &[], 0),),
             ResponseApdu::success(vec![5, 8, 0])
         );
     }
