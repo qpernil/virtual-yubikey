@@ -227,15 +227,15 @@ toolchain in the invoking user's home directory.
 sudo apt update
 sudo apt install --yes git build-essential rustup
 rustup set profile minimal
-rustup toolchain install 1.85.0
-rustup default 1.85.0
+rustup toolchain install 1.94.0
+rustup default 1.94.0
 
 rustup show active-toolchain
 rustc --version
 cargo --version
 ```
 
-Use the exact `1.85.0` toolchain rather than the moving `stable` channel so a
+Use the exact `1.94.0` toolchain rather than the moving `stable` channel so a
 later rustup update cannot silently change the compiler used with the checked-in
 `Cargo.lock`. Rustup automatically selects `aarch64-unknown-linux-gnu` on
 64-bit Raspberry Pi and ARM Ubuntu, and `x86_64-unknown-linux-gnu` on AMD64
@@ -361,9 +361,10 @@ files, and flushes pending state on USB ejection and worker shutdown.
 successful response is written. The files contain unencrypted test PIN and
 private-key material and must not be treated as secure hardware storage.
 
-Persistent authenticator state uses CBOR schema version 2. Unsupported or
-invalid state is a startup error and is never silently replaced; resetting to
-an empty authenticator is an explicit administrative action.
+FIDO and PIV persistent states use current CBOR schema version 4; supported
+older images are migrated when loaded. YubiHSM Auth state uses schema version 1.
+Unsupported or invalid state is a startup error and is never silently replaced;
+resetting an applet to empty state is an explicit administrative action.
 
 On worker exit, the still-running supervisor unbinds and removes the old gadget,
 then starts a completely fresh worker incarnation with fresh descriptors. A

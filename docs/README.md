@@ -9,6 +9,8 @@
   device and Linux USB transports.
 - [PIV standards and compatibility](piv-conformance.md) - current NIST
   baseline, YubiKey extensions, and explicit conformance gaps.
+- [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03
+  and SCP11 session behavior, compatibility, and security boundaries.
 - [Future storage model](future-storage-model.md) - proposed persistent-storage
   and cross-token key identity design.
 
