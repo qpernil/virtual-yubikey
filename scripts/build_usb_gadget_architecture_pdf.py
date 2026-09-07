@@ -455,7 +455,7 @@ def page_pi(story):
         "  1000480000.usb     # typical Pi 5 name",
         "",
         "supervisor: sort names -> choose first",
-        "override:   --udc EXACT_NAME",
+        'profile:    udc = "EXACT_NAME"',
     ]))
     story += [Spacer(1, 5 * mm), p("When can more than one UDC exist?", "h2")]
     for item in [
