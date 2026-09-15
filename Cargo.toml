@@ -32,3 +32,8 @@ toml = "0.9.12"
 
 # The USB binary deliberately calls Linux interfaces directly. Protocol and
 # emulator dependencies live in the transport-neutral core crate.
+
+[patch.crates-io]
+# Keep these paired: the vector storage API also requires the ML-KEM iterator changes.
+module-lattice = { git = "https://github.com/qpernil/KEMs.git", rev = "38545c295eac0c2bcccd4138084cc9dbde5f6009" }
+ml-kem = { git = "https://github.com/qpernil/KEMs.git", rev = "38545c295eac0c2bcccd4138084cc9dbde5f6009" }
