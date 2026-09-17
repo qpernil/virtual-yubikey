@@ -268,11 +268,18 @@ impl SecureChannel {
         let Some(host_ephemeral) = parse_scp11_request(command.data, parameter) else {
             return ResponseApdu::status(0x6a80);
         };
-        let Ok(card_ephemeral) = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256))
-        else {
-            return ResponseApdu::status(0x6f00);
+        let card_ephemeral = if parameter == 3 {
+            None
+        } else {
+            let Ok(key) = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)) else {
+                return ResponseApdu::status(0x6f00);
+            };
+            Some(key)
         };
-        let Ok(ka1) = derive_with_signing_key(&card_ephemeral, host_ephemeral) else {
+        let Ok(ka1) = derive_with_signing_key(
+            card_ephemeral.as_ref().unwrap_or(card_static),
+            host_ephemeral,
+        ) else {
             return ResponseApdu::status(0x6a80);
         };
         let Ok(ka2) = derive_with_signing_key(
@@ -287,14 +294,19 @@ impl SecureChannel {
         let Ok(keys) = x963_kdf_sha256(&agreement, &SCP11_SHARED_INFO, 80) else {
             return ResponseApdu::status(0x6f00);
         };
-        let SoftwarePublicKey::Ec {
-            curve: EcCurve::P256,
-            uncompressed: card_ephemeral_point,
-        } = card_ephemeral.public_key()
-        else {
-            return ResponseApdu::status(0x6f00);
+        let card_ephemeral_tlv = match card_ephemeral {
+            Some(key) => {
+                let SoftwarePublicKey::Ec {
+                    curve: EcCurve::P256,
+                    uncompressed: point,
+                } = key.public_key()
+                else {
+                    return ResponseApdu::status(0x6f00);
+                };
+                encode_tlv(&[0x5f, 0x49], &point)
+            }
+            None => Vec::new(),
         };
-        let card_ephemeral_tlv = encode_tlv(&[0x5f, 0x49], &card_ephemeral_point);
         let mut receipt_input = Vec::with_capacity(command.data.len() + card_ephemeral_tlv.len());
         receipt_input.extend_from_slice(command.data);
         receipt_input.extend_from_slice(&card_ephemeral_tlv);

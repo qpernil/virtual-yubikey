@@ -39,6 +39,18 @@ factory-provisioned. A valid uploaded certificate is not sufficient authority:
 the first protected command must prove possession of the corresponding private
 key through a valid C-MAC.
 
+The SCP11 variants use the GlobalPlatform agreement pairs:
+
+| Variant | First agreement | Second agreement | Card response and forward secrecy |
+| --- | --- | --- | --- |
+| SCP11a | Host ephemeral × card ephemeral | Host static × card static | Returns a fresh card ephemeral point and receipt; provides forward secrecy when both ephemeral keys are erased. |
+| SCP11b | Host ephemeral × card ephemeral | Host ephemeral × card static | Returns a fresh card ephemeral point and receipt; provides forward secrecy but does not authenticate the host. |
+| SCP11c | Host ephemeral × card static | Host static × card static | Returns only the receipt; supports offline scripts and does not provide forward secrecy because the card has no ephemeral key. |
+
+All variants derive the receipt key and AES working keys with X9.63 SHA-256 over
+the two agreements. SCP11a/b authenticate the encoded request followed by the
+card ephemeral TLV. SCP11c authenticates the encoded request alone.
+
 ## Security Domain administration
 
 Select the Issuer Security Domain and establish SCP03 or SCP11a/c before
