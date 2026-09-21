@@ -68,6 +68,11 @@ struct Session {
 }
 
 impl SecureChannel {
+    pub(crate) fn begins_establishment(command: &CommandApdu<'_>) -> bool {
+        (command.cla == 0x80 && command.ins == 0x50)
+            || (command.cla == 0x80 && matches!(command.ins, 0x88 | 0x82))
+    }
+
     pub(crate) fn reset(&mut self) {
         self.pending_scp03 = None;
         self.host_certificates = None;
@@ -80,13 +85,13 @@ impl SecureChannel {
         command: &CommandApdu<'_>,
         security_domain: &crate::security_domain::SecurityDomain,
     ) -> ChannelOutcome {
-        if command.cla == 0x80 && command.ins == 0x50 {
+        if Self::begins_establishment(command) && command.ins == 0x50 {
             return ChannelOutcome::Handled(self.initialize_update(command, security_domain));
         }
         if command.cla == 0x84 && command.ins == 0x82 {
             return ChannelOutcome::Handled(self.external_authenticate(command));
         }
-        if command.cla == 0x80 && matches!(command.ins, 0x88 | 0x82) {
+        if Self::begins_establishment(command) {
             return ChannelOutcome::Handled(self.scp11_authenticate(command, security_domain));
         }
 
@@ -764,7 +769,19 @@ mod tests {
                 .unwrap();
         assert_eq!(restored.scp11b_public_key(), public);
         assert_eq!(send(&mut restored, &select(&PIV_AID)).status, 0x9000);
+        assert_eq!(
+            send(
+                &mut restored,
+                &[
+                    0, 0x20, 0, 0x80, 8, b'1', b'2', b'3', b'4', b'5', b'6', 0xff, 0xff
+                ],
+            )
+            .status,
+            0x9000
+        );
         let mut channel = establish_scp11b(&mut restored);
+        assert_eq!(restored.selected_applet(), Some(Applet::Piv));
+        assert_eq!(send(&mut restored, &[0, 0x20, 0, 0x80, 0]).status, 0x63c3);
         assert_eq!(
             channel.exchange(&mut restored, &HostCommand::short(0xfd, 0, &[], 0),),
             ResponseApdu::success(vec![5, 8, 0])

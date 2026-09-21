@@ -526,6 +526,7 @@ pub(crate) struct PivApplet {
     pin: PinReference,
     puk: PinReference,
     pin_verified: bool,
+    pin_always_armed: bool,
     management_algorithm: ManagementAlgorithm,
     management_key: Zeroizing<Vec<u8>>,
     management_touch_policy: u8,
@@ -546,6 +547,7 @@ impl fmt::Debug for PivApplet {
             .field("pin_retries", &self.pin.retries)
             .field("puk_retries", &self.puk.retries)
             .field("pin_verified", &self.pin_verified)
+            .field("pin_always_armed", &self.pin_always_armed)
             .field("management_algorithm", &self.management_algorithm)
             .field("management_touch_policy", &self.management_touch_policy)
             .field("management_authenticated", &self.management_authenticated)
@@ -577,6 +579,7 @@ impl PivApplet {
             pin: PinReference::new(FACTORY_PIN),
             puk: PinReference::new(FACTORY_PUK),
             pin_verified: false,
+            pin_always_armed: false,
             management_algorithm: ManagementAlgorithm::Aes192,
             management_key: Zeroizing::new(FACTORY_MANAGEMENT_KEY.to_vec()),
             management_touch_policy: TOUCH_POLICY_NEVER,
@@ -591,6 +594,7 @@ impl PivApplet {
 
     pub(crate) fn reset_connection(&mut self) {
         self.pin_verified = false;
+        self.pin_always_armed = false;
         self.management_authenticated = false;
         self.management_challenge = None;
     }
@@ -772,6 +776,7 @@ impl PivApplet {
                 maximum_retries: puk_maximum,
             },
             pin_verified: false,
+            pin_always_armed: false,
             management_algorithm,
             management_key,
             management_touch_policy,
@@ -922,6 +927,7 @@ impl PivApplet {
                 if command.p1 == 0xff && command.p2 == REFERENCE_PIN && command.data.is_empty() =>
             {
                 self.pin_verified = false;
+                self.pin_always_armed = false;
                 ResponseApdu::success(Vec::new())
             }
             INS_CHANGE_REFERENCE if command.p1 == 0 => {
@@ -1288,6 +1294,7 @@ impl PivApplet {
         self.puk.retries = puk_retries;
         self.puk.maximum_retries = puk_retries;
         self.pin_verified = false;
+        self.pin_always_armed = false;
         self.persistent_change = true;
         ResponseApdu::success(Vec::new())
     }
@@ -1325,11 +1332,13 @@ impl PivApplet {
         match self.pin.verify(supplied) {
             Ok(()) => {
                 self.pin_verified = true;
+                self.pin_always_armed = true;
                 self.persistent_change = true;
                 ResponseApdu::success(Vec::new())
             }
             Err(status) => {
                 self.pin_verified = false;
+                self.pin_always_armed = false;
                 if supplied.len() == 8 {
                     self.persistent_change = true;
                 }
@@ -1374,6 +1383,7 @@ impl PivApplet {
             Ok(()) => {
                 self.pin.replace(new_pin);
                 self.pin_verified = false;
+                self.pin_always_armed = false;
                 self.persistent_change = true;
                 ResponseApdu::success(Vec::new())
             }
@@ -1501,11 +1511,16 @@ impl PivApplet {
         if command.p1 != key.algorithm as u8 {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS).into();
         }
-        if key.pin_policy >= 4 {
-            return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
-        }
-        if key.pin_policy != PIN_POLICY_NEVER && !self.pin_verified {
-            return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
+        match key.pin_policy {
+            PIN_POLICY_NEVER => {}
+            PIN_POLICY_ONCE if !self.pin_verified => {
+                return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
+            }
+            PIN_POLICY_ALWAYS if !self.pin_always_armed => {
+                return ResponseApdu::status(STATUS_SECURITY_NOT_SATISFIED).into();
+            }
+            PIN_POLICY_ONCE | PIN_POLICY_ALWAYS => {}
+            _ => return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into(),
         }
         let Some(dynamic) = decode_exact_tlv(command.data, 0x7c) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -1607,9 +1622,7 @@ impl PivApplet {
         } else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
-        if key.pin_policy == PIN_POLICY_ALWAYS {
-            self.pin_verified = false;
-        }
+        self.pin_always_armed = false;
         ResponseApdu::success(encode_tlv(0x7c, &encode_tlv(0x82, &result))).into()
     }
 
@@ -2717,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn signs_ecc_digests_and_enforces_the_always_pin_policy() {
+    fn ordinary_pin_verification_arms_one_always_policy_operation() {
         let mut piv = PivApplet::new(13, [5, 8, 0]);
         authenticate_management(
             &mut piv,
@@ -2771,6 +2784,13 @@ mod tests {
                 &decode_ecdsa_der(signature, 32),
             )
             .unwrap();
+        assert!(piv.pin_verified);
+        assert!(!piv.pin_always_armed);
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &[]))
+                .status,
+            0x9000
+        );
         assert_eq!(
             piv.transmit(&command(
                 INS_AUTHENTICATE,
@@ -2781,6 +2801,105 @@ mod tests {
             .status,
             STATUS_SECURITY_NOT_SATISFIED
         );
+    }
+
+    #[test]
+    fn private_key_use_consumes_always_authorization_without_clearing_once_login() {
+        let mut piv = PivApplet::new(22, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        for (slot, pin_policy) in [
+            (0x82, PIN_POLICY_ONCE),
+            (0x83, PIN_POLICY_ALWAYS),
+            (0x84, PIN_POLICY_NEVER),
+        ] {
+            let template = [
+                encode_tlv(0x80, &[PivAlgorithm::EccP256 as u8]),
+                encode_tlv(0xaa, &[pin_policy]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    slot,
+                    &encode_tlv(0xac, &template),
+                ))
+                .status,
+                0x9000
+            );
+        }
+
+        let request = signing_request(&[0x24; 32]);
+        let once = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x82,
+            &request,
+        );
+        let always = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x83,
+            &request,
+        );
+        let never = command(
+            INS_AUTHENTICATE,
+            PivAlgorithm::EccP256 as u8,
+            0x84,
+            &request,
+        );
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        assert!(piv.pin_always_armed);
+        assert_eq!(
+            piv.transmit(&command(INS_GET_VERSION, 0, 0, &[])).status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GET_METADATA, 0, 0x83, &[]))
+                .status,
+            0x9000
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_ATTEST, 0x83, 0, &[])).status,
+            0x9000
+        );
+        assert!(piv.pin_always_armed);
+
+        assert_eq!(piv.transmit(&once).status, 0x9000);
+        assert!(piv.pin_verified);
+        assert!(!piv.pin_always_armed);
+        assert_eq!(piv.transmit(&once).status, 0x9000);
+        assert_eq!(piv.transmit(&always).status, STATUS_SECURITY_NOT_SATISFIED);
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        assert_eq!(piv.transmit(&always).status, 0x9000);
+        assert!(piv.pin_verified);
+        assert!(!piv.pin_always_armed);
+        assert_eq!(piv.transmit(&once).status, 0x9000);
+        assert_eq!(piv.transmit(&always).status, STATUS_SECURITY_NOT_SATISFIED);
+
+        assert_eq!(
+            piv.transmit(&command(INS_VERIFY, 0, REFERENCE_PIN, &FACTORY_PIN))
+                .status,
+            0x9000
+        );
+        assert_eq!(piv.transmit(&never).status, 0x9000);
+        assert!(piv.pin_verified);
+        assert!(!piv.pin_always_armed);
+        assert_eq!(piv.transmit(&always).status, STATUS_SECURITY_NOT_SATISFIED);
     }
 
     #[test]

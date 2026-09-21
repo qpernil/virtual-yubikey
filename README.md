@@ -411,7 +411,15 @@ omitted, touch defaults to `Never`; PIN defaults to `Always` for 9C, `Never` for
 9E, and `Once` for the other private-key slots. An explicit zero-valued PIN or
 touch policy is invalid rather than another encoding of omission. PIN `Once` remains
 verified for the card session with no timer; `VERIFY FF/80` clears that PIN
-state without clearing management-key authentication.
+state without clearing management-key authentication. Successful PIN verification
+also arms one `Always` authorization. Non-key APDUs preserve it, while the next
+successful private-key operation in any slot consumes it without clearing the
+ordinary `Once` state, matching YubiKey 5.7.4 behavior.
+
+PIV PIN and management-key authentication are connection-scoped. Reselecting
+the PIV AID keeps that authentication, while selecting another applet or
+beginning SCP03 or SCP11 channel establishment clears it. Secure-channel setup
+does not change the selected AID.
 
 The management-key touch policy is likewise stored, reported by metadata,
 persisted, and enforced when management authentication begins, but it supports

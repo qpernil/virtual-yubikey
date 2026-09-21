@@ -6,6 +6,11 @@ applet implementation. A host selects an applet AID, establishes the secure
 channel against that selected applet, and then sends authenticated and encrypted
 APDUs through the common dispatcher.
 
+Beginning SCP03 or SCP11 channel establishment starts a fresh connection to the
+selected applet. It clears that applet's connection-scoped authentication while
+leaving its AID selected. By contrast, reselecting the same AID preserves its
+authentication state, matching validated YubiKey behavior.
+
 The layer supports C-MAC, C-ENC, R-MAC, and R-ENC, protected-command
 segmentation, and response chaining. It covers the Issuer Security Domain,
 Management, PIV, YubiHSM Auth, FIDO2-over-CCID, and the selectable OpenPGP
