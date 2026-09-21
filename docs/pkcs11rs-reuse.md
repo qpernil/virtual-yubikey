@@ -7,7 +7,9 @@ gadget must not depend on the complete PKCS #11 provider. The transport-neutral
 `virtual-yubikey-core` crate therefore lives in this repository. Reusable
 device behavior is implemented in the core and exercised over both standalone
 and USB paths. `pkcs11rs` consumes `virtual-yubikey-core` through its optional
-`mock-yubikey` feature.
+`embedded-virtual-yubikey` feature. That feature adds the embedded device to
+the provider without disabling its ordinary software, platform, USB, HTTP, or
+PC/SC slots and discovery.
 
 Protocol-neutral software key operations live in the independent sibling
 `software-key-core` repository. Both this workspace and `pkcs11rs` consume the
@@ -42,7 +44,7 @@ and secure-messaging coverage.
 | `software-key-core::arkg` | ARKG-P256 public derivation, authenticated tickets, and matching private-scalar derivation; previewSign retains COSE/CBOR and device seed state |
 | `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
 | `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
-| `pkcs11rs` mock adapter | Implements the provider's internal connector trait by calling the core directly in tests |
+| `pkcs11rs` embedded adapter | Implements the provider's internal connector trait by calling the core directly in tests |
 
 ```text
 virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
@@ -73,7 +75,7 @@ select only the combinations advertised by their COSE algorithms.
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
    PIV, and YubiHSM Auth through CCID.
-4. Keep the `pkcs11rs` mock adapter and its full-cycle PKCS #11 tests running
+4. Keep the `pkcs11rs` embedded adapter and its full-cycle PKCS #11 tests running
    against the core as applet coverage expands.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
    routed through the neutral APIs, retaining PKCS-specific mechanism parsing.

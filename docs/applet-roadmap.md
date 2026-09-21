@@ -5,7 +5,7 @@
 `virtual-yubikey-core` is the transport-neutral implementation of the logical
 device. It owns the firmware profile, ISO 7816 routing, installed applets, and
 persistent applet state. The USB worker exposes that core through FIDO HID and
-CCID, while `pkcs11rs` consumes the same core through its `mock-yubikey`
+CCID, while `pkcs11rs` consumes the same core through its `embedded-virtual-yubikey`
 adapter.
 
 The core currently implements:

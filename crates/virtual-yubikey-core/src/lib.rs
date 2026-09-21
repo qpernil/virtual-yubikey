@@ -805,6 +805,15 @@ impl VirtualYubiKey {
         self.fido.reset_connection();
     }
 
+    fn reset_applet_connection(&mut self, applet: Applet) {
+        match applet {
+            Applet::Piv => self.piv.reset_connection(),
+            Applet::HsmAuth => self.hsmauth.reset_connection(),
+            Applet::Fido2 => self.fido.reset_connection(),
+            Applet::IssuerSecurityDomain | Applet::Management | Applet::OpenPgp => {}
+        }
+    }
+
     pub fn transmit(&mut self, raw: &[u8]) -> Vec<u8> {
         match self.exchange_apdu(raw, PresenceAuthorization::Absent) {
             ApduExchange::Complete(response) => response,
@@ -890,6 +899,14 @@ impl VirtualYubiKey {
                 return ApduExchange::Complete(ResponseApdu::status(status).encode());
             }
         };
+        // YubiKey channel establishment leaves the selected AID in place but
+        // starts a fresh applet connection, clearing connection-scoped login
+        // state. A plain SELECT of the same AID deliberately does not do this.
+        if secure_channel::SecureChannel::begins_establishment(&assembled.borrowed()) {
+            if let Some(selected) = self.selected {
+                self.reset_applet_connection(selected);
+            }
+        }
         let (command, protected) = match self
             .secure_channel
             .process(&assembled.borrowed(), &self.security_domain)
@@ -1040,9 +1057,16 @@ impl VirtualYubiKey {
         self.pending_response.clear();
         self.secure_channel.reset();
         let Some(applet) = self.applet_for_aid(aid) else {
-            self.selected = None;
+            if let Some(selected) = self.selected.take() {
+                self.reset_applet_connection(selected);
+            }
             return ResponseApdu::status(0x6a82);
         };
+        if self.selected != Some(applet) {
+            if let Some(selected) = self.selected {
+                self.reset_applet_connection(selected);
+            }
+        }
         self.selected = Some(applet);
         match applet {
             Applet::IssuerSecurityDomain => ResponseApdu::success(Vec::new()),
@@ -1339,6 +1363,42 @@ mod tests {
             device.transmit(&[0x80, INS_CTAP_CBOR, 0, 0, 1, 4]),
             [0x69, 0x99]
         );
+    }
+
+    #[test]
+    fn piv_login_survives_reselect_but_not_an_applet_switch() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        let verify = short_apdu(0, 0x20, 0, 0x80, b"123456\xff\xff", None);
+        let query = short_apdu(0, 0x20, 0, 0x80, &[], None);
+
+        assert_eq!(&device.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
+        assert_eq!(device.transmit(&verify), [0x90, 0]);
+
+        assert_eq!(&device.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
+        assert_eq!(device.transmit(&query), [0x90, 0]);
+
+        assert_eq!(
+            device.transmit(&select(&HSMAUTH_AID)),
+            [0x79, 3, 5, 8, 0, 0x90, 0]
+        );
+        assert_eq!(&device.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
+        assert_eq!(device.transmit(&query), [0x63, 0xc3]);
+    }
+
+    #[test]
+    fn scp_setup_clears_piv_login_without_deselecting_piv() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(1));
+        let verify = short_apdu(0, 0x20, 0, 0x80, b"123456\xff\xff", None);
+        let query = short_apdu(0, 0x20, 0, 0x80, &[], None);
+
+        assert_eq!(&device.transmit(&select(&PIV_AID))[..2], &[0x61, 0x11]);
+        assert_eq!(device.transmit(&verify), [0x90, 0]);
+
+        let initialize_update = short_apdu(0x80, 0x50, 0xff, 0, &[0; 8], None);
+        let response = device.transmit(&initialize_update);
+        assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+        assert_eq!(device.selected_applet(), Some(Applet::Piv));
+        assert_eq!(device.transmit(&query), [0x63, 0xc3]);
     }
 
     #[test]
