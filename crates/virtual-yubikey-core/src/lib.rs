@@ -902,10 +902,10 @@ impl VirtualYubiKey {
         // YubiKey channel establishment leaves the selected AID in place but
         // starts a fresh applet connection, clearing connection-scoped login
         // state. A plain SELECT of the same AID deliberately does not do this.
-        if secure_channel::SecureChannel::begins_establishment(&assembled.borrowed()) {
-            if let Some(selected) = self.selected {
-                self.reset_applet_connection(selected);
-            }
+        if secure_channel::SecureChannel::begins_establishment(&assembled.borrowed())
+            && let Some(selected) = self.selected
+        {
+            self.reset_applet_connection(selected);
         }
         let (command, protected) = match self
             .secure_channel
@@ -1062,10 +1062,10 @@ impl VirtualYubiKey {
             }
             return ResponseApdu::status(0x6a82);
         };
-        if self.selected != Some(applet) {
-            if let Some(selected) = self.selected {
-                self.reset_applet_connection(selected);
-            }
+        if self.selected != Some(applet)
+            && let Some(selected) = self.selected
+        {
+            self.reset_applet_connection(selected);
         }
         self.selected = Some(applet);
         match applet {
