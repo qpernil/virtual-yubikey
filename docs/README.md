@@ -6,7 +6,8 @@
 - [Applet direction](applet-roadmap.md) - current protocol boundaries and next
   applet work.
 - [PKCS #11 reuse](pkcs11rs-reuse.md) - boundary between the reusable logical
-  device and Linux USB transports.
+  device, Linux USB transports, and the process-local FIDO2 integration
+  fixture.
 - [PIV standards and compatibility](piv-conformance.md) - current NIST
   baseline, YubiKey extensions, and explicit conformance gaps.
 - [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03

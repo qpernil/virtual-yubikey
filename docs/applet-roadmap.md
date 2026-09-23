@@ -5,8 +5,9 @@
 `virtual-yubikey-core` is the transport-neutral implementation of the logical
 device. It owns the firmware profile, ISO 7816 routing, installed applets, and
 persistent applet state. The USB worker exposes that core through FIDO HID and
-CCID, while `pkcs11rs` consumes the same core through its `embedded-virtual-yubikey`
-adapter.
+CCID. The `pkcs11rs` `embedded-virtual-yubikey` test feature calls the same
+core through the FIDO2 smart-card APDU interface and publishes one process-local
+FIDO2 slot; it does not expose the other applets as embedded PKCS #11 slots.
 
 The core currently implements:
 
@@ -42,7 +43,8 @@ core. Each feature is then exercised at three boundaries:
 
 1. direct protocol vectors against `virtual-yubikey-core`;
 2. FIDO HID or CCID transport tests in the USB worker; and
-3. full-cycle PKCS #11 tests through the `pkcs11rs` adapter where applicable.
+3. full-cycle FIDO2 PKCS #11 tests through the `pkcs11rs` fixture, plus direct
+   host-side protocol tests for the other applets where applicable.
 
 Capability advertisements derive from installed handlers so the Management
 application and USB profile do not promise unavailable behavior. Shared
