@@ -6,10 +6,17 @@ Keep `virtual-yubikey` and `pkcs11rs` as separate Git repositories. The Pi
 gadget must not depend on the complete PKCS #11 provider. The transport-neutral
 `virtual-yubikey-core` crate therefore lives in this repository. Reusable
 device behavior is implemented in the core and exercised over both standalone
-and USB paths. `pkcs11rs` consumes `virtual-yubikey-core` through its optional
-`embedded-virtual-yubikey` feature. That feature adds the embedded device to
-the provider without disabling its ordinary software, platform, USB, HTTP, or
-PC/SC slots and discovery.
+and USB paths. `pkcs11rs` uses `virtual-yubikey-core` through its optional
+`embedded-virtual-yubikey` integration-test feature. The fixture selects the
+FIDO2 applet through its smart-card APDU interface and exposes one process-local
+FIDO2 PKCS #11 slot. It does not publish the core's PIV, YubiHSM Auth,
+Management, or Issuer Security Domain applets as PKCS #11 slots and is not a
+persistent virtual-device deployment model.
+
+CI builds the fixture with `--no-default-features`, compiling out native USB,
+HID, and PC/SC support while retaining the general configuration parser. A
+feature-enabled build without that flag remains additive for deliberate manual
+testing, but it is not the supported fixture boundary.
 
 Protocol-neutral software key operations live in the independent sibling
 `software-key-core` repository. Both this workspace and `pkcs11rs` consume the
@@ -44,10 +51,10 @@ and secure-messaging coverage.
 | `software-key-core::arkg` | ARKG-P256 public derivation, authenticated tickets, and matching private-scalar derivation; previewSign retains COSE/CBOR and device seed state |
 | `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
 | `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
-| `pkcs11rs` embedded adapter | Implements the provider's internal connector trait by calling the core directly in tests |
+| `pkcs11rs` embedded FIDO2 fixture | Implements the provider's internal connector trait, selects FIDO2 over APDUs, and exercises exported PKCS #11 entry points without a USB or PC/SC transport |
 
 ```text
-virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs test adapter
+virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs FIDO2 test fixture
                                       |
                                       v
                                  software-key-core <---- pkcs11rs software backend
@@ -75,8 +82,9 @@ select only the combinations advertised by their COSE algorithms.
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
    PIV, and YubiHSM Auth through CCID.
-4. Keep the `pkcs11rs` embedded adapter and its full-cycle PKCS #11 tests running
-   against the core as applet coverage expands.
+4. Keep the `pkcs11rs` embedded FIDO2 fixture and its full-cycle PKCS #11 tests
+   running against the core as FIDO coverage expands. Other applets remain
+   available to direct protocol tests without being exposed as embedded slots.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
    routed through the neutral APIs, retaining PKCS-specific mechanism parsing.
 6. Use the documented sibling checkout set and workspace path dependencies
