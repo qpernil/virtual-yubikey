@@ -34,8 +34,35 @@ Yubico-defined commands.
 | Issued-card contents | Reset produces an unprovisioned YubiKey-compatible applet. It does not synthesize the mandatory CCC, CHUID, PIV Authentication certificate, Card Authentication certificate, fingerprint, facial-image, or Security Object contents of an issued PIV Card. Provisioning software may store these objects. |
 | Authentication profiles | The local PIV PIN, PUK, and Administration Key are implemented. Global PIN, pairing-code verification, and on-card biometric comparison are not implemented. |
 | PIV secure messaging | The NIST PIV Secure Messaging key (`04`), cipher suites, SM-AUTH, and Virtual Contact Interface are not implemented. The separate YubiKey/GlobalPlatform boundary implements SCP03 and SCP11a/b/c secure messaging around the selected PIV applet and the other selectable CCID applets. |
-| Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are retained as YubiKey compatibility algorithms rather than current SP 800-78-5 PIV key profiles. |
-| YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, and Ed25519 keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the documented firmware, serial, PIN/touch-policy, and form-factor extensions. F9 itself may use RSA, EC, or Ed25519. PIV reset preserves both factory objects. |
+| Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are YubiKey compatibility algorithms; ML-DSA-44/65/87 and ML-KEM-512/768/1024 use the private extension below. |
+| YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the firmware, serial, PIN/touch-policy, and form-factor extensions. F9 may use RSA, EC, Ed25519, or ML-DSA; changing it refreshes the matching self-signed `5FFF01` certificate. PIV reset preserves the key and certificate. |
+
+## Private post-quantum PIV extension
+
+The [NIST PIV PQC working draft](https://pages.nist.gov/piv-standards/pqc-overview/)
+identifies ML-DSA signing and ML-KEM decapsulation through `GENERAL AUTHENTICATE`,
+but has not assigned interoperable PIV algorithm IDs or public-key TLVs. This
+applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
+
+| P1 algorithm ID | Key type | Operation |
+| --- | --- | --- |
+| `E2`, `E3`, `E4` | ML-DSA-44, -65, -87 | Sign the complete message supplied in `7C { 82 empty, 81 message }`; return the raw signature in `7C { 82 signature }`. |
+| `E5`, `E6`, `E7` | ML-KEM-512, -768, -1024 | Decapsulate the exact-length ciphertext supplied in `7C { 82 empty, 81 ciphertext }`; return the 32-byte shared secret in `7C { 82 secret }`. |
+
+`GENERATE ASYMMETRIC KEY PAIR` and key metadata use tag `87` inside the public
+key template `7F49` for the raw ML-DSA or ML-KEM public key. This tag is also
+private and may change if PIV standardization assigns a different format.
+PIN and touch policies apply to both operations. Key generation and persistent
+restore are supported; the PIV private-key import command does not yet accept
+PQC keys. Attestation certificates use the standard X.509 ML-DSA and ML-KEM
+SubjectPublicKeyInfo encodings, and an ML-DSA F9 key signs certificates with a
+standard ML-DSA signature algorithm identifier. An ML-KEM key can be an
+attested subject, not an attestation issuer.
+
+ML-DSA signatures and PQC certificates can exceed one 3,072-byte CCID message.
+The applet uses the shared APDU response and CCID chaining paths; consumers
+must reassemble the complete response. The self-signed F9 certificate is a
+virtual trust anchor, not a Yubico or production hardware attestation chain.
 
 ## Deliberate YubiKey compatibility behavior
 

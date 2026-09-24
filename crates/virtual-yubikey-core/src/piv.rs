@@ -8,6 +8,7 @@ use const_oid::ObjectIdentifier;
 use der::{Decode, asn1::OctetString};
 use software_key_core::{
     certificate_signing::{CertificateSigner, subject_public_key_info},
+    post_quantum::{MlDsaParameterSet, MlKemParameterSet, MlKemPrivateKey, ml_kem_public_key_info},
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
     software_signing::{
@@ -162,6 +163,12 @@ enum PivAlgorithm {
     Rsa4096 = 0x16,
     Ed25519 = 0xe0,
     X25519 = 0xe1,
+    MlDsa44 = 0xe2,
+    MlDsa65 = 0xe3,
+    MlDsa87 = 0xe4,
+    MlKem512 = 0xe5,
+    MlKem768 = 0xe6,
+    MlKem1024 = 0xe7,
 }
 
 impl PivAlgorithm {
@@ -175,6 +182,30 @@ impl PivAlgorithm {
             0x16 => Some(Self::Rsa4096),
             0xe0 => Some(Self::Ed25519),
             0xe1 => Some(Self::X25519),
+            0xe2 => Some(Self::MlDsa44),
+            0xe3 => Some(Self::MlDsa65),
+            0xe4 => Some(Self::MlDsa87),
+            0xe5 => Some(Self::MlKem512),
+            0xe6 => Some(Self::MlKem768),
+            0xe7 => Some(Self::MlKem1024),
+            _ => None,
+        }
+    }
+
+    const fn ml_dsa_parameter_set(self) -> Option<MlDsaParameterSet> {
+        match self {
+            Self::MlDsa44 => Some(MlDsaParameterSet::MlDsa44),
+            Self::MlDsa65 => Some(MlDsaParameterSet::MlDsa65),
+            Self::MlDsa87 => Some(MlDsaParameterSet::MlDsa87),
+            _ => None,
+        }
+    }
+
+    const fn ml_kem_parameter_set(self) -> Option<MlKemParameterSet> {
+        match self {
+            Self::MlKem512 => Some(MlKemParameterSet::MlKem512),
+            Self::MlKem768 => Some(MlKemParameterSet::MlKem768),
+            Self::MlKem1024 => Some(MlKemParameterSet::MlKem1024),
             _ => None,
         }
     }
@@ -187,7 +218,10 @@ impl PivAlgorithm {
             Self::EccP256 => Some(SignatureScheme::EcdsaP256Sha256),
             Self::EccP384 => Some(SignatureScheme::EcdsaP384Sha384),
             Self::Ed25519 => Some(SignatureScheme::Ed25519),
-            Self::X25519 => None,
+            Self::MlDsa44 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44)),
+            Self::MlDsa65 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65)),
+            Self::MlDsa87 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa87)),
+            Self::X25519 | Self::MlKem512 | Self::MlKem768 | Self::MlKem1024 => None,
         }
     }
 
@@ -200,7 +234,10 @@ impl PivAlgorithm {
             Self::EccP256 => Some(KeyKind::Ec(EcCurve::P256)),
             Self::EccP384 => Some(KeyKind::Ec(EcCurve::P384)),
             Self::Ed25519 => Some(KeyKind::Edwards(EdwardsCurve::Ed25519)),
-            Self::X25519 => None,
+            Self::MlDsa44 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa44)),
+            Self::MlDsa65 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa65)),
+            Self::MlDsa87 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa87)),
+            Self::X25519 | Self::MlKem512 | Self::MlKem768 | Self::MlKem1024 => None,
         }
     }
 
@@ -209,7 +246,14 @@ impl PivAlgorithm {
             Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => None,
             Self::EccP256 => Some(EcCurve::P256),
             Self::EccP384 => Some(EcCurve::P384),
-            Self::Ed25519 | Self::X25519 => None,
+            Self::Ed25519
+            | Self::X25519
+            | Self::MlDsa44
+            | Self::MlDsa65
+            | Self::MlDsa87
+            | Self::MlKem512
+            | Self::MlKem768
+            | Self::MlKem1024 => None,
         }
     }
 
@@ -219,7 +263,16 @@ impl PivAlgorithm {
             Self::Rsa2048 => Some(2_048),
             Self::Rsa3072 => Some(3_072),
             Self::Rsa4096 => Some(4_096),
-            Self::EccP256 | Self::EccP384 | Self::Ed25519 | Self::X25519 => None,
+            Self::EccP256
+            | Self::EccP384
+            | Self::Ed25519
+            | Self::X25519
+            | Self::MlDsa44
+            | Self::MlDsa65
+            | Self::MlDsa87
+            | Self::MlKem512
+            | Self::MlKem768
+            | Self::MlKem1024 => None,
         }
     }
 
@@ -232,6 +285,10 @@ impl PivAlgorithm {
             Self::EccP256 => 32,
             Self::EccP384 => 48,
             Self::Ed25519 | Self::X25519 => 32,
+            Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => 0,
+            Self::MlKem512 => 768,
+            Self::MlKem768 => 1_088,
+            Self::MlKem1024 => 1_568,
         }
     }
 
@@ -241,10 +298,16 @@ impl PivAlgorithm {
             Self::EccP256 | Self::EccP384 => Some(0x06),
             Self::Ed25519 => Some(0x07),
             Self::X25519 => Some(0x08),
+            Self::MlDsa44
+            | Self::MlDsa65
+            | Self::MlDsa87
+            | Self::MlKem512
+            | Self::MlKem768
+            | Self::MlKem1024 => None,
         }
     }
 
-    const fn supports_attestation(self) -> bool {
+    const fn can_sign_attestations(self) -> bool {
         matches!(
             self,
             Self::Rsa1024
@@ -254,7 +317,15 @@ impl PivAlgorithm {
                 | Self::EccP256
                 | Self::EccP384
                 | Self::Ed25519
+                | Self::MlDsa44
+                | Self::MlDsa65
+                | Self::MlDsa87
         )
+    }
+
+    const fn attestable_subject(self) -> bool {
+        self.can_sign_attestations()
+            || matches!(self, Self::MlKem512 | Self::MlKem768 | Self::MlKem1024)
     }
 }
 
@@ -266,6 +337,10 @@ fn generate_private_key(algorithm: PivAlgorithm) -> Result<SoftwarePrivateKey, (
     } else if algorithm == PivAlgorithm::X25519 {
         SoftwareMontgomeryKey::generate(MontgomeryCurve::X25519)
             .map(SoftwarePrivateKey::Montgomery)
+            .map_err(|_| ())
+    } else if let Some(parameter_set) = algorithm.ml_kem_parameter_set() {
+        MlKemPrivateKey::generate(parameter_set)
+            .map(SoftwarePrivateKey::MlKem)
             .map_err(|_| ())
     } else {
         Err(())
@@ -284,6 +359,10 @@ fn private_key_from_serialized(
         SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, serialized)
             .map(SoftwarePrivateKey::Montgomery)
             .map_err(|_| ())
+    } else if let Some(parameter_set) = algorithm.ml_kem_parameter_set() {
+        MlKemPrivateKey::from_seed_slice(parameter_set, serialized)
+            .map(SoftwarePrivateKey::MlKem)
+            .map_err(|_| ())
     } else {
         Err(())
     }
@@ -293,7 +372,7 @@ fn serialized_private_key(key: &SoftwarePrivateKey) -> Result<Zeroizing<Vec<u8>>
     match key {
         SoftwarePrivateKey::Signing(key) => key.serialized().map_err(|_| ()),
         SoftwarePrivateKey::Montgomery(key) => Ok(key.serialized()),
-        SoftwarePrivateKey::MlKem(_) => Err(()),
+        SoftwarePrivateKey::MlKem(key) => key.seed().ok_or(()),
     }
 }
 
@@ -330,6 +409,12 @@ impl PivKey {
                     curve: EdwardsCurve::Ed25519,
                     public_key,
                 } if self.algorithm == PivAlgorithm::Ed25519 => Ok(encode_tlv(0x86, &public_key)),
+                SoftwarePublicKey::MlDsa {
+                    parameter_set,
+                    public_key,
+                } if self.algorithm.ml_dsa_parameter_set() == Some(parameter_set) => {
+                    Ok(encode_tlv(0x87, &public_key))
+                }
                 SoftwarePublicKey::Rsa { modulus, exponent }
                     if self.algorithm.rsa_bits() == Some(modulus.len() * 8) =>
                 {
@@ -343,6 +428,11 @@ impl PivKey {
             {
                 Ok(encode_tlv(0x86, &key.public_key()))
             }
+            SoftwarePrivateKey::MlKem(key)
+                if self.algorithm.ml_kem_parameter_set() == Some(key.parameter_set()) =>
+            {
+                Ok(encode_tlv(0x87, &key.public_key()))
+            }
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
@@ -351,6 +441,15 @@ impl PivKey {
         match &self.private_key {
             SoftwarePrivateKey::Signing(key) => {
                 subject_public_key_info(&key.public_key()).map_err(|_| ())
+            }
+            SoftwarePrivateKey::MlKem(key)
+                if self.algorithm.ml_kem_parameter_set() == Some(key.parameter_set()) =>
+            {
+                SubjectPublicKeyInfoOwned::from_der(
+                    &ml_kem_public_key_info(key.parameter_set(), &key.public_key())
+                        .map_err(|_| ())?,
+                )
+                .map_err(|_| ())
             }
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
@@ -433,6 +532,37 @@ fn certificate_object(certificate: &[u8]) -> Vec<u8> {
     .concat()
 }
 
+fn self_signed_attestation_certificate(
+    serial: u32,
+    firmware: [u8; 3],
+    form_factor: u8,
+    key: &PivKey,
+) -> Result<Vec<u8>, ()> {
+    let signer = CertificateSigner::from_key(key.signing_key()?).map_err(|_| ())?;
+    let subject = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation CA {serial}"))
+        .map_err(|_| ())?;
+    let profile = AttestationProfile {
+        subject: subject.clone(),
+        issuer: subject,
+        extensions: device_attestation_extensions(firmware, serial, form_factor)?,
+    };
+    let validity = Validity::new(
+        Time::from_str("2026-01-01T00:00:00Z").map_err(|_| ())?,
+        Time::from_str("2049-12-31T23:59:59Z").map_err(|_| ())?,
+    );
+    let mut certificate_serial = [0_u8; 8];
+    certificate_serial[..4].copy_from_slice(&serial.to_be_bytes());
+    certificate_serial[4] = SLOT_ATTESTATION;
+    certificate_serial[7] = 1;
+    certificate::build(
+        profile,
+        &certificate_serial,
+        validity,
+        key.subject_public_key_info()?,
+        &signer,
+    )
+}
+
 fn factory_attestation_bundle(
     serial: u32,
     firmware: [u8; 3],
@@ -450,29 +580,7 @@ fn factory_attestation_bundle(
         origin: ORIGIN_GENERATED,
         private_key: SoftwarePrivateKey::Signing(private_key),
     };
-    let signer = CertificateSigner::from_key(key.signing_key()?).map_err(|_| ())?;
-    let subject = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation CA {serial}"))
-        .map_err(|_| ())?;
-    let profile = AttestationProfile {
-        subject: subject.clone(),
-        issuer: subject,
-        extensions: device_attestation_extensions(firmware, serial, form_factor)?,
-    };
-    let validity = Validity::new(
-        Time::from_str("2026-01-01T00:00:00Z").map_err(|_| ())?,
-        Time::from_str("2049-12-31T23:59:59Z").map_err(|_| ())?,
-    );
-    let mut certificate_serial = [0_u8; 8];
-    certificate_serial[..4].copy_from_slice(&serial.to_be_bytes());
-    certificate_serial[4] = SLOT_ATTESTATION;
-    certificate_serial[7] = 1;
-    let certificate = certificate::build(
-        profile,
-        &certificate_serial,
-        validity,
-        key.subject_public_key_info()?,
-        &signer,
-    )?;
+    let certificate = self_signed_attestation_certificate(serial, firmware, form_factor, &key)?;
     Ok((key, certificate_object(&certificate)))
 }
 
@@ -972,7 +1080,7 @@ impl PivApplet {
         let Some(target) = self.keys.get(&slot) else {
             return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
         };
-        if target.origin != ORIGIN_GENERATED || !target.algorithm.supports_attestation() {
+        if target.origin != ORIGIN_GENERATED || !target.algorithm.attestable_subject() {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
         let Some(attestation_key) = self.keys.get(&SLOT_ATTESTATION) else {
@@ -993,6 +1101,12 @@ impl PivApplet {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
         let tbs = attestation_certificate.tbs_certificate();
+        let Ok(attestation_public_key) = attestation_key.subject_public_key_info() else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        if tbs.subject_public_key_info() != &attestation_public_key {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
         let Ok(subject) = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation {slot:02x}"))
         else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
@@ -1129,7 +1243,7 @@ impl PivApplet {
         else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
-        if slot == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+        if slot == SLOT_ATTESTATION && !algorithm.can_sign_attestations() {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
         let Some(pin_policy) = optional_policy(&fields, 0xaa, default_pin_policy(slot)) else {
@@ -1151,7 +1265,24 @@ impl PivApplet {
         let Ok(public) = key.public_template() else {
             return ResponseApdu::status(STATUS_INTERNAL_ERROR);
         };
+        let attestation_certificate = if slot == SLOT_ATTESTATION {
+            match self_signed_attestation_certificate(
+                self.serial,
+                self.firmware,
+                self.form_factor,
+                &key,
+            ) {
+                Ok(certificate) => Some(certificate_object(&certificate)),
+                Err(()) => return ResponseApdu::status(STATUS_INTERNAL_ERROR),
+            }
+        } else {
+            None
+        };
         self.keys.insert(slot, key);
+        if let Some(certificate) = attestation_certificate {
+            self.objects
+                .insert(OBJECT_ATTESTATION_CERTIFICATE, certificate);
+        }
         self.persistent_change = true;
         ResponseApdu::success(encode_tlv(0x7f49, &public))
     }
@@ -1166,7 +1297,7 @@ impl PivApplet {
         let Some(algorithm) = PivAlgorithm::from_id(command.p1) else {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         };
-        if command.p2 == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+        if command.p2 == SLOT_ATTESTATION && !algorithm.can_sign_attestations() {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
         let Some(fields) = decode_tlvs(command.data) else {
@@ -1250,7 +1381,24 @@ impl PivApplet {
         if key.public_template().is_err() {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         }
+        let attestation_certificate = if command.p2 == SLOT_ATTESTATION {
+            match self_signed_attestation_certificate(
+                self.serial,
+                self.firmware,
+                self.form_factor,
+                &key,
+            ) {
+                Ok(certificate) => Some(certificate_object(&certificate)),
+                Err(()) => return ResponseApdu::status(STATUS_INTERNAL_ERROR),
+            }
+        } else {
+            None
+        };
         self.keys.insert(command.p2, key);
+        if let Some(certificate) = attestation_certificate {
+            self.objects
+                .insert(OBJECT_ATTESTATION_CERTIFICATE, certificate);
+        }
         self.persistent_change = true;
         ResponseApdu::success(Vec::new())
     }
@@ -1265,19 +1413,35 @@ impl PivApplet {
         if command.p1 != 0xff && !valid_key_slot(command.p1) {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS);
         }
-        if command.p1 == SLOT_ATTESTATION
-            && self
-                .keys
-                .get(&command.p2)
-                .is_some_and(|key| !key.algorithm.supports_attestation())
-        {
-            return ResponseApdu::status(STATUS_INCORRECT_DATA);
-        }
-        let Some(key) = self.keys.remove(&command.p2) else {
+        let Some(source_key) = self.keys.get(&command.p2) else {
             return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
         };
+        if command.p1 == SLOT_ATTESTATION && !source_key.algorithm.can_sign_attestations() {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        }
+        let attestation_certificate = if command.p1 == SLOT_ATTESTATION {
+            match self_signed_attestation_certificate(
+                self.serial,
+                self.firmware,
+                self.form_factor,
+                source_key,
+            ) {
+                Ok(certificate) => Some(certificate_object(&certificate)),
+                Err(()) => return ResponseApdu::status(STATUS_INTERNAL_ERROR),
+            }
+        } else {
+            None
+        };
+        let key = self.keys.remove(&command.p2).unwrap();
         if command.p1 != 0xff {
             self.keys.insert(command.p1, key);
+        }
+        if command.p2 == SLOT_ATTESTATION && command.p1 != SLOT_ATTESTATION {
+            self.objects.remove(&OBJECT_ATTESTATION_CERTIFICATE);
+        }
+        if let Some(certificate) = attestation_certificate {
+            self.objects
+                .insert(OBJECT_ATTESTATION_CERTIFICATE, certificate);
         }
         self.persistent_change = true;
         ResponseApdu::success(Vec::new())
@@ -1550,16 +1714,22 @@ impl PivApplet {
         {
             return PivExchange::PresenceRequired(policy);
         }
-        let result = if let Some(digest) = unique_field(&fields, 0x81) {
+        let result = if let Some(input) = unique_field(&fields, 0x81) {
             let invalid_length = match key.algorithm {
                 PivAlgorithm::Rsa1024
                 | PivAlgorithm::Rsa2048
                 | PivAlgorithm::Rsa3072
-                | PivAlgorithm::Rsa4096 => digest.len() != key.algorithm.input_length(),
+                | PivAlgorithm::Rsa4096 => input.len() != key.algorithm.input_length(),
                 PivAlgorithm::EccP256 | PivAlgorithm::EccP384 => {
-                    digest.is_empty() || digest.len() > key.algorithm.input_length()
+                    input.is_empty() || input.len() > key.algorithm.input_length()
                 }
-                PivAlgorithm::Ed25519 => false,
+                PivAlgorithm::Ed25519
+                | PivAlgorithm::MlDsa44
+                | PivAlgorithm::MlDsa65
+                | PivAlgorithm::MlDsa87 => false,
+                PivAlgorithm::MlKem512 | PivAlgorithm::MlKem768 | PivAlgorithm::MlKem1024 => {
+                    input.len() != key.algorithm.input_length()
+                }
                 PivAlgorithm::X25519 => {
                     return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 }
@@ -1567,46 +1737,67 @@ impl PivApplet {
             if invalid_length {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
-            let SoftwarePrivateKey::Signing(private_key) = &key.private_key else {
-                return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
-            };
-            let signature = if key.algorithm.rsa_bits().is_some() {
-                private_key
-                    .sign_rsa_raw(digest)
-                    .map(|signature| signature.into_bytes())
-            } else if key.algorithm == PivAlgorithm::Ed25519 {
-                private_key
-                    .sign_message(SignatureScheme::Ed25519, digest)
-                    .map(|signature| signature.into_bytes())
-            } else {
-                let Some(algorithm) = key.algorithm.signing_algorithm() else {
+            if key.algorithm.ml_kem_parameter_set().is_some() {
+                let SoftwarePrivateKey::MlKem(private_key) = &key.private_key else {
                     return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 };
-                private_key
-                    .sign_prehash(algorithm, digest)
-                    .map(|signature| signature.into_bytes())
-            };
-            let Ok(signature) = signature else {
-                return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
-            };
-            if key.algorithm.rsa_bits().is_some() || key.algorithm == PivAlgorithm::Ed25519 {
-                signature
+                let Ok(shared_secret) = private_key.decapsulate(input) else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                };
+                shared_secret.to_vec()
             } else {
-                let Some(signature) = encode_ecdsa_der(&signature) else {
+                let SoftwarePrivateKey::Signing(private_key) = &key.private_key else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                };
+                let signature = if key.algorithm.rsa_bits().is_some() {
+                    private_key
+                        .sign_rsa_raw(input)
+                        .map(|signature| signature.into_bytes())
+                } else if key.algorithm == PivAlgorithm::Ed25519
+                    || key.algorithm.ml_dsa_parameter_set().is_some()
+                {
+                    let Some(algorithm) = key.algorithm.signing_algorithm() else {
+                        return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                    };
+                    private_key
+                        .sign_message(algorithm, input)
+                        .map(|signature| signature.into_bytes())
+                } else {
+                    let Some(algorithm) = key.algorithm.signing_algorithm() else {
+                        return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                    };
+                    private_key
+                        .sign_prehash(algorithm, input)
+                        .map(|signature| signature.into_bytes())
+                };
+                let Ok(signature) = signature else {
                     return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
                 };
-                signature
+                if key.algorithm.rsa_bits().is_some()
+                    || key.algorithm == PivAlgorithm::Ed25519
+                    || key.algorithm.ml_dsa_parameter_set().is_some()
+                {
+                    signature
+                } else {
+                    let Some(signature) = encode_ecdsa_der(&signature) else {
+                        return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
+                    };
+                    signature
+                }
             }
         } else if let Some(peer_public_key) = unique_field(&fields, 0x85) {
+            if !matches!(
+                key.algorithm,
+                PivAlgorithm::EccP256 | PivAlgorithm::EccP384 | PivAlgorithm::X25519
+            ) {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+            }
             let expected_length = if key.algorithm == PivAlgorithm::X25519 {
                 32
             } else {
                 key.algorithm.input_length() * 2 + 1
             };
-            if key.algorithm.rsa_bits().is_some()
-                || key.algorithm == PivAlgorithm::Ed25519
-                || peer_public_key.len() != expected_length
-            {
+            if peer_public_key.len() != expected_length {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
             let shared_secret = match &key.private_key {
@@ -1763,7 +1954,7 @@ fn decode_persistent_keys(
                 .map_err(|_| "persistent PIV key has an invalid algorithm")?,
         )
         .ok_or("persistent PIV key algorithm is unsupported")?;
-        if slot == SLOT_ATTESTATION && !algorithm.supports_attestation() {
+        if slot == SLOT_ATTESTATION && !algorithm.can_sign_attestations() {
             return Err("persistent PIV attestation key algorithm is unsupported");
         }
         let pin_policy = decoder
@@ -2025,6 +2216,7 @@ fn push_tlv(output: &mut Vec<u8>, tag: u32, value: &[u8]) {
 mod tests {
     use super::*;
     use der::Encode;
+    use software_key_core::post_quantum::ml_kem_encapsulate;
 
     fn command(ins: u8, p1: u8, p2: u8, data: &[u8]) -> CommandApdu<'_> {
         CommandApdu {
@@ -2394,16 +2586,25 @@ mod tests {
                 unreachable!()
             };
             let public_key = signing_key.public_key();
-            piv.keys.insert(
-                SLOT_ATTESTATION,
-                PivKey {
-                    algorithm,
-                    pin_policy: PIN_POLICY_NEVER,
-                    touch_policy: TOUCH_POLICY_NEVER,
-                    origin: ORIGIN_IMPORTED,
-                    private_key: SoftwarePrivateKey::Signing(signing_key),
-                },
+            let key = PivKey {
+                algorithm,
+                pin_policy: PIN_POLICY_NEVER,
+                touch_policy: TOUCH_POLICY_NEVER,
+                origin: ORIGIN_IMPORTED,
+                private_key: SoftwarePrivateKey::Signing(signing_key),
+            };
+            let issuer_certificate = self_signed_attestation_certificate(
+                piv.serial,
+                piv.firmware,
+                piv.form_factor,
+                &key,
+            )
+            .unwrap();
+            piv.objects.insert(
+                OBJECT_ATTESTATION_CERTIFICATE,
+                certificate_object(&issuer_certificate),
             );
+            piv.keys.insert(SLOT_ATTESTATION, key);
             let response = piv.transmit(&command(INS_ATTEST, 0x9a, 0, &[]));
             assert_eq!(response.status, 0x9000);
             let certificate = x509_cert::Certificate::from_der(&response.data).unwrap();
@@ -3197,6 +3398,344 @@ mod tests {
             decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82,).unwrap(),
             expected.as_slice()
         );
+    }
+
+    #[test]
+    fn generates_persists_signs_and_attests_ml_dsa_keys() {
+        for (algorithm, parameter_set) in [
+            (PivAlgorithm::MlDsa44, MlDsaParameterSet::MlDsa44),
+            (PivAlgorithm::MlDsa65, MlDsaParameterSet::MlDsa65),
+            (PivAlgorithm::MlDsa87, MlDsaParameterSet::MlDsa87),
+        ] {
+            let mut piv = PivApplet::new(20, [5, 8, 0]);
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            let generate = encode_tlv(
+                0xac,
+                &[
+                    encode_tlv(0x80, &[algorithm as u8]),
+                    encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+                ]
+                .concat(),
+            );
+            let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9e, &generate));
+            assert_eq!(response.status, 0x9000);
+            let public =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7f49).unwrap(), 0x87).unwrap();
+            assert_eq!(public.len(), parameter_set.public_key_length());
+
+            let message = b"PIV ML-DSA signs a message, not a prehash";
+            let request = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, message)].concat(),
+            );
+            let response =
+                piv.transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9e, &request));
+            assert_eq!(response.status, 0x9000);
+            let signature =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+            assert_eq!(signature.len(), parameter_set.signature_length());
+            let SoftwarePrivateKey::Signing(key) = &piv.keys[&0x9e].private_key else {
+                unreachable!();
+            };
+            key.public_key()
+                .verify_message(SignatureScheme::MlDsa(parameter_set), message, signature)
+                .unwrap();
+
+            let attestation = piv.transmit(&command(INS_ATTEST, 0x9e, 0, &[]));
+            assert_eq!(attestation.status, 0x9000);
+            let attestation = x509_cert::Certificate::from_der(&attestation.data).unwrap();
+            assert_eq!(
+                attestation.tbs_certificate().subject_public_key_info(),
+                &piv.keys[&0x9e].subject_public_key_info().unwrap()
+            );
+            verify_certificate_signature(
+                &attestation,
+                &piv.keys[&SLOT_ATTESTATION]
+                    .signing_key()
+                    .unwrap()
+                    .public_key(),
+                SignatureScheme::EcdsaP256Sha256,
+                Some(32),
+            );
+
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(20, [5, 8, 0], &encoded).unwrap();
+            let metadata = restored.transmit(&command(INS_GET_METADATA, 0, 0x9e, &[]));
+            let fields = decode_tlvs(&metadata.data).unwrap();
+            assert_eq!(unique_field(&fields, 0x01), Some(&[algorithm as u8][..]));
+            assert_eq!(
+                decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x87),
+                Some(public)
+            );
+            assert_eq!(
+                restored
+                    .transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9e, &request))
+                    .status,
+                0x9000
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_IMPORT_KEY,
+                    algorithm as u8,
+                    0x82,
+                    &encode_tlv(0x09, &[0; 32])
+                ))
+                .status,
+                STATUS_INCORRECT_DATA
+            );
+        }
+    }
+
+    #[test]
+    fn generates_persists_decapsulates_and_attests_ml_kem_keys() {
+        for (algorithm, parameter_set, public_key_oid) in [
+            (
+                PivAlgorithm::MlKem512,
+                MlKemParameterSet::MlKem512,
+                "2.16.840.1.101.3.4.4.1",
+            ),
+            (
+                PivAlgorithm::MlKem768,
+                MlKemParameterSet::MlKem768,
+                "2.16.840.1.101.3.4.4.2",
+            ),
+            (
+                PivAlgorithm::MlKem1024,
+                MlKemParameterSet::MlKem1024,
+                "2.16.840.1.101.3.4.4.3",
+            ),
+        ] {
+            let mut piv = PivApplet::new(21, [5, 8, 0]);
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            let generate = encode_tlv(
+                0xac,
+                &[
+                    encode_tlv(0x80, &[algorithm as u8]),
+                    encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+                ]
+                .concat(),
+            );
+            let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9d, &generate));
+            assert_eq!(response.status, 0x9000);
+            let public =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7f49).unwrap(), 0x87).unwrap();
+            assert_eq!(public.len(), parameter_set.public_key_length());
+            let (ciphertext, expected) = ml_kem_encapsulate(parameter_set, public).unwrap();
+            let request = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext)].concat(),
+            );
+            let response =
+                piv.transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9d, &request));
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82),
+                Some(expected.as_slice())
+            );
+            let malformed = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext[1..])].concat(),
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_AUTHENTICATE,
+                    algorithm as u8,
+                    0x9d,
+                    &malformed
+                ))
+                .status,
+                STATUS_WRONG_LENGTH
+            );
+            let attestation = piv.transmit(&command(INS_ATTEST, 0x9d, 0, &[]));
+            assert_eq!(attestation.status, 0x9000);
+            let attestation = x509_cert::Certificate::from_der(&attestation.data).unwrap();
+            assert_eq!(
+                attestation
+                    .tbs_certificate()
+                    .subject_public_key_info()
+                    .algorithm
+                    .oid
+                    .to_string(),
+                public_key_oid
+            );
+            assert_eq!(
+                attestation.tbs_certificate().subject_public_key_info(),
+                &piv.keys[&0x9d].subject_public_key_info().unwrap()
+            );
+            verify_certificate_signature(
+                &attestation,
+                &piv.keys[&SLOT_ATTESTATION]
+                    .signing_key()
+                    .unwrap()
+                    .public_key(),
+                SignatureScheme::EcdsaP256Sha256,
+                Some(32),
+            );
+
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(21, [5, 8, 0], &encoded).unwrap();
+            let response =
+                restored.transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9d, &request));
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82),
+                Some(expected.as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn generated_ml_dsa_f9_keys_and_certificates_sign_pq_attestations() {
+        for (algorithm, parameter_set) in [
+            (PivAlgorithm::MlDsa44, MlDsaParameterSet::MlDsa44),
+            (PivAlgorithm::MlDsa65, MlDsaParameterSet::MlDsa65),
+            (PivAlgorithm::MlDsa87, MlDsaParameterSet::MlDsa87),
+        ] {
+            let mut piv = PivApplet::new(22, [5, 8, 0]);
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            let factory_certificate = piv.objects[&OBJECT_ATTESTATION_CERTIFICATE].clone();
+            let generate =
+                |algorithm: PivAlgorithm| encode_tlv(0xac, &encode_tlv(0x80, &[algorithm as u8]));
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    SLOT_ATTESTATION,
+                    &generate(PivAlgorithm::MlKem512)
+                ))
+                .status,
+                STATUS_INCORRECT_DATA
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    0x9d,
+                    &generate(PivAlgorithm::MlKem512)
+                ))
+                .status,
+                0x9000
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_GENERATE_ASYMMETRIC,
+                    0,
+                    SLOT_ATTESTATION,
+                    &generate(algorithm)
+                ))
+                .status,
+                0x9000
+            );
+            let issuer_key = piv.keys[&SLOT_ATTESTATION]
+                .signing_key()
+                .unwrap()
+                .public_key();
+            let issuer = x509_cert::Certificate::from_der(
+                certificate_der(&piv.objects[&OBJECT_ATTESTATION_CERTIFICATE]).unwrap(),
+            )
+            .unwrap();
+            assert!(issuer.to_der().unwrap().len() > 3_072);
+            assert_eq!(
+                issuer.tbs_certificate().subject_public_key_info(),
+                &piv.keys[&SLOT_ATTESTATION]
+                    .subject_public_key_info()
+                    .unwrap()
+            );
+            verify_certificate_signature(
+                &issuer,
+                &issuer_key,
+                SignatureScheme::MlDsa(parameter_set),
+                None,
+            );
+
+            let response = piv.transmit(&command(INS_ATTEST, 0x9d, 0, &[]));
+            assert_eq!(response.status, 0x9000);
+            assert!(response.data.len() > 3_072);
+            let leaf = x509_cert::Certificate::from_der(&response.data).unwrap();
+            assert_eq!(
+                leaf.signature_algorithm().oid,
+                issuer.signature_algorithm().oid
+            );
+            assert_eq!(
+                leaf.tbs_certificate().subject_public_key_info(),
+                &piv.keys[&0x9d].subject_public_key_info().unwrap()
+            );
+            verify_certificate_signature(
+                &leaf,
+                &issuer_key,
+                SignatureScheme::MlDsa(parameter_set),
+                None,
+            );
+
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(22, [5, 8, 0], &encoded).unwrap();
+            assert_eq!(
+                restored.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+                0x9000
+            );
+            restored
+                .objects
+                .insert(OBJECT_ATTESTATION_CERTIFICATE, factory_certificate);
+            assert_eq!(
+                restored.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+                STATUS_INCORRECT_DATA
+            );
+        }
+    }
+
+    #[test]
+    fn large_pq_attestation_supports_extended_le_and_get_response() {
+        let mut piv = PivApplet::new(23, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        for (slot, algorithm) in [
+            (0x9d, PivAlgorithm::MlKem1024),
+            (SLOT_ATTESTATION, PivAlgorithm::MlDsa87),
+        ] {
+            let generate = encode_tlv(0xac, &encode_tlv(0x80, &[algorithm as u8]));
+            assert_eq!(
+                piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, slot, &generate))
+                    .status,
+                0x9000
+            );
+        }
+        let mut device = crate::VirtualYubiKey::new(crate::DeviceProfile::yubikey_5_8_ccid(23));
+        device.piv = piv;
+        device.selected = Some(crate::Applet::Piv);
+
+        let complete = device.transmit(&[0, INS_ATTEST, 0x9d, 0, 0, 0, 0]);
+        assert!(complete.len() > 3_072);
+        assert_eq!(&complete[complete.len() - 2..], &[0x90, 0x00]);
+        x509_cert::Certificate::from_der(&complete[..complete.len() - 2]).unwrap();
+
+        let mut reassembled = Vec::new();
+        let mut chunk = device.transmit(&[0, INS_ATTEST, 0x9d, 0, 0]);
+        loop {
+            let status = &chunk[chunk.len() - 2..];
+            reassembled.extend_from_slice(&chunk[..chunk.len() - 2]);
+            if status == [0x90, 0x00] {
+                break;
+            }
+            assert_eq!(status[0], 0x61);
+            chunk = device.transmit(&[0, crate::INS_GET_RESPONSE, 0, 0, 0]);
+        }
+        x509_cert::Certificate::from_der(&reassembled).unwrap();
+        assert_eq!(reassembled.len() + 2, complete.len());
     }
 
     #[test]
