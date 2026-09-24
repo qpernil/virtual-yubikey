@@ -56,6 +56,7 @@ const INS_IMPORT_KEY: u8 = 0xfe;
 const INS_SET_RETRIES: u8 = 0xfa;
 const INS_RESET: u8 = 0xfb;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
+const IMPORT_TAG_PQ_SEED: u32 = 0x09;
 
 const REFERENCE_PIN: u8 = 0x80;
 const REFERENCE_PUK: u8 = 0x81;
@@ -303,7 +304,7 @@ impl PivAlgorithm {
             | Self::MlDsa87
             | Self::MlKem512
             | Self::MlKem768
-            | Self::MlKem1024 => None,
+            | Self::MlKem1024 => Some(IMPORT_TAG_PQ_SEED),
         }
     }
 
@@ -1353,7 +1354,7 @@ impl PivApplet {
                 || fields.len() > 3
                 || fields
                     .iter()
-                    .any(|(tag, _)| !matches!(*tag, 0x06..=0x08 | 0xaa | 0xab))
+                    .any(|(tag, _)| !matches!(*tag, 0x06..=0x09 | 0xaa | 0xab))
             {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             }
@@ -1362,7 +1363,7 @@ impl PivApplet {
             };
             if fields
                 .iter()
-                .any(|(tag, _)| matches!(*tag, 0x06..=0x08) && *tag != import_tag)
+                .any(|(tag, _)| matches!(*tag, 0x06..=0x09) && *tag != import_tag)
             {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
             }
@@ -3477,14 +3478,117 @@ mod tests {
                     .status,
                 0x9000
             );
+        }
+    }
+
+    #[test]
+    fn imports_ml_dsa_seeds_with_generated_key_attestation_boundary() {
+        for (algorithm, parameter_set) in [
+            (PivAlgorithm::MlDsa44, MlDsaParameterSet::MlDsa44),
+            (PivAlgorithm::MlDsa65, MlDsaParameterSet::MlDsa65),
+            (PivAlgorithm::MlDsa87, MlDsaParameterSet::MlDsa87),
+        ] {
+            let mut piv = PivApplet::new(24, [5, 8, 0]);
+            let seed = [algorithm as u8; 32];
+            let request = [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9e, &request))
+                    .status,
+                STATUS_SECURITY_NOT_SATISFIED
+            );
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            for invalid in [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &seed[..31]),
+                encode_tlv(IMPORT_TAG_PQ_SEED, &[algorithm as u8; 33]),
+                encode_tlv(0x08, &seed),
+                [
+                    encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                    encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                ]
+                .concat(),
+            ] {
+                assert_eq!(
+                    piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9e, &invalid))
+                        .status,
+                    STATUS_INCORRECT_DATA
+                );
+                assert!(!piv.keys.contains_key(&0x9e));
+            }
+            assert_eq!(
+                piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9e, &request))
+                    .status,
+                0x9000
+            );
+            let expected =
+                SoftwareSigningKey::from_serialized_for_kind(KeyKind::MlDsa(parameter_set), &seed)
+                    .unwrap()
+                    .public_key();
+            let SoftwarePublicKey::MlDsa { public_key, .. } = &expected else {
+                unreachable!();
+            };
+            let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9e, &[]));
+            let fields = decode_tlvs(&metadata.data).unwrap();
+            assert_eq!(unique_field(&fields, 0x01), Some(&[algorithm as u8][..]));
+            assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+            assert_eq!(
+                decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x87),
+                Some(public_key.as_slice())
+            );
+            let message = b"imported PIV ML-DSA key";
+            let signing_request = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, message)].concat(),
+            );
+            let response = piv.transmit(&command(
+                INS_AUTHENTICATE,
+                algorithm as u8,
+                0x9e,
+                &signing_request,
+            ));
+            assert_eq!(response.status, 0x9000);
+            let signature =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+            expected
+                .verify_message(SignatureScheme::MlDsa(parameter_set), message, signature)
+                .unwrap();
+            assert_eq!(
+                piv.transmit(&command(INS_ATTEST, 0x9e, 0, &[])).status,
+                STATUS_INCORRECT_DATA
+            );
             assert_eq!(
                 piv.transmit(&command(
                     INS_IMPORT_KEY,
                     algorithm as u8,
-                    0x82,
-                    &encode_tlv(0x09, &[0; 32])
+                    0x9e,
+                    &encode_tlv(IMPORT_TAG_PQ_SEED, &seed[..31]),
                 ))
                 .status,
+                STATUS_INCORRECT_DATA
+            );
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(24, [5, 8, 0], &encoded).unwrap();
+            let response = restored.transmit(&command(
+                INS_AUTHENTICATE,
+                algorithm as u8,
+                0x9e,
+                &signing_request,
+            ));
+            assert_eq!(response.status, 0x9000);
+            let signature =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+            expected
+                .verify_message(SignatureScheme::MlDsa(parameter_set), message, signature)
+                .unwrap();
+            assert_eq!(
+                restored.transmit(&command(INS_ATTEST, 0x9e, 0, &[])).status,
                 STATUS_INCORRECT_DATA
             );
         }
@@ -3593,6 +3697,104 @@ mod tests {
     }
 
     #[test]
+    fn imports_ml_kem_seeds_and_rejects_non_seed_private_keys() {
+        for (algorithm, parameter_set) in [
+            (PivAlgorithm::MlKem512, MlKemParameterSet::MlKem512),
+            (PivAlgorithm::MlKem768, MlKemParameterSet::MlKem768),
+            (PivAlgorithm::MlKem1024, MlKemParameterSet::MlKem1024),
+        ] {
+            let mut piv = PivApplet::new(25, [5, 8, 0]);
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            let seed = [algorithm as u8; 64];
+            let expected = MlKemPrivateKey::from_seed_slice(parameter_set, &seed).unwrap();
+            for invalid in [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &seed[..63]),
+                encode_tlv(IMPORT_TAG_PQ_SEED, &[algorithm as u8; 65]),
+                encode_tlv(IMPORT_TAG_PQ_SEED, &expected.expanded_private_key()),
+                encode_tlv(0x07, &seed),
+            ] {
+                assert_eq!(
+                    piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9d, &invalid))
+                        .status,
+                    STATUS_INCORRECT_DATA
+                );
+                assert!(!piv.keys.contains_key(&0x9d));
+            }
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_IMPORT_KEY,
+                    algorithm as u8,
+                    SLOT_ATTESTATION,
+                    &encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                ))
+                .status,
+                STATUS_INCORRECT_DATA
+            );
+            let request = [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9d, &request))
+                    .status,
+                0x9000
+            );
+            let public_key = expected.public_key();
+            let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9d, &[]));
+            let fields = decode_tlvs(&metadata.data).unwrap();
+            assert_eq!(unique_field(&fields, 0x01), Some(&[algorithm as u8][..]));
+            assert_eq!(unique_field(&fields, 0x03), Some(&[ORIGIN_IMPORTED][..]));
+            assert_eq!(
+                decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x87),
+                Some(public_key.as_slice())
+            );
+            let (ciphertext, shared_secret) =
+                ml_kem_encapsulate(parameter_set, &public_key).unwrap();
+            let decapsulation_request = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext)].concat(),
+            );
+            let response = piv.transmit(&command(
+                INS_AUTHENTICATE,
+                algorithm as u8,
+                0x9d,
+                &decapsulation_request,
+            ));
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82),
+                Some(shared_secret.as_slice())
+            );
+            assert_eq!(
+                piv.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+                STATUS_INCORRECT_DATA
+            );
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(25, [5, 8, 0], &encoded).unwrap();
+            let response = restored.transmit(&command(
+                INS_AUTHENTICATE,
+                algorithm as u8,
+                0x9d,
+                &decapsulation_request,
+            ));
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82),
+                Some(shared_secret.as_slice())
+            );
+            assert_eq!(
+                restored.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+                STATUS_INCORRECT_DATA
+            );
+        }
+    }
+
+    #[test]
     fn generated_ml_dsa_f9_keys_and_certificates_sign_pq_attestations() {
         for (algorithm, parameter_set) in [
             (PivAlgorithm::MlDsa44, MlDsaParameterSet::MlDsa44),
@@ -3693,6 +3895,73 @@ mod tests {
                 STATUS_INCORRECT_DATA
             );
         }
+    }
+
+    #[test]
+    fn imported_ml_dsa_f9_refreshes_its_certificate_and_signs_attestations() {
+        let mut piv = PivApplet::new(26, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(0xac, &encode_tlv(0x80, &[PivAlgorithm::MlKem512 as u8]));
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9d, &generate))
+                .status,
+            0x9000
+        );
+        let original_certificate = piv.objects[&OBJECT_ATTESTATION_CERTIFICATE].clone();
+        let seed = [0x65; 32];
+        assert_eq!(
+            piv.transmit(&command(
+                INS_IMPORT_KEY,
+                PivAlgorithm::MlDsa65 as u8,
+                SLOT_ATTESTATION,
+                &encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+            ))
+            .status,
+            0x9000
+        );
+        assert_ne!(
+            piv.objects[&OBJECT_ATTESTATION_CERTIFICATE],
+            original_certificate
+        );
+        let issuer_key = piv.keys[&SLOT_ATTESTATION]
+            .signing_key()
+            .unwrap()
+            .public_key();
+        let issuer = x509_cert::Certificate::from_der(
+            certificate_der(&piv.objects[&OBJECT_ATTESTATION_CERTIFICATE]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            issuer.tbs_certificate().subject_public_key_info(),
+            &piv.keys[&SLOT_ATTESTATION]
+                .subject_public_key_info()
+                .unwrap()
+        );
+        verify_certificate_signature(
+            &issuer,
+            &issuer_key,
+            SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65),
+            None,
+        );
+        let response = piv.transmit(&command(INS_ATTEST, 0x9d, 0, &[]));
+        assert_eq!(response.status, 0x9000);
+        let leaf = x509_cert::Certificate::from_der(&response.data).unwrap();
+        verify_certificate_signature(
+            &leaf,
+            &issuer_key,
+            SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65),
+            None,
+        );
+        let encoded = piv.persistent_state().unwrap();
+        let mut restored = PivApplet::from_persistent_state(26, [5, 8, 0], &encoded).unwrap();
+        assert_eq!(
+            restored.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+            0x9000
+        );
     }
 
     #[test]

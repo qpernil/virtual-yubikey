@@ -53,11 +53,23 @@ applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
 key template `7F49` for the raw ML-DSA or ML-KEM public key. This tag is also
 private and may change if PIV standardization assigns a different format.
 PIN and touch policies apply to both operations. Key generation and persistent
-restore are supported; the PIV private-key import command does not yet accept
-PQC keys. Attestation certificates use the standard X.509 ML-DSA and ML-KEM
+restore are supported. The private `IMPORT KEY` command (`FE`, P1 = algorithm
+ID, P2 = slot) accepts a single private tag `09` containing the 32-byte
+ML-DSA seed or 64-byte ML-KEM seed, optionally alongside the existing `AA`
+PIN-policy and `AB` touch-policy TLVs. The exact seed length and algorithm
+are validated before replacing a slot. Expanded private keys and PKCS#8 are
+not accepted on this PIV wire format. Import requires management-key
+authentication; use encrypted SCP03 or SCP11 secure messaging if the seed
+must be confidential in transit, since management authentication alone does not
+encrypt the import APDU. Imported user keys are not eligible for the
+device-generated-key attestation claim.
+
+Attestation certificates use the standard X.509 ML-DSA and ML-KEM
 SubjectPublicKeyInfo encodings, and an ML-DSA F9 key signs certificates with a
-standard ML-DSA signature algorithm identifier. An ML-KEM key can be an
-attested subject, not an attestation issuer.
+standard ML-DSA signature algorithm identifier. An imported ML-DSA F9 key
+gets a matching self-signed certificate and may issue virtual attestations;
+that certificate alone does not establish hardware provenance. An ML-KEM key
+can be an attested subject, not an attestation issuer.
 
 ML-DSA signatures and PQC certificates can exceed one 3,072-byte CCID message.
 The applet uses the shared APDU response and CCID chaining paths; consumers
