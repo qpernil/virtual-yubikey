@@ -108,6 +108,9 @@ validation before they can authorize the same administrative operations.
 
 - Keep registration, credential management, resident credentials, PPUAT, and
   `previewSign` covered through core, USB HID, and PKCS #11 tests.
+- FIDO registration currently uses `fmt: "none"`; signed or certificate-backed
+  attestation is not implemented. The ML-DSA certificate and CTAPHID size
+  constraints are documented in the [FIDO attestation status](../README.md#fido-attestation-status).
 - Keep CTAPHID cancellation and `UP_NEEDED`/`PROCESSING` keepalives covered
   for touch-gated and computationally expensive operations.
 - Preserve explicit state versions and fail closed on unsupported or corrupt

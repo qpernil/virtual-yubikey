@@ -200,6 +200,32 @@ hardware protection or production side-channel resistance. ML-DSA-87 assertions
 are large; the CTAPHID transport tests complete multi-report responses of the
 same size without truncation.
 
+## FIDO attestation status
+
+`authenticatorMakeCredential` returns `fmt: "none"` and an empty attestation
+statement, including for ML-DSA credentials and the nested `previewSign`
+registration. FIDO has no attestation signing key, attestation certificate, or
+`packed`/self-attestation implementation. PIV attestation is separate and does
+not establish the provenance of FIDO credentials.
+
+Certificate-backed [packed attestation](https://www.w3.org/TR/webauthn-3/#sctn-packed-attestation)
+would require a FIDO-specific attestation key and certificate, a signature over
+the authenticator data and client-data hash, and a trust anchor accepted by the
+verifier. For ML-DSA, the registration response would carry the credential
+public key, attestation signature, and attestation certificate together.
+The 64-byte [CTAPHID framing limit](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html#message-and-packet-structure)
+is 7,609 bytes per response; increasing the advertised `maxMsgSize` cannot
+raise that transport limit. Even an ML-DSA-44 credential with an ML-DSA-44
+attestation signature and an ML-DSA-44-signed attestation certificate needs
+7,464 bytes for the two public keys and two signatures alone, before X.509,
+CBOR, and authenticator-data overhead, so that combination cannot fit over
+FIDO HID. A certificate signed by a smaller classical issuer may fit but does
+not provide a wholly post-quantum trust chain. Packed self-attestation omits
+the certificate and cannot establish independent authenticator provenance.
+Any attestation design must measure complete responses for each credential and
+attestation algorithm combination and keep the advertised capabilities within
+the transport limit.
+
 ## Hardware and operating system
 
 A Pi Zero 2 W is the simplest target. Use its **USB** micro-USB connector, not
