@@ -346,23 +346,26 @@ Display traffic never blocks a USB endpoint thread.
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
 `12345678` device stores versioned CBOR state in
 `/var/lib/virtual-yubikey/fido-12345678.cbor` and
-`/var/lib/virtual-yubikey/piv-12345678.cbor`, and
-`/var/lib/virtual-yubikey/hsmauth-12345678.cbor`. Before reading or creating any
-image, the worker exclusively locks
+`/var/lib/virtual-yubikey/piv-12345678.cbor`,
+`/var/lib/virtual-yubikey/hsmauth-12345678.cbor`, and
+`/var/lib/virtual-yubikey/security-domain-12345678.cbor`. Before reading or
+creating any image, the worker exclusively locks
 `/var/lib/virtual-yubikey/yubikey-12345678.lock`; one device-level lock covers
 all applets and remains held through their final persistence flush. The
 sidecar remains present when unlocked, while a concurrent owner is a startup
 error. Missing state files are initialized from factory state before USB is
 served; invalid existing files are startup errors and are never silently
-replaced. All three state images use the shared supervisor-worker persistence engine. By
-default it batches changes for up to 500 ms, atomically replaces mode-`0600`
-files, and flushes pending state on USB ejection and worker shutdown.
+replaced. All four state images use the generic
+`software-key-core/state-persistence` engine. By default it batches changes for
+up to 500 ms, atomically replaces mode-`0600` files, and flushes pending state
+on USB ejection and worker shutdown.
 `--persistence immediate` instead synchronizes each durable change before its
 successful response is written. The files contain unencrypted test PIN and
 private-key material and must not be treated as secure hardware storage.
 
 FIDO and PIV persistent states use current CBOR schema version 4; supported
-older images are migrated when loaded. YubiHSM Auth state uses schema version 1.
+older images are migrated when loaded. YubiHSM Auth state uses schema version 1;
+Security Domain state uses schema version 2.
 Unsupported or invalid state is a startup error and is never silently replaced;
 resetting an applet to empty state is an explicit administrative action.
 
