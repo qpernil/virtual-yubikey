@@ -9,6 +9,11 @@ use crate::worker_protocol::{
     Channel, Kind, RUNTIME_DIRECTORY_ENV, Record, STATE_DIRECTORY_ENV, validate_initial_resources,
 };
 #[cfg(target_os = "linux")]
+use software_key_core::state_persistence::{
+    MutationReceipt, PersistenceMode, StateLock, StatePersistence, StatePersistenceHandle,
+    replace_file_atomically,
+};
+#[cfg(target_os = "linux")]
 use std::env;
 #[cfg(target_os = "linux")]
 use std::fs::{self, File};
@@ -30,10 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
-use usb_gadget_worker::{
-    EndpointLifecycle, MutationReceipt, PersistenceMode, StateLock, StatePersistence,
-    StatePersistenceHandle, UsbBusEvent, replace_file_atomically,
-};
+use usb_gadget_worker::{EndpointLifecycle, UsbBusEvent};
 #[cfg(target_os = "linux")]
 use virtual_yubikey_core::FidoAuthenticator;
 

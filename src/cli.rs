@@ -1,5 +1,5 @@
+use software_key_core::state_persistence::PersistenceMode;
 use std::{io, time::Duration};
-use usb_gadget_worker::PersistenceMode;
 
 use crate::diagnostics::Level;
 pub(crate) const DEFAULT_SERIAL: u32 = 12_345_678;

@@ -1266,6 +1266,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "k256",
+ "libc",
  "ml-dsa",
  "ml-kem",
  "num-bigint-dig",
@@ -1475,7 +1476,6 @@ name = "usb-gadget-worker"
 version = "0.1.0"
 dependencies = [
  "ciborium",
- "libc",
  "serde",
  "serde_bytes",
 ]
@@ -1493,6 +1493,7 @@ dependencies = [
  "display-backends",
  "gpiocdev-uapi",
  "libc",
+ "software-key-core",
  "toml",
  "usb-gadget-worker",
  "virtual-yubikey-core",
