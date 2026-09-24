@@ -32,7 +32,3 @@ toml = "0.9.12"
 
 # The USB binary deliberately calls Linux interfaces directly. Protocol and
 # emulator dependencies live in the transport-neutral core crate.
-
-[patch.crates-io]
-# Reduce ML-DSA matrix stack usage without changing public lattice types.
-ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "e06d2e28699428fbcc135c388516883bbb71f170" }

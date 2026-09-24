@@ -23,9 +23,8 @@ The exact dependency graph is recorded in `Cargo.lock`. Dependencies are
 obtained from crates.io and retain their own copyright and license notices.
 The locked graph includes MIT, Apache-2.0, BSD, BlueOak-1.0.0, Unicode-3.0,
 and compatible license combinations. The Linux worker also links the sibling
-GPL-3.0-or-later `display-backends` crate, so distribution of that combined
-binary must satisfy the GPL. No Yubico source package is linked or vendored by
-this repository.
+MIT OR Apache-2.0 `display-backends` crate. No Yubico source package is linked
+or vendored by this repository.
 
 Redistributors should preserve applicable dependency notices and regenerate a
 license inventory from the exact locked dependency graph used for their build.
