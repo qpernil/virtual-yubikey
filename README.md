@@ -30,7 +30,7 @@ credential management, resident credentials, and `previewSign`.
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| PIV | Persistent objects, PIN/PUK and management authentication, and RSA, NIST EC, Ed25519, and X25519 key operations |
+| PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, and ML-KEM key operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
@@ -63,7 +63,7 @@ behavior are documented in
 
 | Module | Responsibility |
 | --- | --- |
-| `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, standard X.509 signing/SPKI adapters, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA controls, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
+| `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, standard X.509 signing/SPKI adapters, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA and ML-KEM operations, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
 | `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, shared secure messaging, and persistent FIDO, PIV, YubiHSM Auth, and Security Domain state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
@@ -118,14 +118,15 @@ active on-disk format yet.
 The logical PIV applet starts empty and persists separately from FIDO and
 YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
 3TDEA/AES management authentication, retry configuration/reset, data and
-certificate objects, RSA-1024/2048/3072/4096 and P-256/P-384 key generation,
-Ed25519/X25519 key generation, matching algorithm-specific private-key import,
-metadata, signing, raw RSA private operations, ECDH/X25519 key agreement, and
-key move/delete. Reads of the four biometric and printed-information objects
-enforce PIV PIN verification. Generated RSA, EC, and Ed25519 keys can be
-attested by the persistent RSA, EC, or Ed25519 key in slot F9 and its certificate
-in object `5FFF01`. PIV state is atomically replaced as `piv-<serial>.cbor` in
-the configured state directory.
+certificate objects, RSA-1024/2048/3072/4096, P-256/P-384, Ed25519/X25519,
+ML-DSA-44/65/87, and ML-KEM-512/768/1024 key generation, private-key import
+for the classical algorithms, metadata, signing, raw RSA private operations,
+ECDH/X25519 agreement, ML-KEM decapsulation, and key move/delete. Reads of the
+four biometric and printed-information objects enforce PIV PIN verification.
+Generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys can be attested by the
+persistent RSA, EC, Ed25519, or ML-DSA key in slot F9. Changing F9 refreshes
+its matching self-signed certificate in object `5FFF01`. PIV state is atomically
+replaced as `piv-<serial>.cbor` in the configured state directory.
 
 This is a YubiKey-compatible PIV applet rather than a claim of complete PIV Card
 conformance. The exact standards boundary, YubiKey extensions, and current gaps

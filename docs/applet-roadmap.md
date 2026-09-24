@@ -121,8 +121,9 @@ validation before they can authorize the same administrative operations.
 
 - Keep discovery and metadata, persistent objects and certificates, PIN/PUK and
   management authentication, retries and reset, RSA and EC key lifecycle,
-  signing, raw RSA operations, ECDH, Ed25519, X25519, PIN-protected object
-  reads, and PIV attestation covered in the core.
+  signing, raw RSA operations, ECDH, Ed25519, X25519, ML-DSA signing, ML-KEM
+  decapsulation, PIN-protected object reads, and PIV attestation covered in the
+  core. PQC private-key import remains unsupported.
 - Pass representative `yubico-piv-tool` workflows over USB CCID and preserve
   their transcripts as transport regression tests.
 - Add CCID abort handling and biometric policy events.
