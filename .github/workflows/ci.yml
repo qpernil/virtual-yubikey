@@ -20,6 +20,7 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
       - name: Run tests
         run: cargo test --locked --workspace --all-features
@@ -42,6 +43,7 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94.0
@@ -61,6 +63,7 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
       - name: Install iOS Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
