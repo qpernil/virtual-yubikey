@@ -1,6 +1,7 @@
 use crate::{CommandApdu, ResponseApdu, certificate};
 use software_key_core::{
     certificate_chain::{CertificateTrust, ParsedCertificate},
+    certificate_signing::{CertificateSigner, subject_public_key_info},
     software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
     software_symmetric::{decrypt_aes_cbc, encrypt_aes_block},
 };
@@ -910,7 +911,7 @@ fn certificate_chain(
         &VIRTUAL_ATTESTATION_ROOT_PRIVATE_KEY,
     )
     .map_err(|_| ())?;
-    let root_signer = certificate::CertificateSigner::from_key(&root_key)?;
+    let root_signer = CertificateSigner::from_key(&root_key).map_err(|_| ())?;
     let root_name = Name::from_str("CN=Virtual YubiKey Security Domain Root").map_err(|_| ())?;
     let validity = Validity::new(
         Time::from_str("2026-01-01T00:00:00Z").map_err(|_| ())?,
@@ -925,7 +926,7 @@ fn certificate_chain(
         },
         &[0x56, 0x59, 0x4b, 0x53, 0x44, 0x01],
         validity,
-        certificate::subject_public_key_info(&root_key)?,
+        subject_public_key_info(&root_key.public_key()).map_err(|_| ())?,
         &root_signer,
     )?;
     let mut leaf_serial = [0_u8; 8];
@@ -942,7 +943,7 @@ fn certificate_chain(
         },
         &leaf_serial,
         validity,
-        certificate::subject_public_key_info(scp11b_key)?,
+        subject_public_key_info(&scp11b_key.public_key()).map_err(|_| ())?,
         &root_signer,
     )?;
     // GlobalPlatform/YubiKey certificate stores are issuer-to-leaf. Both
@@ -1095,8 +1096,8 @@ mod tests {
                     Time::from_str(validity.0).unwrap(),
                     Time::from_str(validity.1).unwrap(),
                 ),
-                certificate::subject_public_key_info(subject_key).unwrap(),
-                &certificate::CertificateSigner::from_key(signer).unwrap(),
+                subject_public_key_info(&subject_key.public_key()).unwrap(),
+                &CertificateSigner::from_key(signer).unwrap(),
             )
             .unwrap()
         };

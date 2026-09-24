@@ -10,11 +10,9 @@ publish = false
 [dependencies]
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "derive", "std"] }
-software-key-core = { path = "../../../software-key-core", features = ["x509"] }
+software-key-core = { path = "../../../software-key-core", features = ["x509-signing", "x509-validation"] }
 getrandom = "0.4.3"
 minicbor = { version = "2.3.0", features = ["alloc"] }
-rsa = { version = "0.9.10", default-features = false, features = ["std"] }
-signature = "3.0.0"
 spki = { version = "0.8.0", features = ["alloc", "std"] }
 subtle = "2.6.1"
 x509-cert = { version = "0.3.0", default-features = false, features = ["builder", "std"] }

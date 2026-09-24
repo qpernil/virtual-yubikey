@@ -1,12 +1,13 @@
 use crate::{
     CommandApdu, PIV_TOUCH_CACHE_DURATION, PresenceAuthorization, ResponseApdu, UserPresencePolicy,
-    certificate::{self, CertificateSigner},
+    certificate,
     crypto::{AES_BLOCK_SIZE, Direction, TDES_BLOCK_SIZE, aes_ecb_block, tdes_ecb_block},
     presence::PresenceClient,
 };
 use const_oid::ObjectIdentifier;
 use der::{Decode, asn1::OctetString};
 use software_key_core::{
+    certificate_signing::{CertificateSigner, subject_public_key_info},
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
     software_signing::{
@@ -348,7 +349,9 @@ impl PivKey {
 
     fn subject_public_key_info(&self) -> Result<SubjectPublicKeyInfoOwned, ()> {
         match &self.private_key {
-            SoftwarePrivateKey::Signing(key) => certificate::subject_public_key_info(key),
+            SoftwarePrivateKey::Signing(key) => {
+                subject_public_key_info(&key.public_key()).map_err(|_| ())
+            }
             SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
         }
     }
@@ -447,7 +450,7 @@ fn factory_attestation_bundle(
         origin: ORIGIN_GENERATED,
         private_key: SoftwarePrivateKey::Signing(private_key),
     };
-    let signer = CertificateSigner::from_key(key.signing_key()?)?;
+    let signer = CertificateSigner::from_key(key.signing_key()?).map_err(|_| ())?;
     let subject = Name::from_str(&format!("CN=Virtual YubiKey PIV Attestation CA {serial}"))
         .map_err(|_| ())?;
     let profile = AttestationProfile {
@@ -975,10 +978,10 @@ impl PivApplet {
         let Some(attestation_key) = self.keys.get(&SLOT_ATTESTATION) else {
             return ResponseApdu::status(STATUS_REFERENCE_NOT_FOUND);
         };
-        let Ok(signer) = attestation_key
-            .signing_key()
-            .and_then(CertificateSigner::from_key)
-        else {
+        let Ok(signing_key) = attestation_key.signing_key() else {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA);
+        };
+        let Ok(signer) = CertificateSigner::from_key(signing_key) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA);
         };
         let Some(certificate_object) = self.objects.get(&OBJECT_ATTESTATION_CERTIFICATE) else {
