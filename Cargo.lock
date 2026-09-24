@@ -1569,7 +1569,6 @@ dependencies = [
  "getrandom 0.4.3",
  "minicbor",
  "p256",
- "rsa",
  "signature 3.0.0",
  "software-key-core",
  "spki 0.8.0",

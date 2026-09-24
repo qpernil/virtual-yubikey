@@ -63,7 +63,7 @@ behavior are documented in
 
 | Module | Responsibility |
 | --- | --- |
-| `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA controls, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
+| `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, standard X.509 signing/SPKI adapters, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA controls, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
 | `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, shared secure messaging, and persistent FIDO, PIV, YubiHSM Auth, and Security Domain state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
