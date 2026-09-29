@@ -34,8 +34,8 @@ Yubico-defined commands.
 | Issued-card contents | Reset produces an unprovisioned YubiKey-compatible applet. It does not synthesize the mandatory CCC, CHUID, PIV Authentication certificate, Card Authentication certificate, fingerprint, facial-image, or Security Object contents of an issued PIV Card. Provisioning software may store these objects. |
 | Authentication profiles | The local PIV PIN, PUK, and Administration Key are implemented. Global PIN, pairing-code verification, and on-card biometric comparison are not implemented. |
 | PIV secure messaging | The NIST PIV Secure Messaging key (`04`), cipher suites, SM-AUTH, and Virtual Contact Interface are not implemented. The separate YubiKey/GlobalPlatform boundary implements SCP03 and SCP11a/b/c secure messaging around the selected PIV applet and the other selectable CCID applets. |
-| Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are YubiKey compatibility algorithms; ML-DSA-44/65/87 and ML-KEM-512/768/1024 use the private extension below. |
-| YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the firmware, serial, PIN/touch-policy, and form-factor extensions. F9 may use RSA, EC, Ed25519, or ML-DSA; changing it refreshes the matching self-signed `5FFF01` certificate. PIV reset preserves the key and certificate. |
+| Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are YubiKey compatibility algorithms; ML-DSA-44/65/87, ML-KEM-512/768/1024, and the concrete hybrid PQ/T KEMs use the private extension below. |
+| YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, Ed25519, ML-DSA, ML-KEM, and concrete hybrid KEM keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the firmware, serial, PIN/touch-policy, and form-factor extensions. F9 may use RSA, EC, Ed25519, or ML-DSA; changing it refreshes the matching self-signed `5FFF01` certificate. PIV reset preserves the key and certificate. |
 
 ## Private post-quantum PIV extension
 
@@ -48,10 +48,12 @@ applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
 | --- | --- | --- |
 | `E2`, `E3`, `E4` | ML-DSA-44, -65, -87 | Sign the complete message supplied in `7C { 82 empty, 81 message }`; return the raw signature in `7C { 82 signature }`. |
 | `E5`, `E6`, `E7` | ML-KEM-512, -768, -1024 | Decapsulate the exact-length ciphertext supplied in `7C { 82 empty, 81 ciphertext }`; return the 32-byte shared secret in `7C { 82 secret }`. |
+| `E8`, `E9`, `EA` | MLKEM768-P256, MLKEM768-X25519, MLKEM1024-P384 | Decapsulate the exact-length combined ciphertext supplied in `7C { 82 empty, 81 ciphertext }`; return the construction's 32-byte combined secret in `7C { 82 secret }`. |
 
 `GENERATE ASYMMETRIC KEY PAIR` and key metadata use tag `87` inside the public
-key template `7F49` for the raw ML-DSA or ML-KEM public key. This tag is also
-private and may change if PIV standardization assigns a different format.
+key template `7F49` for the raw ML-DSA, ML-KEM, or combined hybrid public key.
+This tag is also private and may change if PIV standardization assigns a
+different format.
 For ML-DSA only, `GENERAL AUTHENTICATE` additionally accepts optional inner
 tag `88` containing a 0–255-byte signing context and optional inner tag `89`
 containing one byte: `01` for hedge preferred (the default), `02` for hedge
@@ -61,7 +63,8 @@ provisional extensions; the current PIV PQC drafts do not allocate them.
 PIN and touch policies apply to both operations. Key generation and persistent
 restore are supported. The private `IMPORT KEY` command (`FE`, P1 = algorithm
 ID, P2 = slot) accepts a single private tag `09` containing the 32-byte
-ML-DSA seed or 64-byte ML-KEM seed, optionally alongside the existing `AA`
+ML-DSA seed, 64-byte ML-KEM seed, or 32-byte hybrid-KEM decapsulation seed,
+optionally alongside the existing `AA`
 PIN-policy and `AB` touch-policy TLVs. The exact seed length and algorithm
 are validated before replacing a slot. Expanded private keys and PKCS#8 are
 not accepted on this PIV wire format. Import requires management-key
@@ -76,6 +79,26 @@ standard ML-DSA signature algorithm identifier. An imported ML-DSA F9 key
 gets a matching self-signed certificate and may issue virtual attestations;
 that certificate alone does not establish hardware provenance. An ML-KEM key
 can be an attested subject, not an attestation issuer.
+
+The hybrid extension is pinned to
+`draft-irtf-cfrg-concrete-hybrid-kems-04`, using the CG framework from
+`draft-irtf-cfrg-hybrid-kems-12`, FIPS 203 ML-KEM, FIPS 202 SHAKE256 and
+SHA3-256, SEC 1 uncompressed P-256/P-384 points, and RFC 7748 X25519. The
+MLKEM768-X25519 instance is the X-Wing construction from
+`draft-connolly-cfrg-xwing-kem-10`. Public encodings are `ek_PQ || ek_T` and
+have lengths 1249, 1216, and 1665 bytes for `E8`, `E9`, and `EA` respectively.
+Ciphertexts are `ct_PQ || ct_T` with lengths 1153, 1120, and 1665 bytes. The
+private value is the draft's inseparable 32-byte seed; component private keys
+are never selectable through standalone PIV algorithms.
+
+`GENERATE ASYMMETRIC KEY PAIR` returns `7F49 { 87 combined-public-key }`.
+`IMPORT KEY` accepts only tag `09` with the 32-byte seed. Imported keys cannot
+be attested; generated keys use the existing `ATTEST` command. Their explicitly
+private SubjectPublicKeyInfo OIDs are `1.3.6.1.4.1.41482.11.1`, `.11.2`, and
+`.11.3` in algorithm order, with absent parameters and the raw combined public
+key as the BIT STRING. Wrong ciphertext lengths return `6700`; malformed
+traditional public values, algorithm/key mismatches, and unsupported field
+layouts return `6A80` or `6A86` as applicable.
 
 ML-DSA signatures and PQC certificates can exceed one 3,072-byte CCID message.
 The applet uses the shared APDU response and CCID chaining paths; consumers
