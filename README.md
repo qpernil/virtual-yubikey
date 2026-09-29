@@ -30,7 +30,7 @@ credential management, resident credentials, and `previewSign`.
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
-| PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, and ML-KEM key operations |
+| PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, ML-KEM, and concrete hybrid PQ/T KEM operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
@@ -119,9 +119,9 @@ The logical PIV applet starts empty and persists separately from FIDO and
 YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
 3TDEA/AES management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096, P-256/P-384, Ed25519/X25519,
-ML-DSA-44/65/87, and ML-KEM-512/768/1024 key generation, classical private-key
+ML-DSA-44/65/87, ML-KEM-512/768/1024, and concrete hybrid PQ/T KEM key generation, classical private-key
 import and seed-only PQC import, metadata, signing, raw RSA private operations,
-ECDH/X25519 agreement, ML-KEM decapsulation, and key move/delete. Reads of the
+ECDH/X25519 agreement, ML-KEM and hybrid-KEM decapsulation, and key move/delete. Reads of the
 four biometric and printed-information objects enforce PIV PIN verification.
 Generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys can be attested by the
 persistent RSA, EC, Ed25519, or ML-DSA key in slot F9. Changing F9 refreshes

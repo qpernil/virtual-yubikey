@@ -5,9 +5,13 @@ use crate::{
     presence::PresenceClient,
 };
 use const_oid::ObjectIdentifier;
-use der::{Decode, asn1::OctetString};
+use der::{
+    Decode,
+    asn1::{BitString, OctetString},
+};
 use software_key_core::{
     certificate_signing::{CertificateSigner, subject_public_key_info},
+    hybrid_kem::{HybridKemConstruction, HybridKemPrivateKey},
     post_quantum::{
         MlDsaParameterSet, MlDsaRandomization, MlKemParameterSet, MlKemPrivateKey,
         ml_kem_public_key_info,
@@ -18,7 +22,7 @@ use software_key_core::{
         EcCurve, EdwardsCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
     },
 };
-use spki::SubjectPublicKeyInfoOwned;
+use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use std::{collections::BTreeMap, fmt, str::FromStr};
 use subtle::ConstantTimeEq;
 use x509_cert::{
@@ -176,6 +180,9 @@ enum PivAlgorithm {
     MlKem512 = 0xe5,
     MlKem768 = 0xe6,
     MlKem1024 = 0xe7,
+    HybridMlKem768P256 = 0xe8,
+    HybridMlKem768X25519 = 0xe9,
+    HybridMlKem1024P384 = 0xea,
 }
 
 impl PivAlgorithm {
@@ -195,6 +202,9 @@ impl PivAlgorithm {
             0xe5 => Some(Self::MlKem512),
             0xe6 => Some(Self::MlKem768),
             0xe7 => Some(Self::MlKem1024),
+            0xe8 => Some(Self::HybridMlKem768P256),
+            0xe9 => Some(Self::HybridMlKem768X25519),
+            0xea => Some(Self::HybridMlKem1024P384),
             _ => None,
         }
     }
@@ -217,6 +227,15 @@ impl PivAlgorithm {
         }
     }
 
+    const fn hybrid_kem(self) -> Option<HybridKemConstruction> {
+        match self {
+            Self::HybridMlKem768P256 => Some(HybridKemConstruction::MlKem768P256),
+            Self::HybridMlKem768X25519 => Some(HybridKemConstruction::MlKem768X25519),
+            Self::HybridMlKem1024P384 => Some(HybridKemConstruction::MlKem1024P384),
+            _ => None,
+        }
+    }
+
     const fn signing_algorithm(self) -> Option<SignatureScheme> {
         match self {
             Self::Rsa1024 | Self::Rsa2048 | Self::Rsa3072 | Self::Rsa4096 => {
@@ -228,7 +247,13 @@ impl PivAlgorithm {
             Self::MlDsa44 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44)),
             Self::MlDsa65 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65)),
             Self::MlDsa87 => Some(SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa87)),
-            Self::X25519 | Self::MlKem512 | Self::MlKem768 | Self::MlKem1024 => None,
+            Self::X25519
+            | Self::MlKem512
+            | Self::MlKem768
+            | Self::MlKem1024
+            | Self::HybridMlKem768P256
+            | Self::HybridMlKem768X25519
+            | Self::HybridMlKem1024P384 => None,
         }
     }
 
@@ -244,7 +269,13 @@ impl PivAlgorithm {
             Self::MlDsa44 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa44)),
             Self::MlDsa65 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa65)),
             Self::MlDsa87 => Some(KeyKind::MlDsa(MlDsaParameterSet::MlDsa87)),
-            Self::X25519 | Self::MlKem512 | Self::MlKem768 | Self::MlKem1024 => None,
+            Self::X25519
+            | Self::MlKem512
+            | Self::MlKem768
+            | Self::MlKem1024
+            | Self::HybridMlKem768P256
+            | Self::HybridMlKem768X25519
+            | Self::HybridMlKem1024P384 => None,
         }
     }
 
@@ -260,7 +291,10 @@ impl PivAlgorithm {
             | Self::MlDsa87
             | Self::MlKem512
             | Self::MlKem768
-            | Self::MlKem1024 => None,
+            | Self::MlKem1024
+            | Self::HybridMlKem768P256
+            | Self::HybridMlKem768X25519
+            | Self::HybridMlKem1024P384 => None,
         }
     }
 
@@ -279,7 +313,10 @@ impl PivAlgorithm {
             | Self::MlDsa87
             | Self::MlKem512
             | Self::MlKem768
-            | Self::MlKem1024 => None,
+            | Self::MlKem1024
+            | Self::HybridMlKem768P256
+            | Self::HybridMlKem768X25519
+            | Self::HybridMlKem1024P384 => None,
         }
     }
 
@@ -296,6 +333,9 @@ impl PivAlgorithm {
             Self::MlKem512 => 768,
             Self::MlKem768 => 1_088,
             Self::MlKem1024 => 1_568,
+            Self::HybridMlKem768P256 => 1_153,
+            Self::HybridMlKem768X25519 => 1_120,
+            Self::HybridMlKem1024P384 => 1_665,
         }
     }
 
@@ -310,7 +350,10 @@ impl PivAlgorithm {
             | Self::MlDsa87
             | Self::MlKem512
             | Self::MlKem768
-            | Self::MlKem1024 => Some(IMPORT_TAG_PQ_SEED),
+            | Self::MlKem1024
+            | Self::HybridMlKem768P256
+            | Self::HybridMlKem768X25519
+            | Self::HybridMlKem1024P384 => Some(IMPORT_TAG_PQ_SEED),
         }
     }
 
@@ -332,7 +375,15 @@ impl PivAlgorithm {
 
     const fn attestable_subject(self) -> bool {
         self.can_sign_attestations()
-            || matches!(self, Self::MlKem512 | Self::MlKem768 | Self::MlKem1024)
+            || matches!(
+                self,
+                Self::MlKem512
+                    | Self::MlKem768
+                    | Self::MlKem1024
+                    | Self::HybridMlKem768P256
+                    | Self::HybridMlKem768X25519
+                    | Self::HybridMlKem1024P384
+            )
     }
 }
 
@@ -348,6 +399,10 @@ fn generate_private_key(algorithm: PivAlgorithm) -> Result<SoftwarePrivateKey, (
     } else if let Some(parameter_set) = algorithm.ml_kem_parameter_set() {
         MlKemPrivateKey::generate(parameter_set)
             .map(SoftwarePrivateKey::MlKem)
+            .map_err(|_| ())
+    } else if let Some(construction) = algorithm.hybrid_kem() {
+        HybridKemPrivateKey::generate(construction)
+            .map(SoftwarePrivateKey::HybridKem)
             .map_err(|_| ())
     } else {
         Err(())
@@ -370,6 +425,10 @@ fn private_key_from_serialized(
         MlKemPrivateKey::from_seed_slice(parameter_set, serialized)
             .map(SoftwarePrivateKey::MlKem)
             .map_err(|_| ())
+    } else if let Some(construction) = algorithm.hybrid_kem() {
+        HybridKemPrivateKey::from_seed_slice(construction, serialized)
+            .map(SoftwarePrivateKey::HybridKem)
+            .map_err(|_| ())
     } else {
         Err(())
     }
@@ -380,6 +439,7 @@ fn serialized_private_key(key: &SoftwarePrivateKey) -> Result<Zeroizing<Vec<u8>>
         SoftwarePrivateKey::Signing(key) => key.serialized().map_err(|_| ()),
         SoftwarePrivateKey::Montgomery(key) => Ok(key.serialized()),
         SoftwarePrivateKey::MlKem(key) => key.seed().ok_or(()),
+        SoftwarePrivateKey::HybridKem(key) => Ok(Zeroizing::new(key.seed().to_vec())),
     }
 }
 
@@ -440,7 +500,14 @@ impl PivKey {
             {
                 Ok(encode_tlv(0x87, &key.public_key()))
             }
-            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+            SoftwarePrivateKey::HybridKem(key)
+                if self.algorithm.hybrid_kem() == Some(key.construction()) =>
+            {
+                Ok(encode_tlv(0x87, &key.public_key().map_err(|_| ())?))
+            }
+            SoftwarePrivateKey::Montgomery(_)
+            | SoftwarePrivateKey::MlKem(_)
+            | SoftwarePrivateKey::HybridKem(_) => Err(()),
         }
     }
 
@@ -458,14 +525,41 @@ impl PivKey {
                 )
                 .map_err(|_| ())
             }
-            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+            SoftwarePrivateKey::HybridKem(key)
+                if self.algorithm.hybrid_kem() == Some(key.construction()) =>
+            {
+                let oid = match key.construction() {
+                    HybridKemConstruction::MlKem768P256 => {
+                        ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.11.1")
+                    }
+                    HybridKemConstruction::MlKem768X25519 => {
+                        ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.11.2")
+                    }
+                    HybridKemConstruction::MlKem1024P384 => {
+                        ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.11.3")
+                    }
+                };
+                Ok(SubjectPublicKeyInfoOwned {
+                    algorithm: AlgorithmIdentifierOwned {
+                        oid,
+                        parameters: None,
+                    },
+                    subject_public_key: BitString::from_bytes(&key.public_key().map_err(|_| ())?)
+                        .map_err(|_| ())?,
+                })
+            }
+            SoftwarePrivateKey::Montgomery(_)
+            | SoftwarePrivateKey::MlKem(_)
+            | SoftwarePrivateKey::HybridKem(_) => Err(()),
         }
     }
 
     fn signing_key(&self) -> Result<&SoftwareSigningKey, ()> {
         match &self.private_key {
             SoftwarePrivateKey::Signing(key) => Ok(key),
-            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => Err(()),
+            SoftwarePrivateKey::Montgomery(_)
+            | SoftwarePrivateKey::MlKem(_)
+            | SoftwarePrivateKey::HybridKem(_) => Err(()),
         }
     }
 }
@@ -1754,6 +1848,9 @@ impl PivApplet {
                 PivAlgorithm::MlKem512 | PivAlgorithm::MlKem768 | PivAlgorithm::MlKem1024 => {
                     input.len() != key.algorithm.input_length()
                 }
+                PivAlgorithm::HybridMlKem768P256
+                | PivAlgorithm::HybridMlKem768X25519
+                | PivAlgorithm::HybridMlKem1024P384 => input.len() != key.algorithm.input_length(),
                 PivAlgorithm::X25519 => {
                     return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 }
@@ -1763,6 +1860,14 @@ impl PivApplet {
             }
             if key.algorithm.ml_kem_parameter_set().is_some() {
                 let SoftwarePrivateKey::MlKem(private_key) = &key.private_key else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                };
+                let Ok(shared_secret) = private_key.decapsulate(input) else {
+                    return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                };
+                shared_secret.to_vec()
+            } else if key.algorithm.hybrid_kem().is_some() {
+                let SoftwarePrivateKey::HybridKem(private_key) = &key.private_key else {
                     return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                 };
                 let Ok(shared_secret) = private_key.decapsulate(input) else {
@@ -1840,6 +1945,7 @@ impl PivApplet {
                     private_key.derive(peer_public_key).map_err(|_| ())
                 }
                 SoftwarePrivateKey::MlKem(_) => Err(()),
+                SoftwarePrivateKey::HybridKem(_) => Err(()),
             };
             let Ok(shared_secret) = shared_secret else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -3395,7 +3501,9 @@ mod tests {
             ..
         } = (match &piv.keys.get(&0x9d).unwrap().private_key {
             SoftwarePrivateKey::Signing(key) => key.public_key(),
-            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
+            SoftwarePrivateKey::Montgomery(_)
+            | SoftwarePrivateKey::MlKem(_)
+            | SoftwarePrivateKey::HybridKem(_) => unreachable!(),
         })
         else {
             unreachable!();
@@ -3405,7 +3513,9 @@ mod tests {
             ..
         } = (match &piv.keys.get(&0x82).unwrap().private_key {
             SoftwarePrivateKey::Signing(key) => key.public_key(),
-            SoftwarePrivateKey::Montgomery(_) | SoftwarePrivateKey::MlKem(_) => unreachable!(),
+            SoftwarePrivateKey::Montgomery(_)
+            | SoftwarePrivateKey::MlKem(_)
+            | SoftwarePrivateKey::HybridKem(_) => unreachable!(),
         })
         else {
             unreachable!();
@@ -3899,6 +4009,150 @@ mod tests {
             );
             assert_eq!(
                 restored.transmit(&command(INS_ATTEST, 0x9d, 0, &[])).status,
+                STATUS_INCORRECT_DATA
+            );
+        }
+    }
+
+    #[test]
+    fn concrete_hybrid_kems_generate_import_persist_decapsulate_and_attest() {
+        use software_key_core::hybrid_kem::{HybridKemPrivateKey, hybrid_kem_encapsulate};
+
+        for (algorithm, construction, public_length, expected_oid) in [
+            (
+                PivAlgorithm::HybridMlKem768P256,
+                HybridKemConstruction::MlKem768P256,
+                1_249,
+                "1.3.6.1.4.1.41482.11.1",
+            ),
+            (
+                PivAlgorithm::HybridMlKem768X25519,
+                HybridKemConstruction::MlKem768X25519,
+                1_216,
+                "1.3.6.1.4.1.41482.11.2",
+            ),
+            (
+                PivAlgorithm::HybridMlKem1024P384,
+                HybridKemConstruction::MlKem1024P384,
+                1_665,
+                "1.3.6.1.4.1.41482.11.3",
+            ),
+        ] {
+            let mut piv = PivApplet::new(29, [5, 8, 0]);
+            authenticate_management(
+                &mut piv,
+                ManagementAlgorithm::Aes192,
+                &FACTORY_MANAGEMENT_KEY,
+            );
+            let generate = encode_tlv(
+                0xac,
+                &[
+                    encode_tlv(0x80, &[algorithm as u8]),
+                    encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+                ]
+                .concat(),
+            );
+            let response = piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9d, &generate));
+            assert_eq!(response.status, 0x9000);
+            let public =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7f49).unwrap(), 0x87).unwrap();
+            assert_eq!(public.len(), public_length);
+            let (ciphertext, expected) = hybrid_kem_encapsulate(construction, public).unwrap();
+            let request = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext)].concat(),
+            );
+            let response =
+                piv.transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9d, &request));
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82),
+                Some(expected.as_slice())
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_AUTHENTICATE,
+                    PivAlgorithm::MlKem768 as u8,
+                    0x9d,
+                    &request,
+                ))
+                .status,
+                STATUS_INCORRECT_PARAMETERS
+            );
+            let malformed = encode_tlv(
+                0x7c,
+                &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext[1..])].concat(),
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_AUTHENTICATE,
+                    algorithm as u8,
+                    0x9d,
+                    &malformed,
+                ))
+                .status,
+                STATUS_WRONG_LENGTH
+            );
+
+            let attestation = piv.transmit(&command(INS_ATTEST, 0x9d, 0, &[]));
+            assert_eq!(attestation.status, 0x9000);
+            let certificate = x509_cert::Certificate::from_der(&attestation.data).unwrap();
+            assert_eq!(
+                certificate
+                    .tbs_certificate()
+                    .subject_public_key_info()
+                    .algorithm
+                    .oid
+                    .to_string(),
+                expected_oid
+            );
+
+            let encoded = piv.persistent_state().unwrap();
+            let mut restored = PivApplet::from_persistent_state(29, [5, 8, 0], &encoded).unwrap();
+            assert_eq!(
+                decode_exact_tlv(
+                    decode_exact_tlv(
+                        &restored
+                            .transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9d, &request,))
+                            .data,
+                        0x7c,
+                    )
+                    .unwrap(),
+                    0x82,
+                ),
+                Some(expected.as_slice())
+            );
+
+            let seed = [algorithm as u8; 32];
+            let imported = HybridKemPrivateKey::from_seed_slice(construction, &seed).unwrap();
+            let import = [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &seed),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat();
+            assert_eq!(
+                piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9e, &import))
+                    .status,
+                0x9000
+            );
+            let metadata = piv.transmit(&command(INS_GET_METADATA, 0, 0x9e, &[]));
+            let fields = decode_tlvs(&metadata.data).unwrap();
+            assert_eq!(
+                decode_exact_tlv(unique_field(&fields, 0x04).unwrap(), 0x87),
+                Some(imported.public_key().unwrap().as_slice())
+            );
+            assert_eq!(
+                piv.transmit(&command(
+                    INS_IMPORT_KEY,
+                    algorithm as u8,
+                    0x9e,
+                    &encode_tlv(IMPORT_TAG_PQ_SEED, &seed[..31]),
+                ))
+                .status,
+                STATUS_INCORRECT_DATA
+            );
+            assert_eq!(
+                piv.transmit(&command(INS_ATTEST, 0x9e, 0, &[])).status,
                 STATUS_INCORRECT_DATA
             );
         }
