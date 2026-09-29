@@ -52,6 +52,12 @@ applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
 `GENERATE ASYMMETRIC KEY PAIR` and key metadata use tag `87` inside the public
 key template `7F49` for the raw ML-DSA or ML-KEM public key. This tag is also
 private and may change if PIV standardization assigns a different format.
+For ML-DSA only, `GENERAL AUTHENTICATE` additionally accepts optional inner
+tag `88` containing a 0–255-byte signing context and optional inner tag `89`
+containing one byte: `01` for hedge preferred (the default), `02` for hedge
+required, or `03` for deterministic required. Duplicate, unknown, or
+malformed option fields are rejected. These option tags and values are
+provisional extensions; the current PIV PQC drafts do not allocate them.
 PIN and touch policies apply to both operations. Key generation and persistent
 restore are supported. The private `IMPORT KEY` command (`FE`, P1 = algorithm
 ID, P2 = slot) accepts a single private tag `09` containing the 32-byte
