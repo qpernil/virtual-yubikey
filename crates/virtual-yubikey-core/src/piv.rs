@@ -8,7 +8,10 @@ use const_oid::ObjectIdentifier;
 use der::{Decode, asn1::OctetString};
 use software_key_core::{
     certificate_signing::{CertificateSigner, subject_public_key_info},
-    post_quantum::{MlDsaParameterSet, MlKemParameterSet, MlKemPrivateKey, ml_kem_public_key_info},
+    post_quantum::{
+        MlDsaParameterSet, MlDsaRandomization, MlKemParameterSet, MlKemPrivateKey,
+        ml_kem_public_key_info,
+    },
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey, derive_with_signing_key},
     software_private_key::SoftwarePrivateKey,
     software_signing::{
@@ -57,6 +60,9 @@ const INS_SET_RETRIES: u8 = 0xfa;
 const INS_RESET: u8 = 0xfb;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 const IMPORT_TAG_PQ_SEED: u32 = 0x09;
+// Provisional ML-DSA GENERAL AUTHENTICATE extensions; not allocated by SP 800-73.
+const AUTH_TAG_ML_DSA_CONTEXT: u32 = 0x88;
+const AUTH_TAG_ML_DSA_HEDGE: u32 = 0x89;
 
 const REFERENCE_PIN: u8 = 0x80;
 const REFERENCE_PUK: u8 = 0x81;
@@ -1696,14 +1702,31 @@ impl PivApplet {
         let Some(fields) = decode_tlvs(dynamic) else {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         };
-        if fields.len() != 2
+        let ml_dsa = key.algorithm.ml_dsa_parameter_set().is_some();
+        if fields.len() < 2
+            || fields.len() > if ml_dsa { 4 } else { 2 }
             || unique_field(&fields, 0x82) != Some(&[][..])
-            || fields
-                .iter()
-                .any(|(tag, _)| !matches!(*tag, 0x81 | 0x82 | 0x85))
+            || (ml_dsa
+                && [AUTH_TAG_ML_DSA_CONTEXT, AUTH_TAG_ML_DSA_HEDGE]
+                    .iter()
+                    .any(|tag| fields.iter().filter(|(field, _)| field == tag).count() > 1))
+            || fields.iter().any(|(tag, _)| {
+                !matches!(*tag, 0x81 | 0x82 | 0x85)
+                    && !(ml_dsa && matches!(*tag, AUTH_TAG_ML_DSA_CONTEXT | AUTH_TAG_ML_DSA_HEDGE))
+            })
         {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
         }
+        let context = unique_field(&fields, AUTH_TAG_ML_DSA_CONTEXT).unwrap_or_default();
+        if context.len() > 255 {
+            return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+        }
+        let randomization = match unique_field(&fields, AUTH_TAG_ML_DSA_HEDGE) {
+            None | Some([1]) => MlDsaRandomization::HedgePreferred,
+            Some([2]) => MlDsaRandomization::Randomized,
+            Some([3]) => MlDsaRandomization::Deterministic,
+            _ => return ResponseApdu::status(STATUS_INCORRECT_DATA).into(),
+        };
         let presence_policy = match key.touch_policy {
             TOUCH_POLICY_NEVER => None,
             TOUCH_POLICY_ALWAYS => Some(UserPresencePolicy::Always),
@@ -1754,15 +1777,22 @@ impl PivApplet {
                     private_key
                         .sign_rsa_raw(input)
                         .map(|signature| signature.into_bytes())
-                } else if key.algorithm == PivAlgorithm::Ed25519
-                    || key.algorithm.ml_dsa_parameter_set().is_some()
-                {
+                        .map_err(|_| ())
+                } else if key.algorithm.ml_dsa_parameter_set().is_some() {
+                    let SoftwareSigningKey::MlDsa(private_key) = private_key else {
+                        return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+                    };
+                    private_key
+                        .sign(input, context, randomization)
+                        .map_err(|_| ())
+                } else if key.algorithm == PivAlgorithm::Ed25519 {
                     let Some(algorithm) = key.algorithm.signing_algorithm() else {
                         return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                     };
                     private_key
                         .sign_message(algorithm, input)
                         .map(|signature| signature.into_bytes())
+                        .map_err(|_| ())
                 } else {
                     let Some(algorithm) = key.algorithm.signing_algorithm() else {
                         return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -1770,6 +1800,7 @@ impl PivApplet {
                     private_key
                         .sign_prehash(algorithm, input)
                         .map(|signature| signature.into_bytes())
+                        .map_err(|_| ())
                 };
                 let Ok(signature) = signature else {
                     return ResponseApdu::status(STATUS_INTERNAL_ERROR).into();
@@ -3479,6 +3510,85 @@ mod tests {
                 0x9000
             );
         }
+    }
+
+    #[test]
+    fn ml_dsa_general_authenticate_accepts_context_and_hedging_options() {
+        let mut piv = PivApplet::new(28, [5, 8, 0]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        let generate = encode_tlv(
+            0xac,
+            &[
+                encode_tlv(0x80, &[PivAlgorithm::MlDsa44 as u8]),
+                encode_tlv(0xaa, &[PIN_POLICY_NEVER]),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            piv.transmit(&command(INS_GENERATE_ASYMMETRIC, 0, 0x9e, &generate))
+                .status,
+            0x9000
+        );
+        let message = b"PIV context option";
+        let context = b"PKCS11";
+        let SoftwarePrivateKey::Signing(key) = &piv.keys[&0x9e].private_key else {
+            unreachable!()
+        };
+        let SoftwarePublicKey::MlDsa { public_key, .. } = key.public_key() else {
+            unreachable!()
+        };
+        for hedge in [1, 2, 3] {
+            let request = encode_tlv(
+                0x7c,
+                &[
+                    encode_tlv(0x82, &[]),
+                    encode_tlv(0x81, message),
+                    encode_tlv(AUTH_TAG_ML_DSA_CONTEXT, context),
+                    encode_tlv(AUTH_TAG_ML_DSA_HEDGE, &[hedge]),
+                ]
+                .concat(),
+            );
+            let response = piv.transmit(&command(
+                INS_AUTHENTICATE,
+                PivAlgorithm::MlDsa44 as u8,
+                0x9e,
+                &request,
+            ));
+            assert_eq!(response.status, 0x9000);
+            let signature =
+                decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82).unwrap();
+            software_key_core::post_quantum::verify_ml_dsa(
+                MlDsaParameterSet::MlDsa44,
+                &public_key,
+                message,
+                context,
+                signature,
+            )
+            .unwrap();
+        }
+        let invalid = encode_tlv(
+            0x7c,
+            &[
+                encode_tlv(0x82, &[]),
+                encode_tlv(0x81, message),
+                encode_tlv(AUTH_TAG_ML_DSA_HEDGE, &[4]),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                PivAlgorithm::MlDsa44 as u8,
+                0x9e,
+                &invalid
+            ))
+            .status,
+            STATUS_INCORRECT_DATA
+        );
     }
 
     #[test]
