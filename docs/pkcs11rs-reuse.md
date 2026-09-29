@@ -5,18 +5,19 @@
 Keep `virtual-yubikey` and `pkcs11rs` as separate Git repositories. The Pi
 gadget must not depend on the complete PKCS #11 provider. The transport-neutral
 `virtual-yubikey-core` crate therefore lives in this repository. Reusable
-device behavior is implemented in the core and exercised over both standalone
-and USB paths. `pkcs11rs` uses `virtual-yubikey-core` through its optional
-`embedded-virtual-yubikey` integration-test feature. The fixture selects the
-FIDO2 applet through its smart-card APDU interface and exposes one process-local
-FIDO2 PKCS #11 slot. It does not publish the core's PIV, YubiHSM Auth,
-Management, or Issuer Security Domain applets as PKCS #11 slots and is not a
-persistent virtual-device deployment model.
+device behavior is implemented in the core and exercised over standalone, USB,
+and in-process CCID paths. `pkcs11rs` uses `virtual-yubikey-core` through its
+optional `embedded-virtual-yubikey` feature. Runtime configuration can create
+one or more logical CCID readers, always with Management identity and with any
+implemented PKCS #11 applet explicitly enabled. Those applets pass through the
+ordinary pkcs11rs CCID discovery and slot-construction path.
 
-CI builds the fixture with `--no-default-features`, compiling out native USB,
-HID, and PC/SC support while retaining the general configuration parser. A
-feature-enabled build without that flag remains additive for deliberate manual
-testing, but it is not the supported fixture boundary.
+CI builds an embedded reader with `--no-default-features`, compiling out native
+USB, HID, and PC/SC support while retaining the ordinary CCID controller. A
+feature-enabled build without that flag makes configured embedded readers
+additive to external hardware. Readers are ephemeral by default; persistent
+readers use pkcs11rs token storage and the core's versioned whole-device applet
+state.
 
 Protocol-neutral software key operations live in the independent sibling
 `software-key-core` repository. Both this workspace and `pkcs11rs` consume the
@@ -51,10 +52,10 @@ and secure-messaging coverage.
 | `software-key-core::arkg` | ARKG-P256 public derivation, authenticated tickets, and matching private-scalar derivation; previewSign retains COSE/CBOR and device seed state |
 | `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
 | `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
-| `pkcs11rs` embedded FIDO2 fixture | Implements the provider's internal connector trait, selects FIDO2 over APDUs, and exercises exported PKCS #11 entry points without a USB or PC/SC transport |
+| `pkcs11rs` embedded CCID readers | Implement the provider's internal connector trait and exercise configured core applets through normal Management discovery and PKCS #11 slot construction without USB or PC/SC |
 
 ```text
-virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs FIDO2 test fixture
+virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs embedded CCID readers
                                       |
                                       v
                                  software-key-core <---- pkcs11rs software backend
@@ -82,9 +83,8 @@ select only the combinations advertised by their COSE algorithms.
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
    PIV, and YubiHSM Auth through CCID.
-4. Keep the `pkcs11rs` embedded FIDO2 fixture and its full-cycle PKCS #11 tests
-   running against the core as FIDO coverage expands. Other applets remain
-   available to direct protocol tests without being exposed as embedded slots.
+4. Keep the `pkcs11rs` embedded-reader tests running against the core for every
+   configured applet, including full-cycle FIDO and PIV post-quantum coverage.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
    routed through the neutral APIs, retaining PKCS-specific mechanism parsing.
 6. Use the documented sibling checkout set and workspace path dependencies

@@ -614,6 +614,8 @@ impl FidoDispatch<'_> {
 }
 
 impl VirtualYubiKey {
+    const PERSISTENT_STATE_VERSION: u8 = 1;
+
     pub fn new(profile: DeviceProfile) -> Self {
         Self::with_fido_configuration(profile, FidoConfiguration::default())
     }
@@ -656,6 +658,114 @@ impl VirtualYubiKey {
             profile.form_factor,
             security_domain_encoded,
         )?;
+        Ok(Self::with_applets_and_security_domain(
+            profile,
+            piv,
+            hsmauth,
+            fido,
+            security_domain,
+        ))
+    }
+
+    /// Restore all durable applet state for one logical device. Transport,
+    /// applet selection, authentication sessions, and secure-channel state are
+    /// deliberately recreated rather than persisted.
+    pub fn from_persistent_state(
+        profile: DeviceProfile,
+        fido_configuration: FidoConfiguration,
+        encoded: &[u8],
+    ) -> Result<Self, &'static str> {
+        let mut decoder = minicbor::Decoder::new(encoded);
+        let fields = decoder
+            .map()
+            .map_err(|_| "persistent device state is not a CBOR map")?
+            .ok_or("indefinite persistent device state is unsupported")?;
+        let mut version = None;
+        let mut piv = None;
+        let mut hsmauth = None;
+        let mut security_domain = None;
+        let mut fido = None;
+        for _ in 0..fields {
+            match decoder
+                .u8()
+                .map_err(|_| "persistent device state has an invalid field")?
+            {
+                1 if version.is_none() => {
+                    version = Some(
+                        decoder
+                            .u8()
+                            .map_err(|_| "persistent device state has an invalid version")?,
+                    );
+                }
+                2 if piv.is_none() => {
+                    piv = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "persistent device state has invalid PIV data")?
+                            .to_vec(),
+                    );
+                }
+                3 if hsmauth.is_none() => {
+                    hsmauth = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "persistent device state has invalid HSM Auth data")?
+                            .to_vec(),
+                    );
+                }
+                4 if security_domain.is_none() => {
+                    security_domain = Some(
+                        decoder
+                            .bytes()
+                            .map_err(
+                                |_| "persistent device state has invalid Security Domain data",
+                            )?
+                            .to_vec(),
+                    );
+                }
+                5 if fido.is_none() => {
+                    fido = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "persistent device state has invalid FIDO data")?
+                            .to_vec(),
+                    );
+                }
+                _ => decoder
+                    .skip()
+                    .map_err(|_| "persistent device state contains invalid data")?,
+            }
+        }
+        if decoder.position() != encoded.len() {
+            return Err("persistent device state has trailing data");
+        }
+        if version != Some(Self::PERSISTENT_STATE_VERSION) {
+            return Err("unsupported persistent device state version");
+        }
+        let piv = piv.ok_or("persistent device state has no PIV data")?;
+        let hsmauth = hsmauth.ok_or("persistent device state has no HSM Auth data")?;
+        let security_domain =
+            security_domain.ok_or("persistent device state has no Security Domain data")?;
+        let fido = fido.ok_or("persistent device state has no FIDO data")?;
+        let piv = piv::PivApplet::from_persistent_state_with_form_factor(
+            profile.serial,
+            profile.firmware,
+            profile.form_factor,
+            &piv,
+        )?;
+        let hsmauth = hsmauth::HsmAuthApplet::from_persistent_state(
+            profile.serial,
+            profile.firmware,
+            &hsmauth,
+        )?;
+        let security_domain = security_domain::SecurityDomain::from_persistent_state(
+            profile.serial,
+            profile.firmware,
+            profile.form_factor,
+            &security_domain,
+        )?;
+        let fido =
+            FidoAuthenticator::from_persistent_state(profile.serial, fido_configuration, &fido)?;
         Ok(Self::with_applets_and_security_domain(
             profile,
             piv,
@@ -712,6 +822,44 @@ impl VirtualYubiKey {
         self.security_domain.persistent_state()
     }
 
+    pub fn fido_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.fido.persistent_state()
+    }
+
+    /// Encode all durable applet state in one versioned device record.
+    pub fn persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        let piv = self.piv_persistent_state()?;
+        let hsmauth = self.hsmauth_persistent_state()?;
+        let security_domain = self.security_domain_persistent_state()?;
+        let fido = self.fido_persistent_state()?;
+        let mut encoded = Vec::new();
+        let mut encoder = minicbor::Encoder::new(&mut encoded);
+        encoder
+            .map(5)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(1)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(Self::PERSISTENT_STATE_VERSION)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(2)
+            .map_err(|_| "cannot encode persistent device state")?
+            .bytes(&piv)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(3)
+            .map_err(|_| "cannot encode persistent device state")?
+            .bytes(&hsmauth)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(4)
+            .map_err(|_| "cannot encode persistent device state")?
+            .bytes(&security_domain)
+            .map_err(|_| "cannot encode persistent device state")?
+            .u8(5)
+            .map_err(|_| "cannot encode persistent device state")?
+            .bytes(&fido)
+            .map_err(|_| "cannot encode persistent device state")?;
+        Ok(encoded)
+    }
+
     pub fn scp11b_public_key(&self) -> Vec<u8> {
         self.security_domain.scp11b_public_key()
     }
@@ -756,6 +904,17 @@ impl VirtualYubiKey {
 
     pub fn take_security_domain_persistent_change(&mut self) -> bool {
         self.security_domain.take_persistent_change()
+    }
+
+    pub fn take_fido_persistent_change(&mut self) -> bool {
+        self.fido.take_persistent_change()
+    }
+
+    pub fn take_persistent_change(&mut self) -> bool {
+        self.take_piv_persistent_change()
+            | self.take_hsmauth_persistent_change()
+            | self.take_security_domain_persistent_change()
+            | self.take_fido_persistent_change()
     }
 
     pub fn profile(&self) -> &DeviceProfile {
@@ -1598,6 +1757,24 @@ mod tests {
             .unwrap_err(),
             "persistent PIV state belongs to another device serial"
         );
+    }
+
+    #[test]
+    fn whole_device_persistence_round_trips_all_applets_without_session_state() {
+        let profile = DeviceProfile::yubikey_5_8_ccid(0x01020304);
+        let mut device = VirtualYubiKey::new(profile.clone());
+        device.transmit(&select(&HSMAUTH_AID));
+        let put = hsmauth_symmetric_put("persistent", false);
+        assert_eq!(
+            device.transmit(&short_apdu(0, 0x01, 0, 0, &put, None)),
+            [0x90, 0]
+        );
+        let encoded = device.persistent_state().unwrap();
+        let restored =
+            VirtualYubiKey::from_persistent_state(profile, FidoConfiguration::default(), &encoded)
+                .unwrap();
+        assert_eq!(restored.selected_applet(), None);
+        assert_eq!(restored.persistent_state().unwrap(), encoded);
     }
 
     #[test]
