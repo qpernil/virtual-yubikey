@@ -28,7 +28,7 @@ Yubico-defined commands.
 | Area | Current behavior |
 | --- | --- |
 | Base card interface | `SELECT`, `GET DATA`, `VERIFY`, `CHANGE REFERENCE DATA`, `RESET RETRY COUNTER`, `GENERAL AUTHENTICATE`, `PUT DATA`, and `GENERATE ASYMMETRIC KEY PAIR` are implemented for the supported contact-interface profile. |
-| Administration key | 3TDEA and AES-128/192/256 external and mutual authentication are implemented. The reset profile uses the YubiKey 5.7-and-later AES-192 default. |
+| Administration key | 3TDEA and AES-128/192/256 external and mutual authentication are implemented. A pending management challenge is continued only by `GENERAL AUTHENTICATE` to reference `9B`; any other APDU, or a wrong continuation, consumes the challenge and clears management authentication before normal command processing. A caller may safely relinquish authorization by starting an exchange and discarding the card response, leaving no value with which it can construct a valid continuation. The reset profile uses the YubiKey 5.7-and-later AES-192 default. |
 | Data objects | The Discovery Object and the factory PIV attestation certificate (`5FFF01`) are built in. Other objects are management-authorized, persistent byte strings addressed by their PIV tag. The applet does not validate each object's internal PIV encoding. |
 | PIN-protected object reads | `GET DATA` requires a verified PIN for fingerprints (`5FC103`), facial image (`5FC108`), printed information (`5FC109`), and iris images (`5FC121`). The pairing-code reference data (`5FC123`) is not PIN-protected by the contact-interface access rule. On-card biometric comparison and its OCC access path are not implemented. |
 | Issued-card contents | Reset produces an unprovisioned YubiKey-compatible applet. It does not synthesize the mandatory CCC, CHUID, PIV Authentication certificate, Card Authentication certificate, fingerprint, facial-image, or Security Object contents of an issued PIV Card. Provisioning software may store these objects. |
@@ -36,6 +36,16 @@ Yubico-defined commands.
 | PIV secure messaging | The NIST PIV Secure Messaging key (`04`), cipher suites, SM-AUTH, and Virtual Contact Interface are not implemented. The separate YubiKey/GlobalPlatform boundary implements SCP03 and SCP11a/b/c secure messaging around the selected PIV applet and the other selectable CCID applets. |
 | Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are YubiKey compatibility algorithms; ML-DSA-44/65/87, ML-KEM-512/768/1024, and the concrete hybrid PQ/T KEMs use the private extension below. |
 | YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, Ed25519, ML-DSA, ML-KEM, and concrete hybrid KEM keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the firmware, serial, PIN/touch-policy, and form-factor extensions. F9 may use RSA, EC, Ed25519, or ML-DSA; changing it refreshes the matching self-signed `5FFF01` certificate. PIV reset preserves the key and certificate. |
+
+SP 800-73-5 Part 2, Section 2.4.2, requires an aborted or failed
+authentication protocol to clear its credential's security-status indicator;
+Appendix A.2 defines the two-command administration-key protocol. A later APDU
+that is not a valid `GENERAL AUTHENTICATE` continuation for reference `9B`
+therefore abandons that protocol and must clear the Administration Key status.
+The resulting next-APDU behavior is also verified against YubiKey firmware
+5.2.4 and 5.7.4. The standard's separate rollback rule for interrupted
+`GENERAL AUTHENTICATE` APDU command chaining concerns a different transport
+mechanism.
 
 ## Private post-quantum PIV extension
 

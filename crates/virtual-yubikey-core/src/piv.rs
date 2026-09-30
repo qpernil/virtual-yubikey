@@ -1112,6 +1112,14 @@ impl PivApplet {
         command: &CommandApdu<'_>,
         presence: PresenceAuthorization,
     ) -> PivExchange {
+        if self.management_challenge.is_some()
+            && !(command.cla == 0
+                && command.ins == INS_AUTHENTICATE
+                && command.p2 == REFERENCE_MANAGEMENT_KEY)
+        {
+            self.management_challenge = None;
+            self.management_authenticated = false;
+        }
         if command.cla != 0 {
             return ResponseApdu::status(STATUS_CLASS_NOT_SUPPORTED).into();
         }
@@ -1667,6 +1675,14 @@ impl PivApplet {
         command: &CommandApdu<'_>,
         presence: PresenceAuthorization,
     ) -> PivExchange {
+        // Any GENERAL AUTHENTICATE directed at the management-key reference
+        // while a management exchange is pending is its second attempt. It
+        // consumes the pending challenge and clears prior management
+        // authorization whether the continuation succeeds or fails.
+        let pending_challenge = self.management_challenge.take();
+        if pending_challenge.is_some() {
+            self.management_authenticated = false;
+        }
         if command.p2 != REFERENCE_MANAGEMENT_KEY || command.p1 != self.management_algorithm as u8 {
             return ResponseApdu::status(STATUS_INCORRECT_PARAMETERS).into();
         }
@@ -1719,7 +1735,7 @@ impl PivApplet {
             if host_response.len() != block_size {
                 return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
             }
-            let Some(challenge) = self.management_challenge.take() else {
+            let Some(challenge) = pending_challenge else {
                 return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
             };
             let Ok(expected) = self.management_algorithm.crypt_block(
@@ -1747,7 +1763,7 @@ impl PivApplet {
         if card_response.len() != block_size || host_challenge.len() != block_size {
             return ResponseApdu::status(STATUS_WRONG_LENGTH).into();
         }
-        let Some(expected) = self.management_challenge.take() else {
+        let Some(expected) = pending_challenge else {
             return ResponseApdu::status(STATUS_CONDITIONS_NOT_SATISFIED).into();
         };
         if !bool::from(expected.as_slice().ct_eq(card_response)) {
@@ -4688,6 +4704,113 @@ mod tests {
         );
         assert_eq!(piv.transmit(&sign).status, 0x9000);
         assert_eq!(piv.transmit(&sign).status, 0x9000);
+    }
+
+    #[test]
+    fn different_reference_after_management_challenge_clears_management_authentication() {
+        let mut piv = PivApplet::new(22, [5, 7, 4]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert!(piv.management_authenticated);
+
+        let request = encode_tlv(0x7c, &encode_tlv(0x80, &[]));
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                ManagementAlgorithm::Aes192 as u8,
+                REFERENCE_MANAGEMENT_KEY,
+                &request,
+            ))
+            .status,
+            0x9000
+        );
+        assert!(piv.management_authenticated);
+        assert!(piv.management_challenge.is_some());
+
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                ManagementAlgorithm::Aes192 as u8,
+                0,
+                &[],
+            ))
+            .status,
+            STATUS_REFERENCE_NOT_FOUND
+        );
+        assert!(!piv.management_authenticated);
+        assert!(piv.management_challenge.is_none());
+    }
+
+    #[test]
+    fn non_authentication_apdu_after_management_challenge_clears_management_authentication() {
+        let mut piv = PivApplet::new(24, [5, 7, 4]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+
+        let request = encode_tlv(0x7c, &encode_tlv(0x80, &[]));
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                ManagementAlgorithm::Aes192 as u8,
+                REFERENCE_MANAGEMENT_KEY,
+                &request,
+            ))
+            .status,
+            0x9000
+        );
+        assert!(piv.management_authenticated);
+        assert!(piv.management_challenge.is_some());
+
+        assert_eq!(
+            piv.transmit(&command(INS_GET_VERSION, 0, 0, &[])).status,
+            0x9000
+        );
+        assert!(!piv.management_authenticated);
+        assert!(piv.management_challenge.is_none());
+    }
+
+    #[test]
+    fn wrong_management_continuation_clears_management_authentication() {
+        let mut piv = PivApplet::new(23, [5, 7, 4]);
+        authenticate_management(
+            &mut piv,
+            ManagementAlgorithm::Aes192,
+            &FACTORY_MANAGEMENT_KEY,
+        );
+        assert!(piv.management_authenticated);
+
+        let request = encode_tlv(0x7c, &encode_tlv(0x80, &[]));
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                ManagementAlgorithm::Aes192 as u8,
+                REFERENCE_MANAGEMENT_KEY,
+                &request,
+            ))
+            .status,
+            0x9000
+        );
+        let block_size = ManagementAlgorithm::Aes192.block_size();
+        let mut dynamic = encode_tlv(0x80, &vec![0; block_size]);
+        dynamic.extend_from_slice(&encode_tlv(0x81, &vec![0; block_size]));
+        assert_eq!(
+            piv.transmit(&command(
+                INS_AUTHENTICATE,
+                ManagementAlgorithm::Aes192 as u8,
+                REFERENCE_MANAGEMENT_KEY,
+                &encode_tlv(0x7c, &dynamic),
+            ))
+            .status,
+            STATUS_SECURITY_NOT_SATISFIED
+        );
+        assert!(!piv.management_authenticated);
+        assert!(piv.management_challenge.is_none());
     }
 
     #[test]
