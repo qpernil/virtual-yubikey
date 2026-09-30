@@ -452,6 +452,17 @@ the PIV AID keeps that authentication, while selecting another applet or
 beginning SCP03 or SCP11 channel establishment clears it. Secure-channel setup
 does not change the selected AID.
 
+Starting management-key `GENERAL AUTHENTICATE` creates a pending challenge.
+Only a following `GENERAL AUTHENTICATE` for key reference `9B` can continue
+that exchange. Any other APDU clears both the pending challenge and existing
+management-key authentication before it is processed. A wrong or malformed
+continuation to `9B` also consumes the challenge and clears management-key
+authentication. The interrupting APDU is then handled normally. A caller that
+needs to relinquish management authorization can therefore start an exchange,
+discard the card response, and send nothing further. Without that response it
+cannot construct a valid continuation; its next ordinary APDU performs the
+cancellation before normal command processing.
+
 The management-key touch policy is likewise stored, reported by metadata,
 persisted, and enforced when management authentication begins, but it supports
 only `Never` (`0xff`) and `Always` (`0xfe`); the candidate `Cached` encoding
