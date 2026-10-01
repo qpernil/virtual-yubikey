@@ -6,11 +6,11 @@ the target. Existing supervisor profiles can use it after installation to
 `target/release/virtual-yubikey-worker`.
 
 The binary was built from clean `virtual-yubikey` commit
-`9593d99b098f2f6f84e90b806be9a25acac80311` on `ubuntu4`, running Ubuntu
+`dc2941a8ac2e5af51fabad6434e6c1488b130da7` on `ubuntu4`, running Ubuntu
 26.04 LTS on ARM64, with Rust and Cargo 1.98.1 and glibc 2.43. Its path
 dependencies were:
 
-- `software-key-core` at `41e6a13e244be96807ab673f2a229be37972b0ae`;
+- `software-key-core` at `903e7fe3b94b37d96b2d6cd42593dba821f62383`;
 - `usb-gadget-supervisor` at `da7c1afbd1961cee6b1c25d04876d1d403d36a47`;
 - `display-backends` at `e9d4bf3de41567b25925fb50c5e0d37b415ab571`.
 
