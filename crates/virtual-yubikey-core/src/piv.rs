@@ -67,6 +67,7 @@ const IMPORT_TAG_PQ_SEED: u32 = 0x09;
 // Provisional ML-DSA GENERAL AUTHENTICATE extensions; not allocated by SP 800-73.
 const AUTH_TAG_ML_DSA_CONTEXT: u32 = 0x88;
 const AUTH_TAG_ML_DSA_HEDGE: u32 = 0x89;
+const AUTH_TAG_ML_DSA_PREHASH: u32 = 0x8a;
 
 const REFERENCE_PIN: u8 = 0x80;
 const REFERENCE_PUK: u8 = 0x81;
@@ -1814,15 +1815,25 @@ impl PivApplet {
         };
         let ml_dsa = key.algorithm.ml_dsa_parameter_set().is_some();
         if fields.len() < 2
-            || fields.len() > if ml_dsa { 4 } else { 2 }
+            || fields.len() > if ml_dsa { 5 } else { 2 }
             || unique_field(&fields, 0x82) != Some(&[][..])
             || (ml_dsa
-                && [AUTH_TAG_ML_DSA_CONTEXT, AUTH_TAG_ML_DSA_HEDGE]
-                    .iter()
-                    .any(|tag| fields.iter().filter(|(field, _)| field == tag).count() > 1))
+                && [
+                    AUTH_TAG_ML_DSA_CONTEXT,
+                    AUTH_TAG_ML_DSA_HEDGE,
+                    AUTH_TAG_ML_DSA_PREHASH,
+                ]
+                .iter()
+                .any(|tag| fields.iter().filter(|(field, _)| field == tag).count() > 1))
             || fields.iter().any(|(tag, _)| {
                 !matches!(*tag, 0x81 | 0x82 | 0x85)
-                    && !(ml_dsa && matches!(*tag, AUTH_TAG_ML_DSA_CONTEXT | AUTH_TAG_ML_DSA_HEDGE))
+                    && !(ml_dsa
+                        && matches!(
+                            *tag,
+                            AUTH_TAG_ML_DSA_CONTEXT
+                                | AUTH_TAG_ML_DSA_HEDGE
+                                | AUTH_TAG_ML_DSA_PREHASH
+                        ))
             })
         {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -1837,6 +1848,15 @@ impl PivApplet {
             Some([3]) => MlDsaRandomization::Deterministic,
             _ => return ResponseApdu::status(STATUS_INCORRECT_DATA).into(),
         };
+        let prehash = match unique_field(&fields, AUTH_TAG_ML_DSA_PREHASH) {
+            Some([0]) => None,
+            None if !ml_dsa => None,
+            Some([id]) => match software_key_core::post_quantum::MlDsaPrehash::from_id(*id) {
+                Some(hash) => Some(hash),
+                None => return ResponseApdu::status(STATUS_INCORRECT_DATA).into(),
+            },
+            _ => return ResponseApdu::status(STATUS_INCORRECT_DATA).into(),
+        };
         let presence_policy = match key.touch_policy {
             TOUCH_POLICY_NEVER => None,
             TOUCH_POLICY_ALWAYS => Some(UserPresencePolicy::Always),
@@ -1849,6 +1869,9 @@ impl PivApplet {
             return PivExchange::PresenceRequired(policy);
         }
         let result = if let Some(input) = unique_field(&fields, 0x81) {
+            if prehash.is_some_and(|hash| input.len() != hash.digest_length()) {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
+            }
             let invalid_length = match key.algorithm {
                 PivAlgorithm::Rsa1024
                 | PivAlgorithm::Rsa2048
@@ -1903,9 +1926,11 @@ impl PivApplet {
                     let SoftwareSigningKey::MlDsa(private_key) = private_key else {
                         return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
                     };
-                    private_key
-                        .sign(input, context, randomization)
-                        .map_err(|_| ())
+                    match prehash {
+                        Some(hash) => private_key.sign_prehash(input, context, hash, randomization),
+                        None => private_key.sign(input, context, randomization),
+                    }
+                    .map_err(|_| ())
                 } else if key.algorithm == PivAlgorithm::Ed25519 {
                     let Some(algorithm) = key.algorithm.signing_algorithm() else {
                         return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
@@ -3588,7 +3613,12 @@ mod tests {
             let message = b"PIV ML-DSA signs a message, not a prehash";
             let request = encode_tlv(
                 0x7c,
-                &[encode_tlv(0x82, &[]), encode_tlv(0x81, message)].concat(),
+                &[
+                    encode_tlv(0x82, &[]),
+                    encode_tlv(0x81, message),
+                    encode_tlv(AUTH_TAG_ML_DSA_PREHASH, &[0]),
+                ]
+                .concat(),
             );
             let response =
                 piv.transmit(&command(INS_AUTHENTICATE, algorithm as u8, 0x9e, &request));
@@ -3675,6 +3705,7 @@ mod tests {
                     encode_tlv(0x81, message),
                     encode_tlv(AUTH_TAG_ML_DSA_CONTEXT, context),
                     encode_tlv(AUTH_TAG_ML_DSA_HEDGE, &[hedge]),
+                    encode_tlv(AUTH_TAG_ML_DSA_PREHASH, &[0]),
                 ]
                 .concat(),
             );
@@ -3695,6 +3726,61 @@ mod tests {
                 signature,
             )
             .unwrap();
+        }
+        for id in [1, 2, 3, 4, 7, 8, 9, 10, 11, 12] {
+            let hash = software_key_core::post_quantum::MlDsaPrehash::from_id(id).unwrap();
+            let digest = vec![0x42; hash.digest_length()];
+            for hedge in [1, 2, 3] {
+                let request = encode_tlv(
+                    0x7c,
+                    &[
+                        encode_tlv(0x82, &[]),
+                        encode_tlv(0x81, &digest),
+                        encode_tlv(AUTH_TAG_ML_DSA_CONTEXT, context),
+                        encode_tlv(AUTH_TAG_ML_DSA_HEDGE, &[hedge]),
+                        encode_tlv(AUTH_TAG_ML_DSA_PREHASH, &[id]),
+                    ]
+                    .concat(),
+                );
+                let response = piv.transmit(&command(
+                    INS_AUTHENTICATE,
+                    PivAlgorithm::MlDsa44 as u8,
+                    0x9e,
+                    &request,
+                ));
+                assert_eq!(response.status, 0x9000);
+                let signature =
+                    decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82)
+                        .unwrap();
+                software_key_core::post_quantum::verify_ml_dsa_prehash(
+                    MlDsaParameterSet::MlDsa44,
+                    &public_key,
+                    &digest,
+                    context,
+                    signature,
+                    hash,
+                )
+                .unwrap();
+                let short = encode_tlv(
+                    0x7c,
+                    &[
+                        encode_tlv(0x82, &[]),
+                        encode_tlv(0x81, &digest[..digest.len() - 1]),
+                        encode_tlv(AUTH_TAG_ML_DSA_PREHASH, &[id]),
+                    ]
+                    .concat(),
+                );
+                assert_eq!(
+                    piv.transmit(&command(
+                        INS_AUTHENTICATE,
+                        PivAlgorithm::MlDsa44 as u8,
+                        0x9e,
+                        &short
+                    ))
+                    .status,
+                    STATUS_INCORRECT_DATA
+                );
+            }
         }
         let invalid = encode_tlv(
             0x7c,
@@ -3781,7 +3867,12 @@ mod tests {
             let message = b"imported PIV ML-DSA key";
             let signing_request = encode_tlv(
                 0x7c,
-                &[encode_tlv(0x82, &[]), encode_tlv(0x81, message)].concat(),
+                &[
+                    encode_tlv(0x82, &[]),
+                    encode_tlv(0x81, message),
+                    encode_tlv(AUTH_TAG_ML_DSA_PREHASH, &[0]),
+                ]
+                .concat(),
             );
             let response = piv.transmit(&command(
                 INS_AUTHENTICATE,

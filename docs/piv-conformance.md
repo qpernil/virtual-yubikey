@@ -56,7 +56,7 @@ applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
 
 | P1 algorithm ID | Key type | Operation |
 | --- | --- | --- |
-| `E2`, `E3`, `E4` | ML-DSA-44, -65, -87 | Sign the complete message supplied in `7C { 82 empty, 81 message }`; return the raw signature in `7C { 82 signature }`. |
+| `E2`, `E3`, `E4` | ML-DSA-44, -65, -87 | Sign the message or caller-computed digest supplied in `7C { 82 empty, 8A prehash-id, 81 input }`; return the raw signature in `7C { 82 signature }`. |
 | `E5`, `E6`, `E7` | ML-KEM-512, -768, -1024 | Decapsulate the exact-length ciphertext supplied in `7C { 82 empty, 81 ciphertext }`; return the 32-byte shared secret in `7C { 82 secret }`. |
 | `E8`, `E9`, `EA` | MLKEM768-P256, MLKEM768-X25519, MLKEM1024-P384 | Decapsulate the exact-length combined ciphertext supplied in `7C { 82 empty, 81 ciphertext }`; return the construction's 32-byte combined secret in `7C { 82 secret }`. |
 
@@ -64,12 +64,29 @@ applet uses the following private IDs after its Ed25519 `E0` and X25519 `E1`:
 key template `7F49` for the raw ML-DSA, ML-KEM, or combined hybrid public key.
 This tag is also private and may change if PIV standardization assigns a
 different format.
-For ML-DSA only, `GENERAL AUTHENTICATE` additionally accepts optional inner
+For ML-DSA only, `GENERAL AUTHENTICATE` requires inner tag `8A` containing
+a one-byte prehash identifier and additionally accepts optional inner
 tag `88` containing a 0–255-byte signing context and optional inner tag `89`
 containing one byte: `01` for hedge preferred (the default), `02` for hedge
 required, or `03` for deterministic required. Duplicate, unknown, or
 malformed option fields are rejected. These option tags and values are
 provisional extensions; the current PIV PQC drafts do not allocate them.
+Prehash `0` means pure ML-DSA. Nonzero identifiers are the final arc of the
+NIST hash OID: SHA-256/384/512 use `1`/`2`/`3`, SHA-224 uses `4`,
+SHA3-224/256/384/512 use `7`/`8`/`9`/`10`, and SHAKE128/256 use `11`/`12`
+with 32/64-byte digests. Other identifiers and incorrect digest lengths are
+rejected. The caller performs hashing; the applet constructs the FIPS 204
+HashML-DSA domain separator, context, and DER hash OID. Tag `81` contains the
+message for pure mode or the digest for prehash mode, with length determined
+by TLV framing. Empty contexts are valid; 256-byte contexts are rejected.
+
+A PKCS #11 caller can supply a digest with generic `CKM_HASH_ML_DSA`, or
+let the host module hash message parts with a hash-specific mechanism. Both
+use this same applet request; the applet receives the prehash identifier and
+digest. The shared-core [published KAT suite](https://github.com/qpernil/software-key-core/blob/main/docs/known-answer-tests.md)
+checks FIPS 203/204 across all three parameter sets. pkcs11rs embedded PIV
+tests cover direct/multipart hash-specific calls and context boundaries.
+
 PIN and touch policies apply to both operations. Key generation and persistent
 restore are supported. The private `IMPORT KEY` command (`FE`, P1 = algorithm
 ID, P2 = slot) accepts a single private tag `09` containing the 32-byte
