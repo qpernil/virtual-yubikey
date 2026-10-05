@@ -66,7 +66,10 @@ and keeps standalone Pi builds reproducible.
 
 The reusable crypto modules contain no COSE, CTAP, USB, PKCS #11 mechanism,
 object, authorization, or error-code types. FIDO maps COSE identifiers and DER
-signature encoding around them. `pkcs11rs` maps mechanisms, attributes, and
+signature encoding around them. PreviewSign derives a temporary ordinary
+P-256 key and uses the same signing and DER-encoding routine as other FIDO
+keys; it supplies a precomputed digest instead of an assertion message.
+`pkcs11rs` maps mechanisms, attributes, and
 `CKR_*` results around the same raw operations.
 
 The general RSA layer covers raw signatures, caller-controlled PKCS #1 v1.5

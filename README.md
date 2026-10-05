@@ -202,6 +202,12 @@ hardware protection or production side-channel resistance. ML-DSA-87 assertions
 are large; the CTAPHID transport tests complete multi-report responses of the
 same size without truncation.
 
+PreviewSign ARKG derivation produces a temporary ordinary P-256 signing key.
+Both normal assertions and PreviewSign use the same FIDO signing routine and
+ASN.1 DER encoding for ECDSA signatures. Normal assertions hash their signed
+message; PreviewSign signs the caller-supplied digest directly. The host
+converts DER into fixed-width `r || s` when exposing a PKCS #11 signature.
+
 ## FIDO attestation status
 
 `authenticatorMakeCredential` returns `fmt: "none"` and an empty attestation

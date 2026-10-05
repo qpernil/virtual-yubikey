@@ -10,7 +10,7 @@ use software_key_core::{
         ARKG_P256_POINT_LENGTH as P256_POINT_LENGTH, ARKG_P256_TICKET_LENGTH as ARKG_TICKET_LENGTH,
         arkg_p256_derive_private, arkg_p256_public_point,
     },
-    software_signing::{EcCurve, KeyKind, SignatureScheme, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwareSigningKey},
 };
 
 pub(crate) const ARKG_P256_ESP256_ALGORITHM: i64 = -65_539;
@@ -55,10 +55,9 @@ pub(crate) fn seed_cose() -> Result<Vec<u8>, &'static str> {
     Ok(encoded)
 }
 
-pub(crate) fn sign(signing_arguments_cbor: &[u8], digest: &[u8]) -> Result<Vec<u8>, &'static str> {
-    let digest: &[u8; 32] = digest
-        .try_into()
-        .map_err(|_| "previewSign requires a 32-byte digest")?;
+pub(crate) fn derive_signing_key(
+    signing_arguments_cbor: &[u8],
+) -> Result<SoftwareSigningKey, &'static str> {
     let (ticket, context) = decode_signing_arguments(signing_arguments_cbor)?;
     let private = arkg_p256_derive_private(&BLINDING_PRIVATE, &KEM_PRIVATE, &ticket, &context)
         .map_err(|error| match error {
@@ -67,11 +66,8 @@ pub(crate) fn sign(signing_arguments_cbor: &[u8], digest: &[u8]) -> Result<Vec<u
             }
             _ => "private derivation failed",
         })?;
-    let algorithm = SignatureScheme::EcdsaP256Sha256;
     SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &private[..])
-        .and_then(|key| key.sign_prehash(algorithm, digest))
-        .map(|signature| signature.into_bytes())
-        .map_err(|_| "signing failed")
+        .map_err(|_| "invalid derived signing key")
 }
 
 fn decode_signing_arguments(

@@ -136,6 +136,11 @@ impl fmt::Debug for CredentialPrivateKey {
     }
 }
 
+enum SigningInput<'a> {
+    Message(&'a [u8]),
+    Prehash(&'a [u8]),
+}
+
 impl CredentialPrivateKey {
     fn generate(algorithm: FidoCredentialAlgorithm) -> Result<Self, Error> {
         let key = SoftwareSigningKey::generate_for_kind(algorithm.software_key_kind())
@@ -198,12 +203,13 @@ impl CredentialPrivateKey {
         }
     }
 
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+    fn sign(&self, input: SigningInput<'_>) -> Result<Vec<u8>, Error> {
         let algorithm = self.algorithm.software_signing_algorithm();
-        let signature = self
-            .key
-            .sign_message(algorithm, message)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let signature = match input {
+            SigningInput::Message(message) => self.key.sign_message(algorithm, message),
+            SigningInput::Prehash(digest) => self.key.sign_prehash(algorithm, digest),
+        }
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         if let Some(curve) = algorithm.ec_curve() {
             signature
                 .to_ecdsa_der(curve)
@@ -1895,11 +1901,16 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
         if request.signing_key_handle.as_deref() != Some(preview.signing_key_handle.as_slice()) {
             return Ok(vec![CTAP2_ERR_NO_CREDENTIALS]);
         }
-        let signature = crate::preview_sign::sign(
-            request.additional_args.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+        let signing_key = CredentialPrivateKey {
+            algorithm: FidoCredentialAlgorithm::Esp256,
+            key: crate::preview_sign::derive_signing_key(
+                request.additional_args.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+            )
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
+        };
+        let signature = signing_key.sign(SigningInput::Prehash(
             request.to_be_signed.as_deref().ok_or(CKR_DEVICE_ERROR)?,
-        )
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        ))?;
         let mut extensions = Vec::new();
         Encoder::new(&mut extensions)
             .map(1)
@@ -1987,7 +1998,9 @@ fn standard_assertion_response(
     let mut signed = Vec::with_capacity(auth_data.len() + client_data_hash.len());
     signed.extend_from_slice(&auth_data);
     signed.extend_from_slice(client_data_hash);
-    let signature = credential.private_key.sign(&signed)?;
+    let signature = credential
+        .private_key
+        .sign(SigningInput::Message(&signed))?;
     let mut response = vec![CTAP2_OK];
     let mut encoder = Encoder::new(&mut response);
     encoder
@@ -3639,7 +3652,7 @@ mod tests {
 
         let verifying_key =
             VerifyingKey::from_sec1_bytes(&decode_hex(EXPECTED_PUBLIC_KEY)).unwrap();
-        let signature = Signature::from_slice(&signature).unwrap();
+        let signature = Signature::from_der(&signature).unwrap();
         verifying_key.verify_prehash(&digest, &signature).unwrap();
     }
 
