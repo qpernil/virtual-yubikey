@@ -17,7 +17,7 @@ or lifecycle control.
 ```mermaid
 flowchart TB
     subgraph Host["Host computer"]
-        Apps["Browser / ykman / yubico-piv-tool"]
+        Apps["Browser / ykman / yubico-piv-tool / GnuPG"]
         HostUSB["Host USB stack"]
         Apps <--> HostUSB
     end
@@ -48,7 +48,7 @@ flowchart TB
         Profile["Root-owned TOML profile"]
         Supervisor["usb-gadget-supervisor (root)"]
         Worker["virtual-yubikey-worker (unprivileged)"]
-        Core["Virtual YubiKey core: FIDO, Management, PIV, YubiHSM Auth"]
+        Core["Virtual YubiKey core<br/>Management, FIDO2, PIV<br/>OpenPGP, YubiHSM Auth, Issuer SD"]
         State["Persistent state: /var/lib/virtual-yubikey"]
 
         Systemd -. "starts and restarts" .-> Supervisor
@@ -76,7 +76,7 @@ flowchart TB
 | FunctionFS | Exposes one userspace composite function containing FIDO HID and CCID endpoints. |
 | `usb-gadget-supervisor` | Validates the worker personality, owns ep0/ConfigFS/lifecycle, transfers data endpoints, binds the UDC, and cleans up. |
 | `virtual-yubikey-worker` | Publishes its USB personality, answers forwarded setup requests, and implements FIDO and CCID over received endpoint files. |
-| `virtual-yubikey-core` | Implements Management, PIV, YubiHSM Auth, FIDO2, credentials, policy, cryptography, and persistent logical state. |
+| `virtual-yubikey-core` | Implements Management, FIDO2, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, and persistent logical state. |
 
 ## UDC, ConfigFS, and FunctionFS
 
@@ -382,7 +382,7 @@ ykman or yubico-piv-tool
   -> USB bulk CCID message
   -> Pi FunctionFS endpoint
   -> virtual-yubikey-worker
-  -> CCID framing -> APDU -> Management, PIV, YubiHSM Auth, Issuer SD, or FIDO2 applet
+  -> CCID framing -> APDU -> Management, PIV, OpenPGP, YubiHSM Auth, Issuer SD, or FIDO2 applet
 ```
 
 This middleware provides discovery, reader naming, card insertion state,
@@ -586,7 +586,7 @@ flowchart TB
 
 | Virtual appliance | Host-facing applications | USB interfaces | Pi endpoint implementation | Device-specific worker responsibility |
 | --- | --- | --- | --- | --- |
-| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool`, `pkcs11rs` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, PIV, YubiHSM Auth, FIDO2, keys, state, and local activity display |
+| Virtual YubiKey | Browser/WebAuthn, `ykman`, `yubico-piv-tool`, GnuPG, `pkcs11rs` | FIDO HID plus CCID | FunctionFS | USB personality, CTAPHID, CCID, Management, FIDO2, PIV, OpenPGP, YubiHSM Auth, Issuer SD, shared SCP03/SCP11 secure messaging, keys, state, and local activity display |
 | Virtual Trezor | Trezor Suite, `trezorctl`, Trezor Connect | Main vendor/WebUSB, optional debug and U2F HID | Primarily FunctionFS; profile-selected HID where appropriate | Trezor framing, legacy firmware, OLED framebuffer, buttons, wallet state |
 | Virtual YubiHSM | `yubihsm-shell`, PKCS #11 module, SDKs | Vendor-specific bulk OUT/IN | FunctionFS | YubiHSM sessions, commands, objects, capabilities, audit and state |
 

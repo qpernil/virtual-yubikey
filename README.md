@@ -39,6 +39,12 @@ credential management, resident credentials, and `previewSign`.
 | Persistent state | Starts with factory applet identities; credentials, private keys, PIN changes, counters, and Security Domain keys and policy are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
+The implemented applets share one logical device across USB and embedded
+forms. OATH, Yubico OTP, U2F/CTAP1 commands, biometric verification, and NFC
+transport are not implemented. Management supplies identity and capability
+discovery; device-configuration writes are not implemented. Applet-specific
+compatibility gaps are documented in the linked applet guides.
+
 The development profile uses the USB VID/PID, manufacturer string, and product
 naming pattern of a YubiKey 5 solely for controlled, local compatibility
 testing while the project owner seeks Yubico's guidance. These descriptor
@@ -79,9 +85,9 @@ behavior are documented in
 
 The logical core separates key identity from cryptographic operations:
 `KeyKind` is used only at generation/import/restore boundaries, while
-`SignatureScheme` is selected when an applet signs or verifies. PIV, FIDO, and
-YubiHSM Auth retain parsed private keys in memory, so seed expansion and key
-validation are not repeated for every APDU. PIV stores signing and X25519 keys
+`SignatureScheme` is selected when an applet signs or verifies. PIV, FIDO,
+OpenPGP, and YubiHSM Auth retain parsed private keys in memory, so seed expansion
+and key validation are not repeated for every APDU. PIV stores signing and X25519 keys
 through the shared `SoftwarePrivateKey` union; applet algorithms and policy stay
 in the PIV object. Existing applet-specific CBOR records remain persistence DTOs
 rather than runtime key objects.
@@ -107,8 +113,9 @@ applications. USB descriptors and Management capability reports must continue
 to derive from the same profile so the device never advertises behavior its
 firmware does not implement.
 
-See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for the current applet and
-secure-channel boundary, OpenPGP direction, and host-qualification steps.
+See [`docs/applet-roadmap.md`](docs/applet-roadmap.md) for implemented
+applet behavior, GlobalPlatform secure-messaging boundary, and host-qualification
+steps.
 The planned content-addressed persistence and cross-token PKCS #11 key identity
 model is recorded separately in
 [`docs/future-storage-model.md`](docs/future-storage-model.md); it is not the
@@ -116,8 +123,10 @@ active on-disk format yet.
 
 ## PIV development status
 
-The logical PIV applet starts empty and persists separately from FIDO and
-YubiHSM Auth. It supports the ordinary `yubico-piv-tool` lifecycle: factory PIN/PUK and
+The logical PIV applet starts with factory PIN/PUK and attestation identity,
+without provisioned user keys or data. Its record is managed by the same shared
+storage runtime as the other applets. It supports the ordinary `yubico-piv-tool`
+lifecycle: factory PIN/PUK and
 3TDEA/AES management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096, P-256/P-384, Ed25519/X25519,
 ML-DSA-44/65/87, ML-KEM-512/768/1024, and concrete hybrid PQ/T KEM key generation, classical private-key
@@ -154,8 +163,35 @@ every session-key calculation. The wait expires after 15 seconds without a
 touch, while CCID time-extension frames keep the host transaction alive. ISO
 command chaining and `61xx`/`GET RESPONSE`
 response chaining are handled once in the shared APDU router rather than by the
-applet. Its state is independently scheduled and atomically replaced as
-`hsmauth-<serial>.cbor`.
+applet. The shared storage writer atomically replaces its
+`hsmauth-<serial>.cbor` record after mutations.
+
+## OpenPGP
+
+The OpenPGP card 3.4.1 applet provides separate signature, decipher, and
+authentication key slots; key generation and import; public-key reads;
+certificates; fingerprints and creation times; PIN/recovery administration;
+touch policy; and applet reset. Its algorithms include RSA 2048–4096 in 256-bit
+steps, NIST and Brainpool EC curves, secp256k1, Ed25519, and X25519. Like the
+qualified physical YubiKey, its algorithm-information object advertises RSA
+2048, 3072, and 4096 while direct attribute writes accept the intermediate sizes.
+GnuPG `gpg --card-status` and `gpg-card list` have been exercised against the USB
+gadget. Embedded and USB hosts use the same implementation and persistent record.
+The exact commands, access rules, supported algorithms, qualification results,
+and remaining gaps are documented in [OpenPGP](docs/openpgp.md).
+
+## Issuer Security Domain and secure messaging
+
+The Issuer Security Domain provides factory SCP03 keys, a persistent
+certificate-backed P-256 SCP11b identity, and authenticated administration of
+SCP03/SCP11 keys, certificates, host CAs, allowlists, and key deletion. SCP03 and
+SCP11a/c authenticate administrative clients; SCP11b authenticates the card.
+Shared GlobalPlatform SCP03/SCP11a/b/c secure messaging protects every selectable
+CCID applet through command/response authentication, encryption, and chaining.
+Factory reset requires the documented blocked-key conditions and preserves the
+other applets. See [secure messaging](docs/globalplatform-secure-messaging.md)
+for selectors, trust and authorization boundaries, and
+[Security Domain reset](#security-domain-reset) for reset conditions.
 
 ## FIDO PIN handling
 
@@ -412,15 +448,13 @@ The files contain unencrypted private keys and applet credential state
 (OpenPGP retains salted PIN verifiers) and are not secure hardware storage.
 See [shared storage](docs/storage.md) for ownership and host integration.
 
-FIDO persistent state uses CBOR schema version 5 and PIV uses version 4; supported
-older images are migrated when loaded. YubiHSM Auth state uses schema version 1;
-Security Domain state uses schema version 3, including durable attempt counters.
-OpenPGP state uses schema version 1. USB keeps one file per applet; its HID and
-CCID FIDO routes use one shared FIDO state and identity. Embedded readers keep
-all applet records in a version-2 device file; version-1 files retain existing
-state and initialize OpenPGP at factory defaults.
-Unsupported or invalid state is a startup error and is never silently replaced;
-resetting an applet to empty state is an explicit administrative action.
+FIDO persistent state uses CBOR schema version 5, PIV version 4, YubiHSM Auth
+version 1, Security Domain version 3, and OpenPGP version 1. All device forms
+use those same per-applet records. HID and CCID FIDO routes share one
+authenticator state and identity. Supported older per-applet images are decoded
+by their applet codecs; legacy whole-device files are not imported by the shared
+storage loader. Unsupported or invalid records fail startup; resetting an
+applet to factory state is an explicit administrative action.
 
 On worker exit, the still-running supervisor unbinds and removes the old gadget,
 then starts a completely fresh worker incarnation with fresh descriptors. A
@@ -526,9 +560,9 @@ every 100 ms. After touch, the status changes to `PROCESSING` if computation
 continues. These status values, response ownership, and cancellation semantics
 follow the CTAPHID transport specification.
 
-CCID operations use the separate CCID time-extension mechanism. A PIV or
-YubiHSM Auth APDU runs
-on a scoped command thread; if it is still calculating after 500 ms, the CCID
+CCID operations use the separate CCID time-extension mechanism. Every routed
+APDU, including PIV, OpenPGP, YubiHSM Auth, Security Domain and FIDO2 operations,
+runs on a scoped command thread; if it is still calculating after 500 ms, the CCID
 endpoint thread emits `RDR_to_PC_DataBlock` time-extension frames every 500 ms
 with the original slot and sequence number until it can send the final response.
 One worker-wide clock schedules both transports but never writes a USB endpoint

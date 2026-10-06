@@ -307,7 +307,7 @@ def page_terms(story):
                 "              v",
                 "physical link -> UDC -> composite gadget",
                 "                              |",
-                "                   FunctionFS / HID FDs",
+                "                   FunctionFS endpoint FDs",
                 "                              |",
                 "                              v",
                 "                    unprivileged worker",
@@ -323,78 +323,70 @@ def page_terms(story):
 
 def page_descriptors(story):
     story.extend(section("Descriptors become capabilities", "02 / construction"))
-    story.append(p("A device profile contains complete FunctionFS v2 descriptor and string blobs. The supervisor parses them before the worker exists. It validates their structure, derives endpoint order and direction, publishes the blobs to <font name='Courier'>ep0</font>, then opens exactly the files the kernel creates."))
-    story.append(
-        data_table(
-            ["Descriptor fact", "Supervisor consequence", "Worker receives"],
-            [
-                ["One OUT endpoint", "Open generated endpoint read-only", "Readable endpoint FD"],
-                ["One IN endpoint", "Open generated endpoint write-only", "Writable endpoint FD"],
-                ["Interrupt IN endpoint", "Preserve declaration order", "Third endpoint FD in its fixed slot"],
-                ["Multiple speed sets", "Require identical topology", "One stable logical layout"],
-                ["FunctionFS strings", "Validate table, then write to ep0", "No string-file or mount path"],
-            ],
-            [39 * mm, 58 * mm, CONTENT_W - 97 * mm],
-        )
-    )
-    story += [Spacer(1, 5 * mm), p("Why the worker still keeps ep0", "h2")]
-    story.append(p("Publishing descriptors is finished before handoff, but <font name='Courier'>ep0</font> remains the FunctionFS control plane. The worker reads <font name='Courier'>BIND</font>, <font name='Courier'>ENABLE</font>, <font name='Courier'>DISABLE</font>, <font name='Courier'>UNBIND</font>, <font name='Courier'>SUSPEND</font>, <font name='Courier'>RESUME</font>, and class/vendor <font name='Courier'>SETUP</font> events there."))
-    story.append(p("Other USB descriptors do not arrive later. The device, configuration, interface, endpoint, HID report, and FunctionFS string data must all exist before binding. Runtime responses are protocol data, not late descriptor publication."))
-    story.append(callout("The supervisor can verify that the profile's declared endpoint topology matches the exact FD bundle. This removes repeated descriptor-writing code from every worker and makes malformed profiles fail before USB attachment.", PALE_GOLD, GOLD))
+    story.append(p("The worker constructs a typed USB personality and sends it as CBOR in a Configure record. The root-owned profile describes launch arguments and approved local resources. The supervisor validates the personality, creates ConfigFS and FunctionFS, publishes descriptors, and opens the resulting endpoint files."))
+    story.append(data_table(
+        ["Declaration", "Supervisor responsibility", "Worker receives"],
+        [
+            ["Device identity", "Publish VID/PID, strings and configuration", "Its accepted generation"],
+            ["Interface and endpoint map", "Validate directions, types and packet sizes", "Typed endpoint metadata and FDs"],
+            ["FunctionFS descriptors", "Write descriptor and string blobs to ep0", "Only data endpoints"],
+            ["Local named resources", "Open approved SPI/I2C devices and exact GPIO line groups", "Narrow resource handles"],
+        ], [39 * mm, 58 * mm, CONTENT_W - 97 * mm]))
+    story += [Spacer(1, 5 * mm), p("The supervisor retains ep0", "h2")]
+    story.append(p("FunctionFS ep0 remains the privileged control plane. The supervisor reads bind, enable, disable, unbind, suspend and resume events and forwards typed UsbBusEvent records. Setup requests arrive at the worker as UsbControlRequest records; the worker sends UsbControlResponse records without owning ep0."))
+    story.append(p("The complete USB declaration exists before binding. Runtime control replies are protocol responses, not late descriptor publication. Both YubiKey FIDO HID and CCID use one FunctionFS composite function."))
+    story.append(callout("The worker defines the device; the supervisor validates and publishes it. Application payloads then travel directly through data endpoint FDs.", PALE_GOLD, GOLD))
     story.append(PageBreak())
 
 
 def page_protocol(story):
-    story.extend(section("A tiny resource protocol", "03 / file-descriptor handoff"))
-    story.append(p("The supervisor and worker share an <font name='Courier'>AF_UNIX/SOCK_SEQPACKET</font> socket placed on fixed worker descriptor 3. Each normal-data record is eight bytes; open file descriptions travel separately as <font name='Courier'>SCM_RIGHTS</font> ancillary data. The record declares the exact attached FD count."))
-    story.append(code_box(["0..3  magic: UGSP", "4     version: 1", "5     message type", "6..7  exact FD count, big-endian"]))
+    story.extend(section("A typed resource protocol", "03 / file-descriptor handoff"))
+    story.append(p("An AF_UNIX/SOCK_SEQPACKET socket is installed on fixed worker FD 3. UGSP version 1 records have a 20-byte header plus a bounded body. SCM_RIGHTS carries the declared count of attached descriptors. Generation and request identifiers prevent stale control replies from crossing incarnations."))
+    story.append(code_box(["0..3   magic: UGSP", "4      version: 1", "5      message kind", "6..7   attached FD count", "8..11  generation", "12..15 request identifier", "16..19 body length", "20..   body (CBOR for declarations)"]))
+    story += [Spacer(1, 3 * mm)]
+    story.append(data_table(
+        ["Direction", "Record", "Purpose"],
+        [
+            ["Supervisor -> worker", "InitialResources", "Named, approved local resources"],
+            ["Worker -> supervisor", "Configure", "Typed USB personality"],
+            ["Supervisor -> worker", "UsbEndpoints", "Endpoint metadata and data FDs"],
+            ["Worker -> supervisor", "Serving", "Ready before UDC binding"],
+            ["Supervisor -> worker", "UsbBusEvent / UsbControlRequest", "Lifecycle and setup"],
+            ["Worker -> supervisor", "UsbControlResponse", "Setup reply"],
+            ["Both directions", "Quiesce / Quiesced", "Stop endpoint work and flush"],
+        ], [42 * mm, 64 * mm, CONTENT_W - 106 * mm]))
     story += [Spacer(1, 4 * mm)]
-    story.append(
-        data_table(
-            ["Direction", "Message", "Value", "FDs"],
-            [
-                ["Supervisor -> worker", "PREBIND_RESOURCES", "0x01", "FunctionFS ep0 and endpoints"],
-                ["Worker -> supervisor", "PREPARED", "0x81", "0"],
-                ["Supervisor -> worker", "POSTBIND_RESOURCES", "0x02", "ConfigFS HID nodes; explicit 0 is valid"],
-                ["Worker -> supervisor", "SERVING", "0x82", "0"],
-            ],
-            [42 * mm, 48 * mm, 17 * mm, CONTENT_W - 107 * mm],
-        )
-    )
-    story += [Spacer(1, 5 * mm), p("What can be transferred", "h2")]
-    story.append(p("Any descriptor that the receiving process can meaningfully use may be inherited or sent: regular files, pipes, terminals, device nodes, event descriptors, and Unix, TCP, or UDP sockets. The receiver gets a reference to the same open file description: file status flags and offsets are shared, while descriptor-table flags such as close-on-exec belong to each process's descriptor entry."))
-    story.append(p("The sender cannot use <font name='Courier'>SCM_RIGHTS</font> to invent extra kernel permissions. Access mode was fixed when the file was opened, and the worker's later operations remain subject to that file's driver behavior and ordinary process security rules."))
-    story += [Spacer(1, 2 * mm)]
-    story.append(callout("USB, I2C, SPI, and exact GPIO line-request descriptors are sent together in fixed pre-bind message slots. The supervisor closes each broad GPIO-chip descriptor before worker startup. The environment carries no descriptor numbers; it contains only the persistent and runtime directory paths."))
+    story.append(p("A transferred FD references the same open file description, including access mode and shared offsets. It grants only the operations supported by that handle. GPIO resources contain exact claimed line groups; the worker never receives a broad GPIO-chip FD."))
+    story.append(callout("The cleared environment carries state/runtime directory paths, not resource descriptor numbers. Handles arrive through the control socket."))
     story.append(PageBreak())
 
 
 def page_lifecycle(story):
     story.extend(section("One worker, one incarnation", "04 / lifecycle"))
     story.append(code_box([
-        "PREPARING",
-        "  create gadget; publish/open FunctionFS",
-        "       | send pre-bind FDs",
+        "START WORKER with reduced credentials",
+        "       | InitialResources",
         "       v",
-        "AWAITING PREPARED -> BINDING -> send post-bind FDs",
-        "                                  |",
-        "                                  v",
-        "                         AWAITING SERVING",
-        "                                  |",
-        "                                  v",
-        "                               SERVING",
-        "                                  | worker exit / EOF",
-        "                                  v",
-        "CLEANING: unbind, close, reap, unmount, remove",
-        "                                  |",
-        "                                  +----> new PREPARING",
-        "service stop: CLEANING -> supervisor exits",
+        "AWAIT Configure + UsbPersonality",
+        "       | validate; create ConfigFS / FunctionFS",
+        "       v",
+        "SEND UsbEndpoints + data FDs",
+        "       |",
+        "       v",
+        "AWAIT Serving -> bind UDC -> HOST ENUMERATION",
+        "       |",
+        "       +-> forward lifecycle / setup on control socket",
+        "       | worker exit / EOF",
+        "       v",
+        "CLEAN: unbind, close, reap, unmount, remove",
+        "       +-> fresh worker incarnation",
+        "service stop: clean -> supervisor exits",
     ]))
     story += [Spacer(1, 5 * mm)]
-    story.append(p("The two startup acknowledgements protect different boundaries. <font name='Courier'>PREPARED</font> means the worker has validated and initialized the pre-bind resources, so it is safe to expose the USB identity. <font name='Courier'>SERVING</font> means post-bind resources exist and the worker has accepted them."))
-    story.append(p("HID creates the only required second handoff: ConfigFS cannot create <font name='Courier'>/dev/hidgN</font> until after UDC binding. A FunctionFS-only worker such as Virtual Trezor still receives an explicit zero-FD post-bind record, keeping one fixed startup state machine."))
-    story.append(p("There is no light reconnect command. A firmware reconnect is worker exit. The supervisor stays alive, unbinds first, destroys every resource from that incarnation, and launches a fresh Unix process. A service stop performs the same cleanup and then ends the supervisor."))
-    story.append(callout("Process creation is the reset primitive: threads, buffers, endpoints, and capabilities cannot leak from one incarnation into the next."))
+    story.append(p("Serving means the worker has validated the endpoint map and initialized its protocol state. Only then does the supervisor bind the UDC. Virtual YubiKey receives five FunctionFS data endpoints: two FIDO interrupt endpoints and three CCID endpoints. There is no separate post-bind ConfigFS HID handoff."))
+    story.append(p("The supervisor retains ep0 and forwards lifecycle and setup records. The worker handles ordinary protocol traffic directly on its endpoint handles. Quiesce stops endpoint work and flushes durable state before a controlled teardown."))
+    story.append(p("A firmware reconnect is worker exit. The supervisor unbinds first, destroys the incarnation, and launches a fresh Unix process. A service stop performs final cleanup and exits."))
+    story.append(callout("Process creation is the reset primitive for volatile threads, buffers and capabilities. Persistent applet records survive ordinary restart."))
     story.append(PageBreak())
 
 
@@ -405,20 +397,20 @@ def page_data_paths(story):
         data_table(
             ["Device", "Kernel surface", "Worker traffic"],
             [
-                ["Virtual YubiKey", "ConfigFS HID + FunctionFS CCID", "FIDO HID reports; CCID bulk OUT/IN, interrupt IN, and ep0 events"],
-                ["Virtual Trezor", "FunctionFS vendor interface", "64-byte interrupt OUT/IN packets and ep0 events"],
-                ["Virtual YubiHSM", "FunctionFS vendor bulk interface", "Bulk request/response frames and ep0 events"],
+                ["Virtual YubiKey", "FunctionFS HID + CCID", "FIDO reports and CCID data endpoints; setup over the control socket"],
+                ["Virtual Trezor", "FunctionFS vendor interface", "64-byte interrupt OUT/IN packets; forwarded setup and lifecycle"],
+                ["Virtual YubiHSM", "FunctionFS vendor bulk interface", "Bulk request/response frames; forwarded setup and lifecycle"],
             ],
             [33 * mm, 53 * mm, CONTENT_W - 86 * mm],
         )
     )
     story += [Spacer(1, 5 * mm), p("Virtual YubiKey", "h2")]
-    story.append(p("The pre-bind bundle is CCID <font name='Courier'>ep0</font>, bulk OUT, bulk IN, and interrupt IN. The post-bind bundle is the FIDO HID descriptor. The worker owns CCID framing, PC/SC semantics, CTAPHID, applets, credentials, and persistent authenticator state."))
-    story.append(p("The profile advertises manufacturer <font name='Courier'>Virtual USB Gadget</font> and product <font name='Courier'>Virtual Yubico YubiKey FIDO+CCID</font>. Compatibility software may still display an inferred model name such as 'YubiKey 5A'; that UI label is not a USB manufacturer assertion and cannot necessarily be controlled by descriptor strings."))
+    story.append(p("The shared core implements Management, FIDO2, PIV, OpenPGP, YubiHSM Auth, and Issuer Security Domain. GlobalPlatform SCP03/SCP11a/b/c protects every selectable CCID applet. HID and CCID FIDO routes share one authenticator; embedded readers use the same core and per-applet storage runtime."))
+    story.append(p("The worker advertises the compatibility manufacturer Yubico and product YubiKey Gadget FIDO+CCID for controlled local testing. Gadget distinguishes the virtual reader. Host tools include browsers, ykman, yubico-piv-tool, GnuPG and pkcs11rs. This identity does not imply vendor endorsement."))
     story += [Spacer(1, 2 * mm), p("Virtual Trezor", "h2")]
-    story.append(p("The pre-bind bundle is main <font name='Courier'>ep0</font>, OUT, IN, display bus, one display-control output-line handle, and one button input/event-line handle. The post-bind bundle is empty. Profile order defines semantic bit positions; the worker receives no GPIO-chip descriptor or numeric offsets. Upstream firmware logic continues to compose the genuine 128x64 framebuffer. Idle button handling blocks on edge events, while firmware can take immediate atomic snapshots for debounce and holds. Process death releases every inherited handle; orderly exit additionally clears the display."))
+    story.append(p("The worker owns its USB personality and direct OUT/IN endpoint traffic. Named display and button resources are restricted to the profile's declared device and GPIO line groups. Upstream firmware composes the 128x64 framebuffer; button handling uses edge events and atomic snapshots. Orderly exit clears the display."))
     story += [Spacer(1, 2 * mm), p("Virtual YubiHSM", "h2")]
-    story.append(p("The same FunctionFS pattern supports a vendor bulk device. Its profile supplies the descriptors; its worker owns commands, sessions, objects, capabilities, audit behavior, and state. The supervisor needs no YubiHSM-specific code."))
+    story.append(p("The same FunctionFS pattern supports a vendor bulk device. Its worker supplies the USB personality and owns commands, sessions, objects, capabilities, audit behavior, and state. The supervisor needs no YubiHSM-specific code."))
     story.append(PageBreak())
 
 
@@ -430,7 +422,7 @@ def page_host(story):
             ["USB interface", "Host-side path", "Typical application"],
             [
                 ["HID / FIDO", "OS HID + FIDO stack", "Browser, WebAuthn client, libfido2"],
-                ["CCID", "USB CCID driver + PC/SC", "Yubico Authenticator, OpenSC, smart-card tools"],
+                ["CCID", "USB CCID driver + PC/SC", "ykman, GnuPG, OpenSC, pkcs11rs"],
                 ["Trezor vendor interface", "Trezor transport library", "trezorctl, Trezor Suite"],
                 ["Vendor bulk", "libusb or product library", "YubiHSM connector/client"],
             ],
@@ -478,9 +470,9 @@ def page_security(story):
         data_table(
             ["Artifact", "Owner", "Current contract"],
             [
-                ["Profile", "Device project; root-installed", "Schema 1; USB identity; descriptor blobs; worker and hardware resources"],
+                ["Profile", "Device project; root-installed", "Schema 1; worker launch and approved named hardware resources"],
                 ["Supervisor", "Privileged service", "Validate, construct, open, transfer, bind, monitor, unbind, clean"],
-                ["Worker protocol", "Matched deployment set", "UGSP version 1; fixed 8-byte records and fixed resource order"],
+                ["Worker protocol", "Matched deployment set", "UGSP version 1; 20-byte headers, typed bodies, generation and request IDs"],
                 ["Worker", "Unprivileged device project", "Protocol logic, secrets, state, UI, and direct endpoint I/O"],
             ],
             [32 * mm, 47 * mm, CONTENT_W - 79 * mm],
@@ -493,7 +485,7 @@ def page_security(story):
     for item in [
         "Validate the profile before installation and keep the installed copy root-owned.",
         "Confirm endpoint count, order, direction, and host-visible interface order.",
-        "Observe PREPARED, UDC bind, FunctionFS ENABLE, SERVING, and teardown logs.",
+        "Observe Configure, UsbEndpoints, Serving, UDC bind, USB activation and teardown logs.",
         "Kill the worker and verify unbind-first cleanup followed by a fresh process.",
         "Stop the service and verify final UDC, ConfigFS, mount, display, and process cleanup.",
     ]:
