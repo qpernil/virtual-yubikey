@@ -6,13 +6,13 @@ the target. Existing supervisor profiles can use it after installation to
 `target/release/virtual-yubikey-worker`.
 
 The binary was built from clean `virtual-yubikey` commit
-`ee2916694e7cc112fe3011842111851dfe0021a4` on `ubuntu4`, running Ubuntu
-26.04 LTS on ARM64, with Rust and Cargo 1.98.1 and glibc 2.43. Its path
+`9491253dc32014baf66435b2106d01ced4d1383d` on `ubuntu4`, running Ubuntu
+26.04.1 LTS on ARM64, with Rust and Cargo 1.98.1 and glibc 2.43. Its path
 dependencies were:
 
-- `software-key-core` at `d65831a156446231d7f37157da7731d40ebec615`;
-- `usb-gadget-supervisor` at `da7c1afbd1961cee6b1c25d04876d1d403d36a47`;
-- `display-backends` at `e9d4bf3de41567b25925fb50c5e0d37b415ab571`.
+- `software-key-core` at `19172364f7dc5bcd8420b5c62c016424ee4022dd`;
+- `usb-gadget-supervisor` at `26f0ec72e134c9736a617ef822a22460c0bfc1d5`;
+- `display-backends` at `6298250e08d4186ffc4fc8a50ad8a7d16517a5f1`.
 
 It is an AArch64 PIE executable requiring at most `GLIBC_2.34`, compatible
 with the Debian 13 Raspberry Pi targets using glibc 2.41.
