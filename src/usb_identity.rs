@@ -9,6 +9,7 @@ pub(crate) const FIDO_IN: u8 = 0x83;
 pub(crate) const CCID_OUT: u8 = 0x01;
 pub(crate) const CCID_IN: u8 = 0x81;
 pub(crate) const CCID_INTERRUPT_IN: u8 = 0x82;
+pub(crate) const CCID_BULK_PACKET_SIZE: u16 = 64;
 
 pub(crate) const FIDO_REPORT_DESCRIPTOR: [u8; 34] = [
     0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08,
@@ -124,8 +125,8 @@ fn configuration_descriptor() -> Vec<u8> {
 
     body.extend_from_slice(&[9, 4, CCID_INTERFACE, 0, 3, 0x0b, 0, 0, 0]);
     body.extend_from_slice(&ccid_functional_descriptor());
-    endpoint(&mut body, CCID_OUT, 0x02, 64, 0);
-    endpoint(&mut body, CCID_IN, 0x02, 64, 0);
+    endpoint(&mut body, CCID_OUT, 0x02, CCID_BULK_PACKET_SIZE, 0);
+    endpoint(&mut body, CCID_IN, 0x02, CCID_BULK_PACKET_SIZE, 0);
     endpoint(&mut body, CCID_INTERRUPT_IN, 0x03, 8, 32);
 
     let total_length = u16::try_from(9 + body.len()).expect("USB configuration is too large");

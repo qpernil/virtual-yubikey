@@ -36,6 +36,9 @@ const ERROR_BAD_LEVEL_PARAMETER: u8 = 0x08;
 const CCID_HEADER_LENGTH: usize = 10;
 pub(crate) const MAX_CCID_MESSAGE_LENGTH: usize = 3072;
 const MAX_CCID_PAYLOAD: usize = MAX_CCID_MESSAGE_LENGTH - CCID_HEADER_LENGTH;
+// Leave a host read of dwMaxCCIDMessageLength incomplete until the final
+// short packet (or ZLP) is consumed, including during response chaining.
+const MAX_CCID_RESPONSE_PAYLOAD: usize = MAX_CCID_PAYLOAD - 1;
 const MAX_EXTENDED_APDU_LENGTH: usize = 65_544;
 const T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x4d, 0x00, 0xfe, 0x00];
 const TIME_EXTENSION_DELAY: Duration = Duration::from_millis(500);
@@ -91,6 +94,18 @@ impl Device {
         &mut self,
     ) -> Vec<virtual_yubikey_core::storage::PersistentApplet> {
         self.card.take_persistent_applets()
+    }
+
+    /// Read a header packet first, then the exact remaining CCID frame bytes.
+    /// A bounded initial read also tolerates fragmented or coalesced headers.
+    pub(crate) fn next_read_length(&self) -> usize {
+        if self.buffered.len() < CCID_HEADER_LENGTH {
+            return crate::usb_identity::CCID_BULK_PACKET_SIZE as usize;
+        }
+        let payload = u32::from_le_bytes(self.buffered[1..5].try_into().unwrap()) as usize;
+        // receive_inner rejects oversized frames and consumes complete frames.
+        debug_assert!(payload <= MAX_CCID_PAYLOAD);
+        CCID_HEADER_LENGTH + payload - self.buffered.len()
     }
 
     #[cfg(test)]
@@ -455,8 +470,8 @@ impl Device {
 
     fn first_response_block(&mut self, slot: u8, sequence: u8, mut data: Vec<u8>) -> Vec<u8> {
         self.pending_response.clear();
-        let chain_parameter = if data.len() > MAX_CCID_PAYLOAD {
-            self.pending_response = data.split_off(MAX_CCID_PAYLOAD);
+        let chain_parameter = if data.len() > MAX_CCID_RESPONSE_PAYLOAD {
+            self.pending_response = data.split_off(MAX_CCID_RESPONSE_PAYLOAD);
             0x01
         } else {
             0x00
@@ -484,7 +499,7 @@ impl Device {
             );
         }
 
-        let count = self.pending_response.len().min(MAX_CCID_PAYLOAD);
+        let count = self.pending_response.len().min(MAX_CCID_RESPONSE_PAYLOAD);
         let remaining = self.pending_response.split_off(count);
         let block = std::mem::replace(&mut self.pending_response, remaining);
         let chain_parameter = if self.pending_response.is_empty() {
@@ -812,6 +827,83 @@ mod tests {
     }
 
     #[test]
+    fn packet_sized_reads_complete_ccid_frames_without_a_short_packet_or_zlp() {
+        let packet_size = crate::usb_identity::CCID_BULK_PACKET_SIZE as usize;
+        for frame_len in [63, 64, 65, 127, 128, 129, 319, 320, 321, 512, 1024, 3072] {
+            let mut device = Device::new(1);
+            device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+            let aid = virtual_yubikey_core::PIV_AID;
+            let select = [vec![0, 0xa4, 4, 0, aid.len() as u8], aid.to_vec()].concat();
+            device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select));
+            // An invalid read-only GET DATA returns 6a86 after the complete
+            // APDU arrives, without requiring management authentication.
+            let data_len = frame_len - 10 - 9;
+            let mut apdu = vec![0, 0xcb, 0x3f, 0xff, 0];
+            apdu.extend_from_slice(&(data_len as u16).to_be_bytes());
+            apdu.resize(7 + data_len, 0);
+            apdu.extend_from_slice(&[0, 0]);
+            let message = request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &apdu);
+            assert_eq!(message.len(), frame_len);
+            let packets = message.chunks(packet_size);
+            let packet_count = packets.len();
+            for (index, packet) in packets.enumerate() {
+                let replies = device.receive(packet);
+                if index + 1 == packet_count {
+                    assert_eq!(replies.len(), 1, "frame length {frame_len}");
+                    assert_eq!(replies[0][6], 2);
+                    assert_eq!(&replies[0][10..], &[0x6a, 0x86]);
+                } else {
+                    assert!(replies.is_empty(), "frame length {frame_len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_lengths_follow_the_header_then_the_remaining_frame() {
+        for frame_len in [63, 64, 65, 319, 320, 321, 512, 1024, 3072] {
+            let mut device = Device::new(1);
+            device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+            let aid = virtual_yubikey_core::PIV_AID;
+            let select = [vec![0, 0xa4, 4, 0, aid.len() as u8], aid.to_vec()].concat();
+            device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select));
+            let data_len = frame_len - CCID_HEADER_LENGTH - 9;
+            let mut apdu = vec![0, 0xcb, 0x3f, 0xff, 0];
+            apdu.extend_from_slice(&(data_len as u16).to_be_bytes());
+            apdu.resize(7 + data_len, 0);
+            apdu.extend_from_slice(&[0, 0]);
+            let message = request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &apdu);
+            assert_eq!(device.next_read_length(), 64);
+            let initial = frame_len.min(device.next_read_length());
+            let replies = device.receive(&message[..initial]);
+            if initial < frame_len {
+                assert!(replies.is_empty());
+                assert_eq!(device.next_read_length(), frame_len - initial);
+                let replies = device.receive(&message[initial..]);
+                assert_eq!(replies.len(), 1);
+                assert_eq!(&replies[0][10..], &[0x6a, 0x86]);
+            } else {
+                assert_eq!(replies.len(), 1);
+            }
+            assert_eq!(device.next_read_length(), 64);
+            // A trailing USB ZLP contributes no CCID bytes. The following
+            // command must retain its own sequence number and framing.
+            assert!(device.receive(&[]).is_empty());
+            let next = request(PC_TO_RDR_GET_SLOT_STATUS, 3, [0, 0, 0], &[]);
+            let replies = device.receive(&next);
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0][6], 3);
+            assert_eq!(device.next_read_length(), 64);
+        }
+        let mut device = Device::new(1);
+        let frame = request(PC_TO_RDR_GET_SLOT_STATUS, 7, [0, 0, 0], &[]);
+        assert!(device.receive(&frame[..4]).is_empty());
+        assert_eq!(device.next_read_length(), 64);
+        assert_eq!(device.receive(&frame[4..]).len(), 1);
+        assert_eq!(device.next_read_length(), 64);
+    }
+
+    #[test]
     fn routes_fido_apdus_through_the_runtime_authenticator() {
         let mut device = Device::new(1);
         device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
@@ -859,15 +951,15 @@ mod tests {
         // messages no larger than the descriptor's 3,072-byte maximum.
         let get_challenge = [0x00, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00];
         let first = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &get_challenge));
-        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH - 1);
         assert_eq!(
             u32::from_le_bytes(first[0][1..5].try_into().unwrap()),
-            MAX_CCID_PAYLOAD as u32
+            MAX_CCID_RESPONSE_PAYLOAD as u32
         );
         assert_eq!(first[0][9], 0x01);
 
         let last = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 3, [0, 0x10, 0], &[]));
-        assert_eq!(last[0].len(), CCID_HEADER_LENGTH + 1_036);
+        assert_eq!(last[0].len(), CCID_HEADER_LENGTH + 1_037);
         assert_eq!(last[0][9], 0x02);
         assert_eq!(&last[0][last[0].len() - 2..], &[0x90, 0x00]);
 
@@ -875,8 +967,8 @@ mod tests {
         apdu_response.extend_from_slice(&last[0][CCID_HEADER_LENGTH..]);
         assert_eq!(apdu_response.len(), 4_096 + 2);
         assert_eq!(&apdu_response[apdu_response.len() - 2..], &[0x90, 0x00]);
-        assert!(first[0].len() <= MAX_CCID_MESSAGE_LENGTH);
-        assert!(last[0].len() <= MAX_CCID_MESSAGE_LENGTH);
+        assert!(first[0].len() < MAX_CCID_MESSAGE_LENGTH);
+        assert!(last[0].len() < MAX_CCID_MESSAGE_LENGTH);
     }
 
     #[test]
@@ -891,15 +983,15 @@ mod tests {
         .concat();
         device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], &select));
 
-        let fits = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf4];
+        let fits = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf3];
         let response = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 2, [0, 0, 0], &fits));
-        assert_eq!(response[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(response[0].len(), MAX_CCID_MESSAGE_LENGTH - 1);
         assert_eq!(response[0][9], 0x00);
         assert_eq!(&response[0][response[0].len() - 2..], &[0x90, 0x00]);
 
-        let needs_chain = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf5];
+        let needs_chain = [0x00, 0x84, 0x00, 0x00, 0x00, 0x0b, 0xf4];
         let first = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 3, [0, 0, 0], &needs_chain));
-        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH);
+        assert_eq!(first[0].len(), MAX_CCID_MESSAGE_LENGTH - 1);
         assert_eq!(first[0][9], 0x01);
         let last = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 4, [0, 0x10, 0], &[]));
         assert_eq!(last[0].len(), CCID_HEADER_LENGTH + 1);
@@ -907,7 +999,7 @@ mod tests {
 
         let mut complete = first[0][CCID_HEADER_LENGTH..].to_vec();
         complete.extend_from_slice(&last[0][CCID_HEADER_LENGTH..]);
-        assert_eq!(complete.len(), 3_061 + 2);
+        assert_eq!(complete.len(), 3_060 + 2);
         assert_eq!(&complete[complete.len() - 2..], &[0x90, 0x00]);
     }
 

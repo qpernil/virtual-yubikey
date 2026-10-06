@@ -41,8 +41,6 @@ use virtual_yubikey_core::storage::{
 use virtual_yubikey_core::{DeviceProfile, FidoAuthenticator, FidoConfiguration};
 
 #[cfg(target_os = "linux")]
-const MAX_TRANSFER: usize = 16 * 1024;
-#[cfg(target_os = "linux")]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
 const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
@@ -425,10 +423,16 @@ impl Endpoints {
                 crate::usb_identity::FIDO_IN if transfer_type == 3 && packet_size == 64 => {
                     &mut fido_in
                 }
-                crate::usb_identity::CCID_OUT if transfer_type == 2 && packet_size == 64 => {
+                crate::usb_identity::CCID_OUT
+                    if transfer_type == 2
+                        && packet_size == crate::usb_identity::CCID_BULK_PACKET_SIZE =>
+                {
                     &mut ccid_out
                 }
-                crate::usb_identity::CCID_IN if transfer_type == 2 && packet_size == 64 => {
+                crate::usb_identity::CCID_IN
+                    if transfer_type == 2
+                        && packet_size == crate::usb_identity::CCID_BULK_PACKET_SIZE =>
+                {
                     &mut ccid_in
                 }
                 crate::usb_identity::CCID_INTERRUPT_IN
@@ -506,6 +510,25 @@ impl Endpoints {
                 }
             })?;
 
+        // Keep OUT reception independent of IN completion. A host whose read
+        // fills exactly may consume a trailing IN ZLP only during its next
+        // exchange, after it has sent that exchange's OUT command.
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let ccid_reply_thread =
+            thread::Builder::new()
+                .name("ccid-in".to_owned())
+                .spawn(move || {
+                    if let Err(error) = serve_ccid_replies(ccid_in, reply_rx) {
+                        diagnostics::log(
+                            Level::Info,
+                            "ccid",
+                            "response_failed",
+                            format_args!("{error}"),
+                        );
+                        STOP_REQUESTED.store(true, Ordering::Relaxed);
+                    }
+                })?;
+
         let ccid_thread = thread::Builder::new().name("ccid-usb".to_owned()).spawn({
             let clock = keepalive.handle();
             let display_activity = display_activity.clone();
@@ -522,7 +545,7 @@ impl Endpoints {
                     display_activity,
                     lifecycle,
                 };
-                if let Err(error) = serve_ccid(ccid_out, ccid_in, ccid, runtime) {
+                if let Err(error) = serve_ccid(ccid_out, reply_tx, ccid, runtime) {
                     diagnostics::log(
                         Level::Info,
                         "ccid",
@@ -556,7 +579,12 @@ impl Endpoints {
         })?;
         Ok(EndpointRuntime {
             notifications: Some(notification_tx),
-            threads: vec![notification_thread, ccid_thread, fido_thread],
+            threads: vec![
+                notification_thread,
+                ccid_thread,
+                ccid_reply_thread,
+                fido_thread,
+            ],
         })
     }
 }
@@ -867,7 +895,7 @@ fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(target_os = "linux")]
 fn serve_ccid(
     mut output: File,
-    mut input: File,
+    replies_out: SyncSender<Vec<u8>>,
     ccid: CcidPersistenceHandle,
     runtime: CcidRuntime,
 ) -> io::Result<()> {
@@ -879,7 +907,9 @@ fn serve_ccid(
         display_activity,
         lifecycle,
     } = runtime;
-    let mut request = [0_u8; MAX_TRANSFER];
+    // Fetch a header packet, then request exactly the remaining frame bytes.
+    // Neither read depends on a host-supplied terminating ZLP.
+    let mut request = [0_u8; crate::ccid::MAX_CCID_MESSAGE_LENGTH];
     let mut activation = 0;
     while let Some(next_activation) = lifecycle.wait_for_activation_after(activation) {
         activation = next_activation;
@@ -887,7 +917,14 @@ fn serve_ccid(
             if STOP_REQUESTED.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            match output.read(&mut request) {
+            let read_length = ccid
+                .state
+                .lock()
+                .map_err(|_| io::Error::other("smart-card state lock poisoned"))?
+                .next_read_length();
+            match output.read(&mut request[..read_length]) {
+                // Consume a trailing ZLP without treating it as a CCID
+                // command or appending anything to the partial-frame buffer.
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
@@ -929,7 +966,7 @@ fn serve_ccid(
                                     }
                                 }
                             },
-                            |keepalive| write_transfer(&mut input, keepalive),
+                            |keepalive| queue_ccid_reply(&replies_out, keepalive.to_vec()),
                         )?;
                         if let Some(error) = fido_error {
                             return Err(error);
@@ -951,7 +988,7 @@ fn serve_ccid(
                         mutation.wait()?;
                     }
                     for reply in replies {
-                        write_transfer(&mut input, &reply)?;
+                        queue_ccid_reply(&replies_out, reply)?;
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -1512,7 +1549,37 @@ fn ctap_status_name(status: u8) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn write_transfer(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+fn queue_ccid_reply(sender: &SyncSender<Vec<u8>>, reply: Vec<u8>) -> io::Result<()> {
+    sender
+        .send(reply)
+        .map_err(|_| io::Error::other("CCID response writer stopped"))
+}
+
+#[cfg(target_os = "linux")]
+fn serve_ccid_replies(mut input: impl Write, replies: Receiver<Vec<u8>>) -> io::Result<()> {
+    while let Ok(reply) = replies.recv() {
+        write_ccid_transfer(&mut input, &reply)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_ccid_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    write_transfer(file, bytes)?;
+    // CCID 1.1 section 3.1 requires a ZLP after every bulk-IN message
+    // ending on a full packet, independently of the host's read-buffer size.
+    if !bytes.is_empty()
+        && bytes
+            .len()
+            .is_multiple_of(crate::usb_identity::CCID_BULK_PACKET_SIZE as usize)
+    {
+        write_transfer(file, &[])?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     loop {
         match file.write(bytes) {
             Ok(length) if length == bytes.len() => return Ok(()),
@@ -1564,6 +1631,77 @@ fn data_error(message: impl Into<String>) -> io::Error {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pending_zlp_does_not_prevent_queuing_the_next_command_response() {
+        struct Endpoint {
+            written: mpsc::Sender<usize>,
+            release_zlp: Receiver<()>,
+        }
+        impl Write for Endpoint {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.written.send(bytes.len()).unwrap();
+                if bytes.is_empty() {
+                    self.release_zlp.recv().unwrap();
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (written, observed) = mpsc::channel();
+        let (release, release_zlp) = mpsc::channel();
+        let (sender, replies) = mpsc::sync_channel(1);
+        let writer = thread::spawn(move || {
+            serve_ccid_replies(
+                Endpoint {
+                    written,
+                    release_zlp,
+                },
+                replies,
+            )
+        });
+        queue_ccid_reply(&sender, vec![0; 64]).unwrap();
+        assert_eq!(observed.recv_timeout(Duration::from_secs(1)).unwrap(), 64);
+        assert_eq!(observed.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        // This send must complete while the previous response's ZLP is still
+        // waiting for the host. The OUT loop can then accept another command.
+        sender.try_send(vec![0; 12]).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(observed.recv_timeout(Duration::from_secs(1)).unwrap(), 12);
+        drop(sender);
+        writer.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn ccid_bulk_responses_terminate_every_full_packet_message() {
+        #[derive(Default)]
+        struct Transfers(Vec<usize>);
+        impl Write for Transfers {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.push(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for length in [12, 63, 64, 65, 128, 192, 3071, 3072] {
+            let mut transfers = Transfers::default();
+            write_ccid_transfer(&mut transfers, &vec![0; length]).unwrap();
+            let expected =
+                if length.is_multiple_of(crate::usb_identity::CCID_BULK_PACKET_SIZE as usize) {
+                    vec![length, 0]
+                } else {
+                    vec![length]
+                };
+            assert_eq!(transfers.0, expected);
+        }
+        let mut hid = Transfers::default();
+        write_transfer(&mut hid, &[0; 64]).unwrap();
+        assert_eq!(hid.0, vec![64]);
+    }
 
     #[test]
     fn fido_operations_are_exclusive_across_transports() {
