@@ -86,8 +86,9 @@ The core tests cover PIN recovery and lifecycle, key persistence, RSA import at 
 signing, authentication and decipher, every advertised EC signing and key-agreement algorithm,
 Ed25519, X25519, one-signature authorization, certificates and permanent touch.
 USB CCID and the embedded provider client independently verify a P-256 signature.
-These are transport/emulator tests; public-tool qualification on a live USB
-connection is a separate acceptance boundary.
+Live USB CCID qualification includes successful `gpg --card-status` and
+`gpg-card list` discovery. Provisioning and private operations with public tools
+remain a separate acceptance boundary from the transport/emulator tests.
 
 ## Physical RSA qualification
 

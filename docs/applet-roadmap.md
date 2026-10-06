@@ -1,4 +1,4 @@
-# Applet and secure-channel direction
+# Applet scope and qualification
 
 ## Current boundary
 
@@ -18,7 +18,7 @@ The core currently implements:
 - PIV discovery, authentication, objects, certificates, key lifecycle, signing,
   raw RSA operations, ECDH, Ed25519, and X25519;
 - YubiHSM Auth symmetric and asymmetric credentials, retry policy, touch,
-  SCP03 session derivation, and SCP11 key agreement; and
+  SCP03 session derivation, and SCP11 key agreement;
 - Issuer Security Domain discovery, factory SCP03 keys, a persistent
   certificate-backed SCP11b card identity, authenticated key/certificate/CA
   administration, and shared SCP03/SCP11a/b/c secure messaging around selectable
@@ -26,9 +26,14 @@ The core currently implements:
 - OpenPGP discovery, PIN lifecycle, persistent keys and certificates, RSA/ECC/
   Ed25519/X25519 operations, touch and factory reset.
 
+OATH, Yubico OTP, U2F/CTAP1 commands, biometric verification, and NFC transport
+are outside the implemented scope. Management implements identity and capability
+discovery, not device-configuration writes. Applet-specific gaps are listed below
+and in the PIV, OpenPGP, and GlobalPlatform guides.
+
 The active priorities are:
 
-1. keep FIDO, PIV, and YubiHSM Auth behavior aligned across core, USB, and
+1. keep all implemented applets and secure messaging aligned across core, USB, and
    `pkcs11rs` tests;
 2. qualify the implemented applets against real host tools over USB;
 3. qualify Issuer Security Domain administration and SCP11a/c provisioning
@@ -60,7 +65,7 @@ provider and emulators: key serialization, public projection, signing and
 verification, RSA encodings, ML-DSA policy, symmetric operations, ECDH, and
 ARKG-P256 derivation. It composes established upstream cryptographic crates.
 
-PIV, FIDO, USB, and PKCS #11 identifiers and policy remain in their protocol
+Applet, USB, and PKCS #11 identifiers and policy remain in their protocol
 layers. Direct RustCrypto dev-dependencies are appropriate in protocol tests
 when they independently verify an encoded signature or public key; production
 cryptography continues to flow through `software-key-core`.
@@ -78,8 +83,9 @@ persistence, transport, and error mapping.
 
 The content-addressed token-generation and cross-token fingerprint model is
 specified separately in [`future-storage-model.md`](future-storage-model.md).
-Current FIDO, PIV, and YubiHSM Auth state remains in independent, atomically
-replaced versioned files.
+FIDO, PIV, OpenPGP, YubiHSM Auth, and Security Domain use the same independent,
+atomically replaced versioned files in every device form, managed by the
+[shared storage runtime](storage.md).
 
 ## Issuer SD and secure channels
 
@@ -162,6 +168,8 @@ validation before they can authorize the same administrative operations.
 
 - Preserve the implemented [OpenPGP card model](openpgp.md), persistent key and
   credential state, access conditions, algorithms, and touch behavior.
-- Qualify GnuPG and yubikey-manager workflows over live USB CCID.
+- Preserve successful live USB CCID qualification with GnuPG card discovery
+  and `gpg-card list`; extend qualification to provisioning and private operations
+  with GnuPG and yubikey-manager.
 - Add optional KDF, AES PSO and Yubico attestation only with matching capability
   advertisements and independent interoperability tests.

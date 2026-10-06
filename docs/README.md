@@ -3,13 +3,14 @@
 - [USB gadget architecture](usb-gadget-architecture.md) - how the host, Pi
   hardware, Linux gadget framework, privileged supervisor, and unprivileged
   Virtual YubiKey, Virtual Trezor, and Virtual YubiHSM profiles fit together.
-- [Applet direction](applet-roadmap.md) - current protocol boundaries and next
-  applet work.
+- [Applet scope and qualification](applet-roadmap.md) - implemented applets,
+  protocol boundaries, remaining gaps and host qualification.
 - [PKCS #11 reuse](pkcs11rs-reuse.md) - boundary between the reusable logical
-  device, Linux USB transports, and the process-local FIDO2 integration
-  fixture.
+  device, Linux USB transports, and configurable embedded CCID applets.
 - [PIV standards and compatibility](piv-conformance.md) - current NIST
   baseline, YubiKey extensions, and explicit conformance gaps.
+- [OpenPGP card](openpgp.md) - commands, algorithms, PIN/recovery and touch
+  policies, persistent keys, reset, and physical RSA qualification.
 - [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03
   and SCP11 session behavior, compatibility, and security boundaries.
 - [Shared storage](storage.md) - common per-applet format and persistence runtime for every device form.

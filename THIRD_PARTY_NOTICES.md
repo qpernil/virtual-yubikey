@@ -2,8 +2,9 @@
 
 ## Standards and compatibility names
 
-This project implements public FIDO, WebAuthn, CCID, PIV, ISO 7816, and OpenPGP
-interfaces and publicly documented Yubico extensions. Specification names,
+This project implements public FIDO, WebAuthn, CCID, PIV, ISO 7816, OpenPGP,
+and GlobalPlatform interfaces, including publicly documented Yubico Management,
+YubiHSM Auth, Security Domain and secure-messaging extensions. Specification names,
 command identifiers, AIDs, status values, and other protocol identifiers are
 used for interoperability.
 

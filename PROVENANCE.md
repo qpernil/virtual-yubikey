@@ -16,9 +16,10 @@ The principal public implementation references are:
 - USB-IF CCID specifications;
 - NIST SP 800-73 PIV specifications;
 - ISO/IEC 7816 command and APDU behavior;
-- OpenPGP card specifications; and
+- OpenPGP card specifications;
+- GlobalPlatform secure-channel specifications; and
 - Yubico's publicly available developer documentation for YubiKey Management,
-  PIV, and YubiHSM Auth.
+  PIV, OpenPGP, YubiHSM Auth, and Security Domain administration.
 
 The optional physical display uses Yubico's publicly published YubiKey 5 NFC
 front product image as recorded in `assets/README.md`. The image is kept as an

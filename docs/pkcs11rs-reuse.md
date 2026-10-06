@@ -32,7 +32,7 @@ CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
 The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
 The physical USB CCID reader also exposes the FIDO2 applet alongside Management,
-PIV, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
+PIV, OpenPGP, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
 authoritative authenticator state. `pkcs11rs` should normally use HID or its
 direct-USB connector for FIDO and CCID for the smart-card applets, matching
 ordinary host-tool behavior, while CCID remains available for FIDO qualification
@@ -42,7 +42,7 @@ and secure-messaging coverage.
 
 | Component | Responsibility |
 | --- | --- |
-| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO, PIV, and YubiHSM Auth behavior, and persistent logical device state |
+| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO2, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, and persistent logical device state |
 | `software-key-core::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
@@ -85,9 +85,11 @@ select only the combinations advertised by their COSE algorithms.
 2. Run the core's FIDO, PIN, credential-management and `previewSign`
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
-   PIV, and YubiHSM Auth through CCID.
+   PIV, OpenPGP, YubiHSM Auth, and Issuer Security Domain through CCID, including
+   shared GlobalPlatform secure messaging.
 4. Keep the `pkcs11rs` embedded-reader tests running against the core for every
-   configured applet, including full-cycle FIDO and PIV post-quantum coverage.
+   configured applet, including OpenPGP key lifecycle and persistence, Security
+   Domain administration, and full-cycle FIDO and PIV post-quantum coverage.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`
    routed through the neutral APIs, retaining PKCS-specific mechanism parsing.
 6. Use the documented sibling checkout set and workspace path dependencies
@@ -105,7 +107,7 @@ The future persistence and PKCS #11 key-fingerprint model is specified in
   shared types rather than copied constants.
 - Capability advertisements are derived from installed emulator handlers.
 - `cargo build --release --locked` works from the documented sibling checkout
-  set on the Pi.
+  set on Linux.
 
 An independently relocatable checkout requires versioned crate releases or Git
 dependencies pinned to exact revisions. That packaging boundary is separate
