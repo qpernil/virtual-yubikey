@@ -464,8 +464,31 @@ def page_pi(story):
     story.append(PageBreak())
 
 
+def page_framing_activity(story):
+    story.extend(section("Framing and visible activity", "08 / worker scheduling"))
+    story.append(p("CCID and native YubiHSM use bulk endpoints, but their framing contracts differ. FIDO HID uses fixed interrupt reports and does not use bulk ZLP termination."))
+    story += [p("CCID: length-directed OUT, terminated IN", "h2")]
+    story.append(p("Virtual YubiKey reads the first header packet, then the exact remaining bytes declared by that header. It does not wait for an OUT zero-length packet (ZLP), and tolerates one if the host sends it. Packet-aligned IN responses end with a ZLP. One ordered response writer, with a bounded queue, allows OUT reception to continue while a response terminator waits for the host."))
+    story.append(p("CCID response chaining uses complete messages of at most 3071 bytes, below the advertised 3072-byte maximum, so a host reading that maximum consumes the short packet or ZLP in the same transfer."))
+    story += [p("Native YubiHSM: aligned transfers use ZLPs", "h2")]
+    story.append(p("Native YubiHSM uses a three-byte command/length header. Official clients send a ZLP after aligned OUT commands; the virtual worker sends one after aligned IN replies. The shared pkcs11rs client reads an extra USB packet beyond its 8192-byte frame ceiling, including when a caller supplies an exact-fit buffer. The worker's ordered IN writer keeps reception independent of a pending terminator."))
+    story += [p("Activity never delays a command", "h2")]
+    story.append(p("A dedicated indicator thread samples the command state and monotonic activity epoch. Commands coalesce without extending the minimum on time or queuing replay pulses. Rendering time counts toward every interval; slow displays limit the visible cadence."))
+    story.append(data_table(
+        ["Policy", "Virtual YubiKey", "Virtual YubiHSM"],
+        [
+            ["Minimum off before activity", "8 ms; elapsed off time counts", "20 ms; elapsed off time counts"],
+            ["Minimum short activity on", "33.5 ms", "33.5 ms"],
+            ["Sustained activity", "67 ms on / 33 ms off", "67 ms on / 33 ms off"],
+            ["Background", "Idle off; touch 384/384 ms", "Idle 1.5 s on / 1.5 s off"],
+            ["After activity", "8 ms off, then touch if needed", "8 ms off, then full idle off phase"],
+        ], [58 * mm, 59 * mm, CONTENT_W - 117 * mm]))
+    story.append(p("A lit background turns off before activity; an already-dark LED waits only for the remaining minimum off time. If that minimum has elapsed, activity starts immediately. The worker owns this policy; the supervisor supplies only display capabilities."))
+    story.append(PageBreak())
+
+
 def page_security(story):
-    story.extend(section("The installed contract", "08 / operations and trust"))
+    story.extend(section("The installed contract", "09 / operations and trust"))
     story.append(
         data_table(
             ["Artifact", "Owner", "Current contract"],
@@ -518,6 +541,7 @@ def build(output: Path):
     page_data_paths(story)
     page_host(story)
     page_pi(story)
+    page_framing_activity(story)
     page_security(story)
     doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
 
