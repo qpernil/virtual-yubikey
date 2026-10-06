@@ -69,8 +69,7 @@ struct Session {
 
 impl SecureChannel {
     pub(crate) fn begins_establishment(command: &CommandApdu<'_>) -> bool {
-        (command.cla == 0x80 && command.ins == 0x50)
-            || (command.cla == 0x80 && matches!(command.ins, 0x88 | 0x82))
+        command.cla == 0x80 && matches!(command.ins, 0x50 | 0x88 | 0x82)
     }
 
     pub(crate) fn reset(&mut self) {

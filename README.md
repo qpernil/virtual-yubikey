@@ -261,15 +261,15 @@ toolchain in the invoking user's home directory.
 sudo apt update
 sudo apt install --yes git build-essential rustup
 rustup set profile minimal
-rustup toolchain install 1.94.0
-rustup default 1.94.0
+rustup toolchain install 1.95.0
+rustup default 1.95.0
 
 rustup show active-toolchain
 rustc --version
 cargo --version
 ```
 
-Use the exact `1.94.0` toolchain rather than the moving `stable` channel so a
+Use the exact `1.95.0` toolchain rather than the moving `stable` channel so a
 later rustup update cannot silently change the compiler used with the checked-in
 `Cargo.lock`. Rustup automatically selects `aarch64-unknown-linux-gnu` on
 64-bit Raspberry Pi and ARM Ubuntu, and `x86_64-unknown-linux-gnu` on AMD64
