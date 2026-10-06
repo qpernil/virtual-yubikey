@@ -6,11 +6,11 @@ the target. Existing supervisor profiles can use it after installation to
 `target/release/virtual-yubikey-worker`.
 
 The binary was built from clean `virtual-yubikey` commit
-`9491253dc32014baf66435b2106d01ced4d1383d` on `ubuntu4`, running Ubuntu
+`c8379ff5f4c35dc6cb2de98e8d27816c43ad4d98` on `ubuntu4`, running Ubuntu
 26.04.1 LTS on ARM64, with Rust and Cargo 1.98.1 and glibc 2.43. Its path
 dependencies were:
 
-- `software-key-core` at `19172364f7dc5bcd8420b5c62c016424ee4022dd`;
+- `software-key-core` at `ded4bfb744938784d9bf19e290924e921b8325d6`;
 - `usb-gadget-supervisor` at `26f0ec72e134c9736a617ef822a22460c0bfc1d5`;
 - `display-backends` at `6298250e08d4186ffc4fc8a50ad8a7d16517a5f1`.
 
@@ -24,8 +24,11 @@ Verify and install from the repository root:
 install -D -m 755 prebuilt/aarch64/virtual-yubikey-worker target/release/virtual-yubikey-worker
 ```
 
-Preserve the target's existing supervisor profile, persistent state, and service
-activation state. Restart the service after replacement only if it was active.
+Preserve the target's supervisor profile and service activation state. Clear
+virtual YubiKey applet state only when explicitly requested for deployment. The
+worker uses the common per-applet storage layout described in
+[shared storage](../../docs/storage.md); whole-device records are not imported.
+Restart the service after replacement only if it was active.
 
 Rebuild on a capable ARM64 machine with:
 
