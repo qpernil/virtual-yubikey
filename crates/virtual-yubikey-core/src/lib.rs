@@ -1,8 +1,11 @@
 //! Transport-neutral logical YubiKey emulator.
 //!
 //! This crate owns device identity, ISO 7816 routing, applet state, and APDU
-//! behavior. It deliberately contains no USB, CCID, PC/SC, PKCS #11, or
-//! operating-system integration.
+//! behavior. It contains no USB, CCID, PC/SC or PKCS #11 integration. Its Unix
+//! storage module supplies the common persistence runtime for device hosts.
+
+#[cfg(unix)]
+pub mod storage;
 
 mod certificate;
 mod crypto;

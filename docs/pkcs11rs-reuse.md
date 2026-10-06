@@ -16,8 +16,8 @@ CI builds an embedded reader with `--no-default-features`, compiling out native
 USB, HID, and PC/SC support while retaining the ordinary CCID controller. A
 feature-enabled build without that flag makes configured embedded readers
 additive to external hardware. Readers are ephemeral by default; persistent
-readers use pkcs11rs token storage and the core's versioned whole-device applet
-state.
+readers use an ID-scoped directory under pkcs11rs token storage and the same
+[per-applet files, loader, lock and writer](storage.md) as USB workers.
 
 Protocol-neutral software key operations live in the independent sibling
 `software-key-core` repository. Both this workspace and `pkcs11rs` consume the

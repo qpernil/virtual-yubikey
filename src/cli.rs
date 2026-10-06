@@ -1,5 +1,6 @@
 use software_key_core::state_persistence::PersistenceMode;
-use std::{io, time::Duration};
+use std::io;
+use virtual_yubikey_core::storage::DEFAULT_PERSISTENCE_MODE;
 
 use crate::diagnostics::Level;
 pub(crate) const DEFAULT_SERIAL: u32 = 12_345_678;
@@ -49,7 +50,7 @@ where
     let mut serial = DEFAULT_SERIAL;
     let mut log_level = Level::Info;
     let mut display = DisplayKind::St7789Spi;
-    let mut persistence = PersistenceMode::Batched(Duration::from_millis(500));
+    let mut persistence = DEFAULT_PERSISTENCE_MODE;
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
@@ -127,7 +128,7 @@ where
 
 fn parse_persistence(value: &str) -> io::Result<PersistenceMode> {
     match value {
-        "batched" => Ok(PersistenceMode::Batched(Duration::from_millis(500))),
+        "batched" => Ok(DEFAULT_PERSISTENCE_MODE),
         "immediate" => Ok(PersistenceMode::Immediate),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -154,7 +155,7 @@ mod tests {
                 serial: 24_681_357,
                 log_level: Level::Info,
                 display: DisplayKind::St7789Spi,
-                persistence: PersistenceMode::Batched(Duration::from_millis(500)),
+                persistence: DEFAULT_PERSISTENCE_MODE,
             }
         );
     }
