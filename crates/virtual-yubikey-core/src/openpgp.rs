@@ -77,7 +77,7 @@ fn algorithm(attributes: &[u8], index: usize) -> Result<Algorithm> {
             return Err(0x6a80);
         }
         let bits = usize::from(u16::from_be_bytes([attributes[1], attributes[2]]));
-        return if matches!(bits, 2048 | 3072 | 4096) {
+        return if (2048..=4096).contains(&bits) && bits.is_multiple_of(256) {
             Ok(Algorithm::Rsa(bits))
         } else {
             Err(0x6a80)
@@ -790,6 +790,7 @@ fn validate_password(data: &[u8], min: usize) -> Result<()> {
     }
 }
 fn supported_attributes(index: usize) -> Vec<Vec<u8>> {
+    // Match firmware 5.7.4 discovery; intermediate sizes are accepted via attributes.
     let mut attrs: Vec<_> = [2048u16, 3072, 4096]
         .into_iter()
         .map(|bits| {
@@ -1244,9 +1245,71 @@ mod tests {
         }
     }
     #[test]
-    fn rsa_sign_decipher_and_import_match_public_key_operations() {
+    fn rsa_size_capabilities_attributes_and_rejections_agree() {
+        let mut state = OpenPgp::new(12345678, [5, 8, 0]);
+        let advertised = send(&mut state, 0xca, 0, 0xfa, &[]);
+        assert_eq!(advertised.status, 0x9000);
+        let outer = parse_tlvs(&advertised.data).unwrap();
+        assert_eq!(outer[0].0, 0xfa);
+        let attributes = parse_tlvs(outer[0].1).unwrap();
+        admin(&mut state);
+        for tag in [0xc1, 0xc2, 0xc3] {
+            let sizes: Vec<_> = attributes
+                .iter()
+                .filter(|(t, a)| *t == tag && a[0] == 1)
+                .map(|(_, a)| u16::from_be_bytes([a[1], a[2]]))
+                .collect();
+            assert_eq!(sizes, [2048, 3072, 4096]);
+            assert_eq!(
+                send(&mut state, 0xca, 0, tag as u8, &[]).data,
+                [1, 8, 0, 0, 32, 0]
+            );
+            for bits in (2048u16..=4096).step_by(256) {
+                let [a, b] = bits.to_be_bytes();
+                let value = [1, a, b, 0, 32, 0];
+                assert_eq!(send(&mut state, 0xda, 0, tag as u8, &value).status, 0x9000);
+                assert_eq!(send(&mut state, 0xca, 0, tag as u8, &[]).data, value);
+            }
+            let before = state.persistent_state().unwrap();
+            for bits in [
+                0u16,
+                768,
+                1023,
+                1024,
+                1280,
+                1536,
+                1792,
+                2047,
+                2049,
+                2050,
+                2052,
+                2056,
+                2064,
+                2080,
+                2112,
+                2176,
+                4095,
+                4097,
+                4352,
+                u16::MAX,
+            ] {
+                let [a, b] = bits.to_be_bytes();
+                assert_eq!(
+                    send(&mut state, 0xda, 0, tag as u8, &[1, a, b, 0, 32, 0]).status,
+                    0x6a80
+                );
+                assert_eq!(state.persistent_state().unwrap(), before);
+            }
+        }
+    }
+    fn rsa_sign_decipher_and_import_match_public_key_operations(bits: u16) {
         let mut state = OpenPgp::new(12345678, [5, 8, 0]);
         admin(&mut state);
+        let [high, low] = bits.to_be_bytes();
+        let attributes = [1, high, low, 0, 32, 0];
+        for tag in [0xc1, 0xc2, 0xc3] {
+            assert_eq!(send(&mut state, 0xda, 0, tag, &attributes).status, 0x9000);
+        }
         assert_eq!(send(&mut state, 0x47, 0x80, 0, &[0xb6, 0]).status, 0x9000);
         let hash = HashAlgorithm::Sha256.digest(b"OpenPGP RSA");
         let mut digest_info = vec![
@@ -1257,6 +1320,7 @@ mod tests {
         assert_eq!(send(&mut state, 0x20, 0, 0x81, b"123456").status, 0x9000);
         let sig = send(&mut state, 0x2a, 0x9e, 0x9a, &digest_info);
         assert_eq!(sig.status, 0x9000);
+        assert_eq!(sig.data.len(), usize::from(bits) / 8);
         let Key::Signing(key) = state.slots[0].key.as_ref().unwrap() else {
             unreachable!()
         };
@@ -1268,10 +1332,15 @@ mod tests {
             )
             .unwrap();
         let components = key.rsa_private_components().unwrap();
-        let mut description = vec![0x91, 4, 0x92, 0x81, 128, 0x93, 0x81, 128];
+        let prime_length = usize::from(bits) / 16;
+        let mut description = vec![0x91, 4];
+        for tag in [0x92, 0x93] {
+            let component = tlv(tag, &vec![0; prime_length]);
+            description.extend_from_slice(&component[..component.len() - prime_length]);
+        }
         let mut private = Zeroizing::new(vec![0, 1, 0, 1]);
         for prime in [&components[1], &components[2]] {
-            private.extend(vec![0; 128 - prime.len()]);
+            private.extend(vec![0; prime_length - prime.len()]);
             private.extend(prime.as_slice());
         }
         let mut body = Zeroizing::new(vec![0xa4, 0]);
@@ -1292,7 +1361,17 @@ mod tests {
             send(&mut state, 0xdb, 0x3f, 0xff, &tlv(0x4d, &body)).status,
             0x6a80
         );
-        assert_eq!(send(&mut state, 0x47, 0x80, 0, &[0xb8, 0]).status, 0x9000);
+        // Import the same generated key into the independent decipher slot;
+        // one key generation per size keeps this crypto matrix affordable.
+        let mut decipher_import = import.clone();
+        let mut header = decipher_import.as_slice();
+        let (_, _) = super::header(&mut header).unwrap();
+        let outer_header_len = decipher_import.len() - header.len();
+        decipher_import[outer_header_len] = 0xb8;
+        assert_eq!(
+            send(&mut state, 0xdb, 0x3f, 0xff, &decipher_import).status,
+            0x9000
+        );
         let Key::Signing(key) = state.slots[1].key.as_ref().unwrap() else {
             unreachable!()
         };
@@ -1303,13 +1382,96 @@ mod tests {
         let plaintext = send(&mut state, 0x2a, 0x80, 0x86, &input);
         assert_eq!(plaintext.status, 0x9000);
         assert_eq!(plaintext.data, b"secret");
+        let auth = send(&mut state, 0x88, 0, 0, &digest_info);
+        assert_eq!(auth.status, 0x9000);
+        let Key::Signing(key) = state.slots[2].key.as_ref().unwrap() else {
+            unreachable!()
+        };
+        key.public_key()
+            .verify_message(
+                software_key_core::software_signing::SignatureScheme::RsaPkcs1Sha256,
+                b"OpenPGP RSA",
+                &auth.data,
+            )
+            .unwrap();
+        let expected = state
+            .slots
+            .each_ref()
+            .map(|slot| slot.key.as_ref().unwrap().public());
+        let mut restored =
+            OpenPgp::from_persistent_state(12345678, [5, 8, 0], &state.persistent_state().unwrap())
+                .unwrap();
+        assert_eq!(restored.authorized, [false; 3]);
+        assert_eq!(
+            restored
+                .slots
+                .each_ref()
+                .map(|slot| slot.key.as_ref().unwrap().public()),
+            expected
+        );
+        assert_eq!(
+            send(&mut restored, 0x2a, 0x9e, 0x9a, &digest_info).status,
+            0x6982
+        );
+        assert_eq!(send(&mut restored, 0x2a, 0x80, 0x86, &input).status, 0x6982);
+        assert_eq!(send(&mut restored, 0x20, 0, 0x82, b"123456").status, 0x9000);
+        assert_eq!(
+            send(&mut restored, 0x2a, 0x80, 0x86, &input).data,
+            b"secret"
+        );
+    }
+    #[test]
+    fn rsa_2304_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(2304);
+    }
+    #[test]
+    fn rsa_2560_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(2560);
+    }
+    #[test]
+    fn rsa_2816_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(2816);
+    }
+    #[test]
+    fn rsa_3328_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(3328);
+    }
+    #[test]
+    fn rsa_3584_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(3584);
+    }
+    #[test]
+    fn rsa_3840_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(3840);
+    }
+    #[test]
+    fn rsa_2048_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(2048);
+    }
+    #[test]
+    fn rsa_3072_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(3072);
+    }
+    #[test]
+    fn rsa_4096_sign_decipher_import_and_persistence() {
+        rsa_sign_decipher_and_import_match_public_key_operations(4096);
     }
     #[test]
     fn permanent_touch_certificates_private_objects_and_failed_import_are_isolated() {
         let mut state = OpenPgp::new(12345678, [5, 8, 0]);
         admin(&mut state);
         assert_eq!(
-            send(&mut state, 0xda, 0, 0xc1, &supported_attributes(0)[3]).status,
+            send(
+                &mut state,
+                0xda,
+                0,
+                0xc1,
+                &supported_attributes(0)
+                    .into_iter()
+                    .find(|a| a[0] != 1)
+                    .unwrap()
+            )
+            .status,
             0x9000
         );
         assert_eq!(send(&mut state, 0x47, 0x80, 0, &[0xb6, 0]).status, 0x9000);
