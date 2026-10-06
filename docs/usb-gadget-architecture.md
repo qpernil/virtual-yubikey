@@ -201,6 +201,23 @@ Once attached, a host CCID OUT transfer becomes readable bytes on a FunctionFS
 endpoint file. A worker write to the corresponding IN endpoint becomes a USB
 transfer back to the host. Closing all FunctionFS files disables that function.
 
+CCID bulk OUT reads fetch a header packet, then request the remaining frame
+bytes using the message length in that header. An oversized read can wait
+indefinitely when a complete message ends on a full packet and the host sends
+no zero-length packet. A trailing zero-length OUT read is consumed without
+adding bytes to the CCID frame buffer or dispatching a command. Every bulk IN
+response whose length is a multiple of the 64-byte packet size receives a
+terminating zero-length packet, as required by CCID 1.1 section 3.1. FIDO
+interrupt reports do not use this bulk-transfer termination rule.
+
+CCID responses use one ordered writer with a bounded queue, independently of
+OUT reception. A trailing IN ZLP can therefore wait for the host to consume it
+without blocking reception of the next command. This also covers hosts whose
+read buffer fills exactly at the end of the response. Response chaining uses
+blocks of at most 3071 bytes, below the advertised 3072-byte message maximum,
+so a host reading that maximum consumes the terminating short packet or ZLP
+in the same read instead of carrying a ZLP into its next response.
+
 ### Why both ConfigFS and FunctionFS are necessary here
 
 ConfigFS answers **"what USB device should Linux expose?"** FunctionFS answers
