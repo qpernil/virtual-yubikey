@@ -6,7 +6,7 @@ the target. Existing supervisor profiles can use it after installation to
 `target/release/virtual-yubikey-worker`.
 
 The binary was built from clean `virtual-yubikey` commit
-`c8379ff5f4c35dc6cb2de98e8d27816c43ad4d98` on `ubuntu4`, running Ubuntu
+`b7b0c555cef27ca6f44a8f69134496264cefd72b` on `ubuntu4`, running Ubuntu
 26.04.1 LTS on ARM64, with Rust and Cargo 1.98.1 and glibc 2.43. Its path
 dependencies were:
 
