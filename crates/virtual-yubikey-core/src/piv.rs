@@ -1826,14 +1826,14 @@ impl PivApplet {
                 .iter()
                 .any(|tag| fields.iter().filter(|(field, _)| field == tag).count() > 1))
             || fields.iter().any(|(tag, _)| {
-                !matches!(*tag, 0x81 | 0x82 | 0x85)
-                    && !(ml_dsa
+                !(matches!(*tag, 0x81 | 0x82 | 0x85)
+                    || (ml_dsa
                         && matches!(
                             *tag,
                             AUTH_TAG_ML_DSA_CONTEXT
                                 | AUTH_TAG_ML_DSA_HEDGE
                                 | AUTH_TAG_ML_DSA_PREHASH
-                        ))
+                        )))
             })
         {
             return ResponseApdu::status(STATUS_INCORRECT_DATA).into();
