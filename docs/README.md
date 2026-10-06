@@ -12,6 +12,7 @@
   baseline, YubiKey extensions, and explicit conformance gaps.
 - [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03
   and SCP11 session behavior, compatibility, and security boundaries.
+- [Shared storage](storage.md) - common per-applet format and persistence runtime for every device form.
 - [Future storage model](future-storage-model.md) - proposed persistent-storage
   and cross-token key identity design.
 

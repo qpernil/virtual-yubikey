@@ -9,20 +9,17 @@ use crate::worker_protocol::{
     Channel, Kind, RUNTIME_DIRECTORY_ENV, Record, STATE_DIRECTORY_ENV, validate_initial_resources,
 };
 #[cfg(target_os = "linux")]
-use software_key_core::state_persistence::{
-    MutationReceipt, PersistenceMode, StateLock, StatePersistence, StatePersistenceHandle,
-    replace_file_atomically,
-};
+use software_key_core::state_persistence::{MutationReceipt, PersistenceMode};
 #[cfg(target_os = "linux")]
 use std::env;
 #[cfg(target_os = "linux")]
-use std::fs::{self, File};
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
@@ -37,7 +34,11 @@ use std::{
 #[cfg(target_os = "linux")]
 use usb_gadget_worker::{EndpointLifecycle, UsbBusEvent};
 #[cfg(target_os = "linux")]
-use virtual_yubikey_core::FidoAuthenticator;
+use virtual_yubikey_core::storage::{
+    AppletPersistenceHandle, DevicePersistenceHandle, DeviceStorage, PersistentApplet,
+};
+#[cfg(target_os = "linux")]
+use virtual_yubikey_core::{DeviceProfile, FidoAuthenticator, FidoConfiguration};
 
 #[cfg(target_os = "linux")]
 const MAX_TRANSFER: usize = 16 * 1024;
@@ -70,7 +71,6 @@ pub(crate) fn run_worker(
     let control = Channel::from_fixed_descriptor();
     let resources = InitialResources::parse(validate_initial_resources(control.receive()?)?)?;
     let state_directory = required_path(STATE_DIRECTORY_ENV)?;
-    let _state_lock = StateLock::acquire(state_directory.join(format!("yubikey-{serial}.lock")))?;
     let display = crate::display::Controller::start(
         resources.display_bus,
         resources.display_control,
@@ -78,62 +78,41 @@ pub(crate) fn run_worker(
     )?;
     let runtime_directory = required_path(RUNTIME_DIRECTORY_ENV)?;
     let storage = WorkerStorage {
-        fido_state: state_directory.join(format!("fido-{serial}.cbor")),
-        piv_state: state_directory.join(format!("piv-{serial}.cbor")),
-        hsmauth_state: state_directory.join(format!("hsmauth-{serial}.cbor")),
-        openpgp_state: state_directory.join(format!("openpgp-{serial}.cbor")),
-        security_domain_state: state_directory.join(format!("security-domain-{serial}.cbor")),
         touch_socket: runtime_directory.join("touch.sock"),
     };
-    let fido_persistence = StatePersistence::start(
-        load_fido_state(serial, &storage.fido_state)?,
-        storage.fido_state.clone(),
+    let (device_storage, device) = DeviceStorage::open(
+        &state_directory,
+        DeviceProfile::yubikey_5_8_ccid(serial),
+        FidoConfiguration::default(),
+    )?;
+    let (card, authenticator) = device.separate_fido();
+    let fido_state = Arc::new(Mutex::new(authenticator));
+    let ccid_state = Arc::new(Mutex::new(crate::ccid::Device::from_device(card)));
+    let snapshot_fido = fido_state.clone();
+    let snapshot_ccid = ccid_state.clone();
+    let persistence = device_storage.start(
         persistence_mode,
-        encode_fido_state,
+        move |applet| {
+            if applet == PersistentApplet::Fido {
+                snapshot_fido
+                    .lock()
+                    .map_err(|_| io::Error::other("FIDO state lock poisoned"))?
+                    .persistent_state()
+                    .map_err(io::Error::other)
+            } else {
+                snapshot_ccid
+                    .lock()
+                    .map_err(|_| io::Error::other("smart-card state lock poisoned"))?
+                    .persistent_applet(applet)
+            }
+        },
         || STOP_REQUESTED.store(true, Ordering::Relaxed),
     )?;
-    let fido = fido_persistence.handle();
-    let ccid_state = Arc::new(Mutex::new(load_ccid_state(
-        serial,
-        &storage.piv_state,
-        &storage.hsmauth_state,
-        &storage.security_domain_state,
-        &storage.openpgp_state,
-    )?));
-    let piv_persistence = StatePersistence::start(
-        SharedCcidState(Arc::clone(&ccid_state)),
-        storage.piv_state.clone(),
-        persistence_mode,
-        encode_shared_piv_state,
-        || STOP_REQUESTED.store(true, Ordering::Relaxed),
-    )?;
-    let hsmauth_persistence = StatePersistence::start(
-        SharedCcidState(Arc::clone(&ccid_state)),
-        storage.hsmauth_state.clone(),
-        persistence_mode,
-        encode_shared_hsmauth_state,
-        || STOP_REQUESTED.store(true, Ordering::Relaxed),
-    )?;
-    let security_domain_persistence = StatePersistence::start(
-        SharedCcidState(Arc::clone(&ccid_state)),
-        storage.security_domain_state.clone(),
-        persistence_mode,
-        encode_shared_security_domain_state,
-        || STOP_REQUESTED.store(true, Ordering::Relaxed),
-    )?;
-    let openpgp_persistence = StatePersistence::start(
-        SharedCcidState(Arc::clone(&ccid_state)),
-        storage.openpgp_state.clone(),
-        persistence_mode,
-        encode_shared_openpgp_state,
-        || STOP_REQUESTED.store(true, Ordering::Relaxed),
-    )?;
+    let device_handle = persistence.handle();
+    let fido = device_handle.applet(PersistentApplet::Fido, fido_state);
     let smartcard = CcidPersistenceHandle {
         state: ccid_state,
-        piv: piv_persistence.handle(),
-        hsmauth: hsmauth_persistence.handle(),
-        security_domain: security_domain_persistence.handle(),
-        openpgp: openpgp_persistence.handle(),
+        persistence: device_handle,
     };
     let buttons = crate::buttons::Controller::start(
         resources.touch_button,
@@ -229,18 +208,10 @@ pub(crate) fn run_worker(
         );
         lifecycle.stop();
         let runtime_result = endpoint_runtime.shutdown();
-        let fido_flush_result = fido_persistence.flush();
-        let piv_flush_result = piv_persistence.flush();
-        let hsmauth_flush_result = hsmauth_persistence.flush();
-        let sd_flush_result = security_domain_persistence.flush();
-        let openpgp_flush_result = openpgp_persistence.flush();
+        let flush_result = persistence.flush();
         let outcome = control_result?;
         runtime_result?;
-        fido_flush_result?;
-        piv_flush_result?;
-        hsmauth_flush_result?;
-        sd_flush_result?;
-        openpgp_flush_result?;
+        flush_result?;
         match outcome {
             ControlOutcome::Quiesce {
                 request_id,
@@ -270,19 +241,11 @@ pub(crate) fn run_worker(
         }
     })();
     drop(keepalive);
-    let fido_persistence_result = fido_persistence.shutdown();
-    let piv_persistence_result = piv_persistence.shutdown();
-    let hsmauth_persistence_result = hsmauth_persistence.shutdown();
-    let sd_persistence_result = security_domain_persistence.shutdown();
-    let openpgp_persistence_result = openpgp_persistence.shutdown();
+    let persistence_result = persistence.shutdown();
     let button_result = buttons.shutdown();
     let display_result = display.shutdown();
     result
-        .and(fido_persistence_result)
-        .and(piv_persistence_result)
-        .and(hsmauth_persistence_result)
-        .and(sd_persistence_result)
-        .and(openpgp_persistence_result)
+        .and(persistence_result)
         .and(button_result)
         .and(display_result)
 }
@@ -356,26 +319,14 @@ struct Endpoints {
 
 #[cfg(target_os = "linux")]
 struct WorkerStorage {
-    fido_state: PathBuf,
-    piv_state: PathBuf,
-    hsmauth_state: PathBuf,
-    security_domain_state: PathBuf,
-    openpgp_state: PathBuf,
     touch_socket: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
-struct SharedCcidState(Arc<Mutex<crate::ccid::Device>>);
-
-#[cfg(target_os = "linux")]
-#[derive(Clone)]
 struct CcidPersistenceHandle {
     state: Arc<Mutex<crate::ccid::Device>>,
-    piv: StatePersistenceHandle<SharedCcidState>,
-    hsmauth: StatePersistenceHandle<SharedCcidState>,
-    security_domain: StatePersistenceHandle<SharedCcidState>,
-    openpgp: StatePersistenceHandle<SharedCcidState>,
+    persistence: DevicePersistenceHandle,
 }
 
 #[cfg(target_os = "linux")]
@@ -398,7 +349,7 @@ struct HidRuntime {
 
 #[cfg(target_os = "linux")]
 struct CcidRuntime {
-    fido: StatePersistenceHandle<FidoAuthenticator>,
+    fido: AppletPersistenceHandle<FidoAuthenticator>,
     fido_operations: Arc<FidoOperationCoordinator>,
     presence: crate::presence::Service,
     clock: crate::keepalive::Handle,
@@ -506,7 +457,7 @@ impl Endpoints {
 
     fn start(
         self,
-        fido: StatePersistenceHandle<FidoAuthenticator>,
+        fido: AppletPersistenceHandle<FidoAuthenticator>,
         ccid: CcidPersistenceHandle,
         services: EndpointServices<'_>,
     ) -> io::Result<EndpointRuntime> {
@@ -940,20 +891,14 @@ fn serve_ccid(
                 Ok(0) => {}
                 Ok(length) => {
                     let _activity = display_activity.begin();
-                    let (
-                        replies,
-                        piv_mutation,
-                        hsmauth_mutation,
-                        security_domain_mutation,
-                        openpgp_mutation,
-                        fido_mutations,
-                    ) = {
+                    let (replies, applet_mutation, force_fido, fido_mutations) = {
                         let mut state = ccid
                             .state
                             .lock()
                             .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
                         let mut fido_error = None;
                         let mut fido_mutations = Vec::new();
+                        let mut force_fido = false;
                         let replies = state.receive_with_keepalives(
                             &request[..length],
                             &clock,
@@ -966,19 +911,22 @@ fn serve_ccid(
                                     })
                                 })
                             },
-                            &mut |request| match exchange_ccid_fido(
-                                &fido,
-                                &fido_operations,
-                                &presence,
-                                request,
-                            ) {
-                                Ok((response, mutation)) => {
-                                    fido_mutations.extend(mutation);
-                                    response
-                                }
-                                Err(error) => {
-                                    fido_error = Some(error);
-                                    vec![0x7f]
+                            &mut |request| {
+                                force_fido |= request.first() == Some(&0x06);
+                                match exchange_ccid_fido(
+                                    &fido,
+                                    &fido_operations,
+                                    &presence,
+                                    request,
+                                ) {
+                                    Ok((response, mutation)) => {
+                                        fido_mutations.extend(mutation);
+                                        response
+                                    }
+                                    Err(error) => {
+                                        fido_error = Some(error);
+                                        vec![0x7f]
+                                    }
                                 }
                             },
                             |keepalive| write_transfer(&mut input, keepalive),
@@ -986,41 +934,17 @@ fn serve_ccid(
                         if let Some(error) = fido_error {
                             return Err(error);
                         }
-                        let piv_mutation = state
-                            .take_piv_persistent_change()
-                            .then(|| ccid.piv.record_mutation())
-                            .transpose()?;
-                        let hsmauth_mutation = state
-                            .take_hsmauth_persistent_change()
-                            .then(|| ccid.hsmauth.record_mutation())
-                            .transpose()?;
-                        let security_domain_mutation = state
-                            .take_security_domain_persistent_change()
-                            .then(|| ccid.security_domain.record_mutation())
-                            .transpose()?;
-                        let openpgp_mutation = state
-                            .take_openpgp_persistent_change()
-                            .then(|| ccid.openpgp.record_mutation())
-                            .transpose()?;
-                        (
-                            replies,
-                            piv_mutation,
-                            hsmauth_mutation,
-                            security_domain_mutation,
-                            openpgp_mutation,
-                            fido_mutations,
-                        )
+                        let applet_mutation = ccid
+                            .persistence
+                            .record_mutations(state.take_persistent_applets())?;
+                        (replies, applet_mutation, force_fido, fido_mutations)
                     };
-                    if let Some(mutation) = piv_mutation {
-                        mutation.wait()?;
+                    // The one writer may snapshot CCID as well as FIDO. Wait or
+                    // force durability only after releasing both runtime locks.
+                    if force_fido && !fido_mutations.is_empty() {
+                        fido.flush()?;
                     }
-                    if let Some(mutation) = hsmauth_mutation {
-                        mutation.wait()?;
-                    }
-                    if let Some(mutation) = security_domain_mutation {
-                        mutation.wait()?;
-                    }
-                    if let Some(mutation) = openpgp_mutation {
+                    if let Some(mutation) = applet_mutation {
                         mutation.wait()?;
                     }
                     for mutation in fido_mutations {
@@ -1043,7 +967,7 @@ fn serve_ccid(
 fn serve_hid(
     output: File,
     mut input: File,
-    fido: StatePersistenceHandle<FidoAuthenticator>,
+    fido: AppletPersistenceHandle<FidoAuthenticator>,
     runtime: HidRuntime,
 ) -> io::Result<()> {
     let HidRuntime {
@@ -1280,7 +1204,7 @@ impl HidReader {
 
 #[cfg(target_os = "linux")]
 fn exchange_persistent_fido_with_keepalives(
-    fido: &StatePersistenceHandle<FidoAuthenticator>,
+    fido: &AppletPersistenceHandle<FidoAuthenticator>,
     input: &mut File,
     reports: &Receiver<io::Result<Vec<u8>>>,
     request: &[u8],
@@ -1316,7 +1240,7 @@ fn exchange_persistent_fido_with_keepalives(
 
 #[cfg(target_os = "linux")]
 fn exchange_ccid_fido(
-    fido: &StatePersistenceHandle<FidoAuthenticator>,
+    fido: &AppletPersistenceHandle<FidoAuthenticator>,
     operations: &FidoOperationCoordinator,
     presence: &crate::presence::Service,
     request: &[u8],
@@ -1357,9 +1281,6 @@ fn exchange_ccid_fido(
         .then(|| fido.record_mutation())
         .transpose()?;
     drop(state);
-    if command == 0x06 && mutation.is_some() {
-        fido.flush()?;
-    }
     Ok((response, mutation))
 }
 
@@ -1548,157 +1469,6 @@ fn try_receive_hid_report(reports: &Receiver<io::Result<Vec<u8>>>) -> io::Result
 }
 
 #[cfg(target_os = "linux")]
-fn load_fido_state(serial: u32, path: &Path) -> io::Result<FidoAuthenticator> {
-    match fs::read(path) {
-        Ok(encoded) => FidoAuthenticator::from_persistent_state(
-            serial,
-            virtual_yubikey_core::FidoConfiguration::default(),
-            &encoded,
-        )
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("load persistent FIDO state {}: {error}", path.display()),
-            )
-        }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let fido = FidoAuthenticator::for_serial(serial);
-            let encoded = encode_fido_state(&fido)?;
-            replace_file_atomically(path, &encoded)
-                .map_err(|error| with_context(error, "create initial persistent FIDO state"))?;
-            Ok(fido)
-        }
-        Err(error) => Err(with_context(error, "read persistent FIDO state")),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn encode_fido_state(fido: &FidoAuthenticator) -> io::Result<Vec<u8>> {
-    fido.persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent FIDO state: {error}")))
-}
-
-#[cfg(target_os = "linux")]
-fn load_ccid_state(
-    serial: u32,
-    piv_path: &Path,
-    hsmauth_path: &Path,
-    security_domain_path: &Path,
-    openpgp_path: &Path,
-) -> io::Result<crate::ccid::Device> {
-    let factory = crate::ccid::Device::new(serial);
-    let piv_factory = encode_piv_state(&factory)?;
-    let hsmauth_factory = encode_hsmauth_state(&factory)?;
-    let security_domain_factory = encode_security_domain_state(&factory)?;
-    let piv = load_applet_state(piv_path, "piv", &piv_factory)?;
-    let hsmauth = load_applet_state(hsmauth_path, "hsmauth", &hsmauth_factory)?;
-    let security_domain = load_applet_state(
-        security_domain_path,
-        "security-domain",
-        &security_domain_factory,
-    )?;
-    let mut device =
-        crate::ccid::Device::from_persistent_states(serial, &piv, &hsmauth, &security_domain)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let factory = encode_openpgp_state(&factory)?;
-    let encoded = load_applet_state(openpgp_path, "openpgp", &factory)?;
-    device
-        .restore_openpgp_persistent_state(&encoded)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(device)
-}
-
-#[cfg(target_os = "linux")]
-fn load_applet_state(path: &Path, applet: &str, factory: &[u8]) -> io::Result<Vec<u8>> {
-    match fs::read(path) {
-        Ok(encoded) => {
-            diagnostics::log(
-                Level::Info,
-                "smartcard",
-                "state_loaded",
-                format_args!("applet={applet} source=persistent bytes={}", encoded.len()),
-            );
-            Ok(encoded)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            diagnostics::log(
-                Level::Info,
-                "smartcard",
-                "state_loaded",
-                format_args!("applet={applet} source=factory"),
-            );
-            replace_file_atomically(path, factory).map_err(|error| {
-                with_context(error, "create initial persistent smart-card applet state")
-            })?;
-            Ok(factory.to_vec())
-        }
-        Err(error) => Err(with_context(
-            error,
-            "read persistent smart-card applet state",
-        )),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn encode_shared_openpgp_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
-    let ccid = state
-        .0
-        .lock()
-        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
-    encode_openpgp_state(&ccid)
-}
-#[cfg(target_os = "linux")]
-fn encode_openpgp_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
-    ccid.openpgp_persistent_state().map_err(io::Error::other)
-}
-
-#[cfg(target_os = "linux")]
-fn encode_shared_piv_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
-    let ccid = state
-        .0
-        .lock()
-        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
-    encode_piv_state(&ccid)
-}
-
-#[cfg(target_os = "linux")]
-fn encode_shared_hsmauth_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
-    let ccid = state
-        .0
-        .lock()
-        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
-    encode_hsmauth_state(&ccid)
-}
-
-#[cfg(target_os = "linux")]
-fn encode_shared_security_domain_state(state: &SharedCcidState) -> io::Result<Vec<u8>> {
-    let ccid = state
-        .0
-        .lock()
-        .map_err(|_| io::Error::other("smart-card state lock poisoned"))?;
-    encode_security_domain_state(&ccid)
-}
-
-#[cfg(target_os = "linux")]
-fn encode_piv_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
-    ccid.piv_persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent PIV state: {error}")))
-}
-
-#[cfg(target_os = "linux")]
-fn encode_hsmauth_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
-    ccid.hsmauth_persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent YubiHSM Auth state: {error}")))
-}
-
-#[cfg(target_os = "linux")]
-fn encode_security_domain_state(ccid: &crate::ccid::Device) -> io::Result<Vec<u8>> {
-    ccid.security_domain_persistent_state().map_err(|error| {
-        io::Error::other(format!("encode persistent Security Domain state: {error}"))
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn ctap_command_name(command: u8) -> &'static str {
     match command {
         0x01 => "make_credential",
@@ -1791,53 +1561,9 @@ fn data_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-#[cfg(target_os = "linux")]
-fn with_context(error: io::Error, operation: &str) -> io::Error {
-    io::Error::new(error.kind(), format!("{operation}: {error}"))
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn usb_applet_storage_adds_openpgp_without_replacing_existing_files() {
-        let root = std::env::temp_dir().join(format!(
-            "virtual-yubikey-storage-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let piv = root.join("piv.cbor");
-        let hsmauth = root.join("hsmauth.cbor");
-        let sd = root.join("sd.cbor");
-        let pgp = root.join("openpgp.cbor");
-        let factory = crate::ccid::Device::new(12345678);
-        let existing = [
-            encode_piv_state(&factory).unwrap(),
-            encode_hsmauth_state(&factory).unwrap(),
-            encode_security_domain_state(&factory).unwrap(),
-        ];
-        for (path, bytes) in [&piv, &hsmauth, &sd].into_iter().zip(&existing) {
-            std::fs::write(path, bytes).unwrap();
-        }
-        let device = load_ccid_state(12345678, &piv, &hsmauth, &sd, &pgp).unwrap();
-        assert_eq!(
-            std::fs::read(&pgp).unwrap(),
-            encode_openpgp_state(&device).unwrap()
-        );
-        for (path, bytes) in [&piv, &hsmauth, &sd].into_iter().zip(&existing) {
-            assert_eq!(std::fs::read(path).unwrap(), *bytes);
-        }
-        std::fs::write(&pgp, b"corrupt").unwrap();
-        assert!(load_ccid_state(12345678, &piv, &hsmauth, &sd, &pgp).is_err());
-        assert_eq!(std::fs::read(&pgp).unwrap(), b"corrupt");
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn fido_operations_are_exclusive_across_transports() {

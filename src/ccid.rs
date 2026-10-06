@@ -53,23 +53,14 @@ pub(crate) struct Device {
 }
 
 impl Device {
+    #[cfg(test)]
     pub(crate) fn new(serial: u32) -> Self {
         Self::with_card(Card::new(serial))
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn from_persistent_states(
-        serial: u32,
-        piv_encoded: &[u8],
-        hsmauth_encoded: &[u8],
-        security_domain_encoded: &[u8],
-    ) -> Result<Self, &'static str> {
-        Ok(Self::with_card(Card::from_persistent_states(
-            serial,
-            piv_encoded,
-            hsmauth_encoded,
-            security_domain_encoded,
-        )?))
+    pub(crate) fn from_device(device: virtual_yubikey_core::VirtualYubiKey) -> Self {
+        Self::with_card(Card::from_device(device))
     }
 
     fn with_card(card: Card) -> Self {
@@ -88,49 +79,18 @@ impl Device {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn openpgp_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
-        self.card.openpgp_persistent_state()
+    pub(crate) fn persistent_applet(
+        &self,
+        applet: virtual_yubikey_core::storage::PersistentApplet,
+    ) -> io::Result<Vec<u8>> {
+        self.card.persistent_applet(applet)
     }
+
     #[cfg(target_os = "linux")]
-    pub(crate) fn restore_openpgp_persistent_state(
+    pub(crate) fn take_persistent_applets(
         &mut self,
-        encoded: &[u8],
-    ) -> Result<(), &'static str> {
-        self.card.restore_openpgp_persistent_state(encoded)
-    }
-    #[cfg(target_os = "linux")]
-    pub(crate) fn take_openpgp_persistent_change(&mut self) -> bool {
-        self.card.take_openpgp_persistent_change()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
-        self.card.piv_persistent_state()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn hsmauth_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
-        self.card.hsmauth_persistent_state()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn security_domain_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
-        self.card.security_domain_persistent_state()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn take_piv_persistent_change(&mut self) -> bool {
-        self.card.take_piv_persistent_change()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn take_hsmauth_persistent_change(&mut self) -> bool {
-        self.card.take_hsmauth_persistent_change()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn take_security_domain_persistent_change(&mut self) -> bool {
-        self.card.take_security_domain_persistent_change()
+    ) -> Vec<virtual_yubikey_core::storage::PersistentApplet> {
+        self.card.take_persistent_applets()
     }
 
     #[cfg(test)]

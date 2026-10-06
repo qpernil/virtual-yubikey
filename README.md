@@ -387,25 +387,30 @@ keeps USB absent, and a dropped wake cannot leave the device detached after
 the physical button has been released.
 Display traffic never blocks a USB endpoint thread.
 
-The supervisor creates `/var/lib/virtual-yubikey` for the worker. A serial
-`12345678` device stores versioned CBOR state in
-`/var/lib/virtual-yubikey/fido-12345678.cbor` and
-`/var/lib/virtual-yubikey/piv-12345678.cbor`,
-`/var/lib/virtual-yubikey/hsmauth-12345678.cbor`, and
-`/var/lib/virtual-yubikey/security-domain-12345678.cbor`. Before reading or
-creating any image, the worker exclusively locks
-`/var/lib/virtual-yubikey/yubikey-12345678.lock`; one device-level lock covers
-all applets and remains held through their final persistence flush. The
-sidecar remains present when unlocked, while a concurrent owner is a startup
-error. Missing state files are initialized from factory state before USB is
-served; invalid existing files are startup errors and are never silently
-replaced. All four state images use the generic
-`software-key-core/state-persistence` engine. By default it batches changes for
-up to 500 ms, atomically replaces mode-`0600` files, and flushes pending state
-on USB ejection and worker shutdown.
-`--persistence immediate` instead synchronizes each durable change before its
-successful response is written. The files contain unencrypted private keys and applet credential state
-(OpenPGP retains salted PIN verifiers) and must not be treated as secure hardware storage.
+The supervisor creates `/var/lib/virtual-yubikey` for the worker. All device
+forms use the shared `virtual-yubikey-core::storage` loader and runtime. A serial
+`12345678` device has five independent CBOR records:
+`fido-12345678.cbor`, `piv-12345678.cbor`, `hsmauth-12345678.cbor`,
+`security-domain-12345678.cbor`, and `openpgp-12345678.cbor`.
+The directory location is chosen by the host; filenames and record contents are
+identical for embedded readers and USB workers with the same serial.
+
+Before reading or creating records, the core exclusively locks
+`yubikey-12345678.lock`. The lock covers all applets and remains held through
+the final writer shutdown. Missing files are initialized from factory state;
+invalid existing files fail startup and are never silently replaced. One shared
+writer batches dirty applets for up to 500 ms and atomically replaces only their
+mode-`0600` files, using `software-key-core/state-persistence`. USB ejection and
+shutdown flush pending writes. `--persistence immediate` synchronizes changes
+before responses are sent; FIDO PIN changes/retries force a flush in either mode.
+Runtime state locks are released before durability waits. Applet files are
+independent; a batch does not provide a transaction across multiple files.
+
+Whole-device `state.cbor` files are not imported. Deployments moving embedded
+readers to this layout must explicitly clear their old virtual-device state.
+The files contain unencrypted private keys and applet credential state
+(OpenPGP retains salted PIN verifiers) and are not secure hardware storage.
+See [shared storage](docs/storage.md) for ownership and host integration.
 
 FIDO persistent state uses CBOR schema version 5 and PIV uses version 4; supported
 older images are migrated when loaded. YubiHSM Auth state uses schema version 1;

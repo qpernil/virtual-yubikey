@@ -2,9 +2,9 @@
 
 ## Status
 
-This document specifies a future storage design. The current independent FIDO,
-PIV, and YubiHSM Auth state files remain the supported on-disk format until the
-replacement is implemented and tested. Activating the
+This document specifies a future storage design. The current shared
+[per-applet storage layout](storage.md) remains the supported on-disk format
+until a replacement is implemented and tested. Activating the
 replacement must be explicit; an unsupported or corrupt state must continue to
 fail closed rather than silently starting with an empty token.
 

@@ -60,11 +60,9 @@ clients without a presence source reject operations requiring touch.
 
 ## Storage and compatibility
 
-USB stores `openpgp-<serial>.cbor` using the existing mode-0600 atomic persistence
-policy. Embedded readers store the same applet record inside version 2 of their
-whole-device `state.cbor`. Version 1 device records retain all existing applets
-and initialize OpenPGP at factory defaults. The OpenPGP record has schema version
-1 and stores keys, certificates, verifiers, retry counters, touch policy,
+Every device form stores `openpgp-<serial>.cbor` through the common
+[per-applet storage runtime](storage.md), with mode-0600 atomic replacement.
+The OpenPGP record has schema version 1 and stores keys, certificates, verifiers, retry counters, touch policy,
 metadata, the signature counter and lifecycle state. Authorization is never
 persisted. Invalid records fail startup and are not silently overwritten.
 
