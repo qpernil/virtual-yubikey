@@ -51,7 +51,7 @@ const CTAP2_ERR_OTHER: u8 = 0x7f;
 const PIN_RETRIES: u8 = 8;
 pub(crate) const MAX_RESIDENT_CREDENTIALS: usize = 100;
 const MAX_CTAP_MESSAGE_SIZE: u16 = 7609;
-const PERSISTENT_STATE_VERSION: u8 = 4;
+const PERSISTENT_STATE_VERSION: u8 = 5;
 
 const CKR_ARGUMENTS_BAD: u64 = 1;
 const CKR_DEVICE_ERROR: u64 = 2;
@@ -74,6 +74,7 @@ impl From<()> for Error {
 #[derive(Clone)]
 pub(crate) struct FidoState {
     device_identifier: [u8; 16],
+    attestation: Option<crate::fido_attestation::Identity>,
     pin: Option<Zeroizing<Vec<u8>>>,
     pin_retries: u8,
     consecutive_pin_failures: u8,
@@ -231,6 +232,7 @@ impl FidoState {
         getrandom::fill(&mut persistent_token).expect("FIDO requires operating-system randomness");
         Self {
             device_identifier,
+            attestation: None,
             pin: configuration.initial_pin.map(Zeroizing::new),
             pin_retries: PIN_RETRIES,
             consecutive_pin_failures: 0,
@@ -340,7 +342,7 @@ impl FidoState {
         let mut output = Vec::new();
         let mut encoder = Encoder::new(&mut output);
         encoder
-            .map(7)
+            .map(8)
             .map_err(|_| "cannot encode persistent FIDO state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent FIDO state")?
@@ -438,6 +440,25 @@ impl FidoState {
             .map_err(|_| "cannot encode persistent PIN permission")?
             .bool(self.persistent_token_granted)
             .map_err(|_| "cannot encode persistent PIN retries")?;
+        encoder
+            .u8(8)
+            .map_err(|_| "cannot encode FIDO attestation")?;
+        if let Some(identity) = &self.attestation {
+            let key = identity
+                .serialized_key()
+                .map_err(|_| "cannot serialize FIDO attestation key")?;
+            encoder
+                .array(2)
+                .map_err(|_| "cannot encode FIDO attestation")?
+                .bytes(&key)
+                .map_err(|_| "cannot encode FIDO attestation")?
+                .bytes(identity.certificate())
+                .map_err(|_| "cannot encode FIDO attestation")?;
+        } else {
+            encoder
+                .array(0)
+                .map_err(|_| "cannot encode FIDO attestation")?;
+        }
         Ok(output)
     }
 
@@ -458,6 +479,7 @@ impl FidoState {
         let mut pin_retries = None;
         let mut persistent_token = None;
         let mut persistent_token_granted = None;
+        let mut attestation = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -515,6 +537,26 @@ impl FidoState {
                             .map_err(|_| "invalid persistent PIN permission")?,
                     );
                 }
+                8 if attestation.is_none() => {
+                    attestation = Some(
+                        match decoder.array().map_err(|_| "invalid FIDO attestation")? {
+                            Some(0) => None,
+                            Some(2) => {
+                                let key = Zeroizing::new(
+                                    decoder
+                                        .bytes()
+                                        .map_err(|_| "invalid FIDO attestation key")?
+                                        .to_vec(),
+                                );
+                                let cert = decoder
+                                    .bytes()
+                                    .map_err(|_| "invalid FIDO attestation certificate")?;
+                                Some(crate::fido_attestation::Identity::restore(&key, cert)?)
+                            }
+                            _ => return Err("invalid FIDO attestation identity"),
+                        },
+                    );
+                }
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent FIDO state contains invalid data")?,
@@ -523,7 +565,7 @@ impl FidoState {
         if decoder.position() != encoded.len() {
             return Err("persistent FIDO state has trailing data");
         }
-        if !matches!(version, Some(2 | 3 | PERSISTENT_STATE_VERSION)) {
+        if !matches!(version, Some(2 | 3 | 4 | PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent FIDO state version");
         }
         if identifier.as_deref() != Some(expected_identifier.as_slice()) {
@@ -557,7 +599,7 @@ impl FidoState {
         if state.pin_retries > PIN_RETRIES {
             return Err("persistent FIDO state has invalid PIN retries");
         }
-        if version == Some(PERSISTENT_STATE_VERSION) {
+        if matches!(version, Some(4 | PERSISTENT_STATE_VERSION)) {
             let token = persistent_token.ok_or("missing persistent PIN token")?;
             if token.len() != 32 {
                 return Err("invalid persistent PIN token length");
@@ -565,6 +607,9 @@ impl FidoState {
             state.persistent_pin_uv_auth_token = token;
             state.persistent_token_granted =
                 persistent_token_granted.ok_or("missing persistent PIN permission")?;
+        }
+        if version == Some(PERSISTENT_STATE_VERSION) {
+            state.attestation = attestation.ok_or("missing FIDO attestation identity")?;
         }
         state.credentials = credentials;
         Ok(state)
@@ -1736,6 +1781,11 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
     };
     let parent_secret = CredentialPrivateKey::generate(algorithm)?;
     let parent_cose = parent_secret.public_key_cose()?;
+    if state.attestation.is_none() {
+        state.attestation = Some(crate::fido_attestation::Identity::generate()?);
+        state.persistent_change = true;
+    }
+    let identity = state.attestation.as_ref().ok_or(Error)?;
     let (extension_output, unsigned_extension, preview) = if request.preview_requested {
         let mut algorithm_output = Vec::new();
         Encoder::new(&mut algorithm_output)
@@ -1770,7 +1820,7 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
             .u8(1)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-            .str("none")
+            .str("packed")
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
             .u8(2)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1778,8 +1828,8 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
             .u8(3)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-            .map(0)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            .writer_mut()
+            .extend_from_slice(&identity.statement(&inner_auth_data, client_data_hash)?);
         (
             Some(algorithm_output),
             Some(attestation),
@@ -1803,7 +1853,7 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .str("none")
+        .str("packed")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(2)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -1811,8 +1861,8 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(3)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .map(0)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        .writer_mut()
+        .extend_from_slice(&identity.statement(&outer_auth_data, client_data_hash)?);
     if let Some(attestation) = unsigned_extension {
         encoder
             .u8(6)
@@ -3074,7 +3124,14 @@ mod tests {
         state.pin_retries = PIN_RETRIES;
         let mut encoded = state.encode_persistent().unwrap();
         encoded[0] = 0xa4;
-        encoded.truncate(encoded.len() - 39);
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        decoder.map().unwrap();
+        for _ in 0..4 {
+            decoder.skip().unwrap();
+            decoder.skip().unwrap();
+        }
+        let length = decoder.position();
+        encoded.truncate(length);
         assert!(
             FidoState::decode_persistent(&encoded, [0x11; 16], FidoConfiguration::default())
                 .is_err()
@@ -3556,6 +3613,22 @@ mod tests {
             .unwrap();
         let registration_response = exchange_with_vector_authorization(&mut state, &registration);
         assert_eq!(registration_response[0], CTAP2_OK);
+        verify_packed(&registration_response, &client_data_hash);
+        let mut decoder = minicbor::Decoder::new(&registration_response[1..]);
+        for _ in 0..decoder.map().unwrap().unwrap() {
+            if decoder.u8().unwrap() == 6 {
+                assert_eq!(decoder.map().unwrap(), Some(1));
+                assert_eq!(decoder.str().unwrap(), "previewSign");
+                assert_eq!(decoder.map().unwrap(), Some(1));
+                assert_eq!(decoder.u8().unwrap(), 7);
+                let mut nested = vec![CTAP2_OK];
+                nested.extend_from_slice(decoder.bytes().unwrap());
+                verify_packed(&nested, &client_data_hash);
+            } else {
+                decoder.skip().unwrap();
+            }
+        }
+        assert!(registration_response.len() <= usize::from(MAX_CTAP_MESSAGE_SIZE));
         let seed = crate::preview_sign::seed_cose().unwrap();
         assert!(
             registration_response
@@ -3668,6 +3741,140 @@ mod tests {
     fn create_standard_credential(state: &mut FidoState, rp_id: &str, marker: u8) -> Vec<u8> {
         let request = make_credential_request(rp_id, marker, &[-7]);
         exchange_with_vector_authorization(state, &request)
+    }
+
+    fn verify_packed(response: &[u8], client_hash: &[u8]) -> Vec<u8> {
+        use der::Decode;
+        use signature::Verifier;
+        let mut decoder = minicbor::Decoder::new(&response[1..]);
+        let mut auth_data = Vec::new();
+        let mut signature = Vec::new();
+        let mut certificate = Vec::new();
+        for _ in 0..decoder.map().unwrap().unwrap() {
+            match decoder.u8().unwrap() {
+                1 => assert_eq!(decoder.str().unwrap(), "packed"),
+                2 => auth_data = decoder.bytes().unwrap().to_vec(),
+                3 => {
+                    assert_eq!(decoder.map().unwrap(), Some(3));
+                    for _ in 0..3 {
+                        match decoder.str().unwrap() {
+                            "alg" => assert_eq!(decoder.i64().unwrap(), -7),
+                            "sig" => signature = decoder.bytes().unwrap().to_vec(),
+                            "x5c" => {
+                                assert_eq!(decoder.array().unwrap(), Some(1));
+                                certificate = decoder.bytes().unwrap().to_vec();
+                            }
+                            _ => panic!("unexpected attestation statement"),
+                        }
+                    }
+                }
+                _ => decoder.skip().unwrap(),
+            }
+        }
+        let cert = x509_cert::Certificate::from_der(&certificate).unwrap();
+        let public = cert
+            .tbs_certificate()
+            .subject_public_key_info()
+            .subject_public_key
+            .as_bytes()
+            .unwrap();
+        let verifier = p256::ecdsa::VerifyingKey::from_sec1_bytes(public).unwrap();
+        let sig = p256::ecdsa::Signature::from_der(&signature).unwrap();
+        let mut message = auth_data;
+        message.extend_from_slice(client_hash);
+        verifier.verify(&message, &sig).unwrap();
+        message[0] ^= 1;
+        assert!(verifier.verify(&message, &sig).is_err());
+        certificate
+    }
+
+    #[test]
+    fn packed_attestation_covers_every_algorithm_and_survives_restart() {
+        for algorithm in [
+            FidoCredentialAlgorithm::Es256,
+            FidoCredentialAlgorithm::Esp256,
+            FidoCredentialAlgorithm::Ed25519,
+            FidoCredentialAlgorithm::Esp384,
+            FidoCredentialAlgorithm::Esp512,
+            FidoCredentialAlgorithm::Es256K,
+            FidoCredentialAlgorithm::Ps256,
+            FidoCredentialAlgorithm::Ps384,
+            FidoCredentialAlgorithm::Ps512,
+            FidoCredentialAlgorithm::Rs256,
+            FidoCredentialAlgorithm::Rs384,
+            FidoCredentialAlgorithm::Rs512,
+            FidoCredentialAlgorithm::MlDsa44,
+            FidoCredentialAlgorithm::MlDsa65,
+            FidoCredentialAlgorithm::MlDsa87,
+        ] {
+            let config = FidoConfiguration::default().with_credential_algorithms(vec![algorithm]);
+            let mut state = FidoState::new(
+                [0x11; 16],
+                FidoConfiguration::default().with_credential_algorithms(vec![algorithm]),
+            );
+            let response = exchange_with_vector_authorization(
+                &mut state,
+                &make_credential_request(
+                    "attestation.example",
+                    0x61,
+                    &[algorithm.cose_identifier()],
+                ),
+            );
+            assert_eq!(response[0], CTAP2_OK);
+            assert!(
+                response.len() <= usize::from(MAX_CTAP_MESSAGE_SIZE),
+                "{algorithm:?}: {}",
+                response.len()
+            );
+            let certificate = verify_packed(&response, &[0x61; 32]);
+            let mut restored = FidoState::decode_persistent(
+                &state.encode_persistent().unwrap(),
+                [0x11; 16],
+                config,
+            )
+            .unwrap();
+            let response = exchange_with_vector_authorization(
+                &mut restored,
+                &make_credential_request(
+                    "attestation.example",
+                    0x62,
+                    &[algorithm.cose_identifier()],
+                ),
+            );
+            assert_eq!(verify_packed(&response, &[0x62; 32]), certificate);
+        }
+    }
+
+    #[test]
+    fn version_four_migration_preserves_token_and_creates_attestation_lazily() {
+        let mut state = FidoState::new([0x11; 16], FidoConfiguration::default());
+        state.persistent_token_granted = true;
+        let mut encoded = state.encode_persistent().unwrap();
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        decoder.map().unwrap();
+        for _ in 0..7 {
+            decoder.skip().unwrap();
+            decoder.skip().unwrap();
+        }
+        let length = decoder.position();
+        encoded.truncate(length);
+        encoded[0] = 0xa7;
+        encoded[2] = 4;
+        let mut restored =
+            FidoState::decode_persistent(&encoded, [0x11; 16], FidoConfiguration::default())
+                .unwrap();
+        assert_eq!(
+            restored.persistent_pin_uv_auth_token,
+            state.persistent_pin_uv_auth_token
+        );
+        assert!(restored.persistent_token_granted);
+        assert!(restored.attestation.is_none());
+        let response = exchange_with_vector_authorization(
+            &mut restored,
+            &make_credential_request("migration.example", 0x61, &[-7]),
+        );
+        verify_packed(&response, &[0x61; 32]);
+        assert!(restored.take_persistent_change());
     }
 
     fn make_credential_request(rp_id: &str, marker: u8, algorithms: &[i64]) -> Vec<u8> {

@@ -29,6 +29,8 @@ name = "virtual-yubikey-worker"
 path = "src/main.rs"
 
 [dev-dependencies]
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
+signature = "3.0.0"
 toml = "0.9.12"
 
 # The USB binary deliberately calls Linux interfaces directly. Protocol and

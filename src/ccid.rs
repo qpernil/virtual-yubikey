@@ -88,6 +88,22 @@ impl Device {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn openpgp_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.card.openpgp_persistent_state()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn restore_openpgp_persistent_state(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<(), &'static str> {
+        self.card.restore_openpgp_persistent_state(encoded)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_openpgp_persistent_change(&mut self) -> bool {
+        self.card.take_openpgp_persistent_change()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         self.card.piv_persistent_state()
     }
@@ -752,6 +768,58 @@ mod tests {
         ]
         .concat();
         (card, short_apdu(0x03, &calculate))
+    }
+
+    #[test]
+    fn usb_ccid_openpgp_discovers_provisions_and_signs_using_the_shared_core() {
+        use signature::hazmat::PrehashVerifier;
+        let mut device = Device::new(12345678);
+        device.receive(&request(PC_TO_RDR_ICC_POWER_ON, 0, [0, 0, 0], &[]));
+        let mut exchange = |apdu: &[u8]| {
+            let responses = device.receive(&request(PC_TO_RDR_XFR_BLOCK, 1, [0, 0, 0], apdu));
+            assert_eq!(responses.len(), 1);
+            responses[0][10..].to_vec()
+        };
+        let mut select = vec![0, 0xa4, 4, 0, 6];
+        select.extend(OPENPGP_AID);
+        assert_eq!(exchange(&select), [0x90, 0]);
+        let info = exchange(&[0, 0xca, 0, 0x6e, 0]);
+        assert!(info.windows(6).any(|w| w == OPENPGP_AID));
+        assert!(info.ends_with(&[0x90, 0]));
+        assert_eq!(
+            exchange(&[
+                0, 0x20, 0, 0x83, 8, b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8'
+            ]),
+            [0x90, 0]
+        );
+        assert_eq!(
+            exchange(&[
+                0, 0xda, 0, 0xc1, 9, 0x13, 0x2a, 0x86, 0x48, 0xce, 0x3d, 3, 1, 7
+            ]),
+            [0x90, 0]
+        );
+        let public = exchange(&[0, 0x47, 0x80, 0, 2, 0xb6, 0]);
+        assert!(public.ends_with(&[0x90, 0]));
+        // 7F49 43 86 41 followed by the uncompressed P-256 point.
+        assert_eq!(&public[..5], &[0x7f, 0x49, 0x43, 0x86, 0x41]);
+        let verifier = p256::ecdsa::VerifyingKey::from_sec1_bytes(&public[5..70]).unwrap();
+        let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(b"USB OpenPGP");
+        let mut sign = vec![0, 0x2a, 0x9e, 0x9a, 32];
+        sign.extend(&digest);
+        assert_eq!(exchange(&sign), [0x69, 0x82]);
+        assert_eq!(
+            exchange(&[0, 0x20, 0, 0x81, 6, b'1', b'2', b'3', b'4', b'5', b'6']),
+            [0x90, 0]
+        );
+        let result = exchange(&sign);
+        assert!(result.ends_with(&[0x90, 0]));
+        verifier
+            .verify_prehash(
+                &digest,
+                &p256::ecdsa::Signature::from_slice(&result[..64]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(exchange(&sign), [0x69, 0x82]);
     }
 
     #[test]

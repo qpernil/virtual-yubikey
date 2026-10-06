@@ -5,7 +5,7 @@
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
 enumerate as a composite FIDO HID and CCID, YubiKey-compatible test device.
 FIDO/CTAP is available through both HID and the FIDO2 CCID applet; CCID also
-exposes YubiKey Management, PIV, YubiHSM Auth, and the Issuer Security Domain.
+exposes YubiKey Management, PIV, OpenPGP, YubiHSM Auth, and the Issuer Security Domain.
 It is a software test double, not a security device:
 keys on a general-purpose Pi do not have the tamper, extraction, or side-channel
 protections of a real YubiKey.
@@ -18,7 +18,7 @@ state, worker-owned USB personality, and declarative launch profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
-YubiKey Management, PIV, YubiHSM Auth, Issuer Security Domain, and CTAP 2.1
+YubiKey Management, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, and CTAP 2.1
 behavior including GlobalPlatform secure messaging, PIN authorization,
 credential management, resident credentials, and `previewSign`.
 
@@ -28,10 +28,11 @@ credential management, resident credentials, and `previewSign`.
 | --- | --- |
 | USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
-| CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
+| CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, ML-KEM, and concrete hybrid PQ/T KEM operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
+| OpenPGP | Persistent RSA/ECC/Ed25519/X25519 keys, PIN/recovery policy, certificates, signing, decipher, touch and applet reset; see [OpenPGP](docs/openpgp.md) |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
 | FIDO2 | Shared CTAP 2.1 authenticator over HID and CCID, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
@@ -64,7 +65,7 @@ behavior are documented in
 | Module | Responsibility |
 | --- | --- |
 | `../software-key-core` | Sibling path dependency providing protocol-neutral key ownership, signing, verification, key serialization, standard X.509 signing/SPKI adapters, symmetric helpers, RSA encodings, ECDH/X25519 agreement, ML-DSA and ML-KEM operations, and ARKG-P256 derivation shared with clients such as `pkcs11rs` |
-| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, shared secure messaging, and persistent FIDO, PIV, YubiHSM Auth, and Security Domain state |
+| `crates/virtual-yubikey-core` | Logical firmware: profile, ISO 7816 routing, shared secure messaging, and persistent FIDO, PIV, OpenPGP, YubiHSM Auth, and Security Domain state |
 | `main.rs` | Worker startup and signal handling |
 | `cli.rs` | Worker option validation |
 | `diagnostics.rs` | Structured, payload-safe logging |
@@ -208,31 +209,41 @@ ASN.1 DER encoding for ECDSA signatures. Normal assertions hash their signed
 message; PreviewSign signs the caller-supplied digest directly. The host
 converts DER into fixed-width `r || s` when exposing a PKCS #11 signature.
 
-## FIDO attestation status
+## Security Domain reset
 
-`authenticatorMakeCredential` returns `fmt: "none"` and an empty attestation
-statement, including for ML-DSA credentials and the nested `previewSign`
-registration. FIDO has no attestation signing key, attestation certificate, or
-`packed`/self-attestation implementation. PIV attestation is separate and does
-not establish the provenance of FIDO credentials.
+Each SCP03 key set and SCP11 card/CA key has a persistent budget of 64
+establishment attempts. Completed successful authentication restores its budget;
+incomplete SCP03 establishment also consumes an attempt. Exhausting a key blocks
+and removes it and its certificates and policy, returning `6983`; missing keys
+return `6982`. Once every key is blocked, the domain restores factory SCP03 keys
+and generates a fresh attestable SCP11b identity. Other applets remain intact.
 
-Certificate-backed [packed attestation](https://www.w3.org/TR/webauthn-3/#sctn-packed-attestation)
-would require a FIDO-specific attestation key and certificate, a signature over
-the authenticator data and client-data hash, and a trust anchor accepted by the
-verifier. For ML-DSA, the registration response would carry the credential
-public key, attestation signature, and attestation certificate together.
-The 64-byte [CTAPHID framing limit](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html#message-and-packet-structure)
-is 7,609 bytes per response; increasing the advertised `maxMsgSize` cannot
-raise that transport limit. Even an ML-DSA-44 credential with an ML-DSA-44
-attestation signature and an ML-DSA-44-signed attestation certificate needs
-7,464 bytes for the two public keys and two signatures alone, before X.509,
-CBOR, and authenticator-data overhead, so that combination cannot fit over
-FIDO HID. A certificate signed by a smaller classical issuer may fit but does
-not provide a wholly post-quantum trust chain. Packed self-attestation omits
-the certificate and cannot establish independent authenticator provenance.
-Any attestation design must measure complete responses for each credential and
-attestation algorithm combination and keep the advertised capabilities within
-the transport limit.
+This implements the key-blocking workflow used by
+[Yubico's SecurityDomainSession.reset](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/securitydomain.html#SecurityDomainSession.reset).
+The 64-attempt budget is the emulator's policy, compatible with the client's
+65-iteration bound; it is not a claim about every physical firmware's threshold.
+Counters survive connection resets and persisted worker restarts. Blocking clears
+secure-channel and connection authorization. Administrative writes still require
+an authenticated protected command.
+
+## FIDO attestation
+
+`authenticatorMakeCredential` returns certificate-backed
+[packed attestation](https://www.w3.org/TR/webauthn-3/#sctn-packed-attestation),
+including the nested `previewSign` registration. A FIDO-specific P-256 key signs
+`authenticatorData || clientDataHash` with ES256. Its self-signed X.509 v3 leaf
+has the required subject, non-CA constraint and matching AAGUID extension.
+The identity is generated on first registration and persists with FIDO state;
+connection resets and worker restarts preserve it. Older state files migrate
+without losing credentials or PIN authorization state.
+
+Verifiers must explicitly trust or pin this virtual certificate. It proves
+possession of a virtual device key and does not claim Yubico hardware provenance.
+PIV and Security Domain identities are separate. Attestation uses ES256 for
+all credential algorithms, including ML-DSA; the trust chain is classical.
+Complete registration responses for every supported credential algorithm are
+checked against the 7,609-byte CTAPHID limit. A wholly ML-DSA certificate and
+attestation chain exceeds that limit and is not advertised.
 
 ## Hardware and operating system
 
@@ -361,9 +372,8 @@ CCID probing is ordinary application activity.
 While any application is blocked waiting for physical presence, the same
 cut-outs blink until touch, cancellation, or failure ends the wait. Every
 application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
-approximately 1.30 blinks per second. FIDO, PIV, and YubiHSM Auth use one
-protocol-neutral presence service; OpenPGP can join it when that applet is
-implemented. General FIDO HID report traffic does not drive the activity
+approximately 1.30 blinks per second. FIDO, PIV, OpenPGP, and YubiHSM Auth use one
+protocol-neutral presence service. General FIDO HID report traffic does not drive the activity
 indication. USB suspend and worker shutdown clear the panel and turn off its
 backlight. Holding KEY3 turns the display off and
 publishes an empty personality, leaving the worker powered but absent from USB.
@@ -394,12 +404,16 @@ replaced. All four state images use the generic
 up to 500 ms, atomically replaces mode-`0600` files, and flushes pending state
 on USB ejection and worker shutdown.
 `--persistence immediate` instead synchronizes each durable change before its
-successful response is written. The files contain unencrypted test PIN and
-private-key material and must not be treated as secure hardware storage.
+successful response is written. The files contain unencrypted private keys and applet credential state
+(OpenPGP retains salted PIN verifiers) and must not be treated as secure hardware storage.
 
-FIDO and PIV persistent states use current CBOR schema version 4; supported
+FIDO persistent state uses CBOR schema version 5 and PIV uses version 4; supported
 older images are migrated when loaded. YubiHSM Auth state uses schema version 1;
-Security Domain state uses schema version 2.
+Security Domain state uses schema version 3, including durable attempt counters.
+OpenPGP state uses schema version 1. USB keeps one file per applet; its HID and
+CCID FIDO routes use one shared FIDO state and identity. Embedded readers keep
+all applet records in a version-2 device file; version-1 files retain existing
+state and initialize OpenPGP at factory defaults.
 Unsupported or invalid state is a startup error and is never silently replaced;
 resetting an applet to empty state is an explicit administrative action.
 

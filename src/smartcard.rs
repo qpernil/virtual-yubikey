@@ -50,6 +50,22 @@ impl Card {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn openpgp_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.device.openpgp_persistent_state()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn restore_openpgp_persistent_state(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<(), &'static str> {
+        self.device.restore_openpgp_persistent_state(encoded)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_openpgp_persistent_change(&mut self) -> bool {
+        self.device.take_openpgp_persistent_change()
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         self.device.piv_persistent_state()
     }
@@ -412,9 +428,9 @@ mod tests {
     }
 
     #[test]
-    fn production_profile_does_not_expose_the_openpgp_fixture() {
+    fn production_profile_exposes_the_openpgp_applet() {
         let mut card = Card::new(1);
-        assert_eq!(card.transmit(&select(&OPENPGP_AID)), [0x6a, 0x82]);
+        assert_eq!(card.transmit(&select(&OPENPGP_AID)), [0x90, 0]);
     }
 
     #[test]
