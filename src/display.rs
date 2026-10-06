@@ -36,7 +36,16 @@ const PRESENCE_CADENCE: Cadence =
 #[cfg(target_os = "linux")]
 const MINIMUM_EDGE: Duration = Duration::from_millis(8);
 #[cfg(target_os = "linux")]
+const MINIMUM_ACTIVITY_OFF: Duration = Duration::from_millis(20);
+#[cfg(target_os = "linux")]
 const MINIMUM_ACTIVITY_ON: Duration = Duration::from_micros(33_500);
+
+#[cfg(target_os = "linux")]
+fn indicator_policy() -> Policy {
+    Policy::new(BUSY_CADENCE, IdlePolicy::Off, MINIMUM_EDGE)
+        .with_minimum_activity_off(MINIMUM_ACTIVITY_OFF)
+        .with_minimum_activity_on(MINIMUM_ACTIVITY_ON)
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -70,8 +79,7 @@ impl Controller {
     ) -> io::Result<Self> {
         let hardware = Arc::new(Mutex::new(Hardware::new(bus, control, kind)));
         let indicator = IndicatorController::start(
-            Policy::new(BUSY_CADENCE, IdlePolicy::Off, MINIMUM_EDGE)
-                .with_minimum_activity_on(MINIMUM_ACTIVITY_ON),
+            indicator_policy(),
             HardwareRenderer {
                 hardware: Arc::clone(&hardware),
             },
@@ -286,7 +294,10 @@ mod tests {
         assert_eq!(BUSY_CADENCE.off, Duration::from_millis(33));
         assert_eq!(PRESENCE_CADENCE.on, Duration::from_millis(384));
         assert_eq!(PRESENCE_CADENCE.off, Duration::from_millis(384));
-        assert_eq!(MINIMUM_EDGE, Duration::from_millis(8));
-        assert_eq!(MINIMUM_ACTIVITY_ON, Duration::from_micros(33_500));
+        let policy = indicator_policy();
+        assert_eq!(policy.idle, IdlePolicy::Off);
+        assert_eq!(policy.minimum_edge, Duration::from_millis(8));
+        assert_eq!(policy.minimum_activity_off, Duration::from_millis(20));
+        assert_eq!(policy.minimum_activity_on, Duration::from_micros(33_500));
     }
 }
