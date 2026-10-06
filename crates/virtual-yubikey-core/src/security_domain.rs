@@ -27,6 +27,8 @@ const FACTORY_SCP03_KEY: [u8; 16] = [
 ];
 const VIRTUAL_ATTESTATION_ROOT_PRIVATE_KEY: [u8; 32] = [0x24; 32];
 const MAX_KEYS: usize = 32;
+// Virtual policy: bounded by the 65-attempt reset loop used by yubikey-manager.
+const AUTHENTICATION_ATTEMPTS: u8 = 64;
 type KeyRef = (u8, u8);
 type StatusResult<T> = Result<T, u16>;
 
@@ -54,6 +56,7 @@ impl std::fmt::Debug for Material {
 
 #[derive(Debug)]
 struct Entry {
+    attempts: u8,
     material: Material,
     certificates: Vec<Vec<u8>>,
     issuer: Vec<u8>,
@@ -64,6 +67,7 @@ impl Entry {
     fn new(material: Material) -> Self {
         Self {
             material,
+            attempts: AUTHENTICATION_ATTEMPTS,
             certificates: Vec::new(),
             issuer: Vec::new(),
             allowlist: Vec::new(),
@@ -115,7 +119,7 @@ impl SecurityDomain {
         let mut e = minicbor::Encoder::new(&mut encoded);
         e.map(3)
             .and_then(|e| e.u8(1))
-            .and_then(|e| e.u8(2))
+            .and_then(|e| e.u8(3))
             .and_then(|e| e.u8(2))
             .and_then(|e| e.u32(self.serial))
             .and_then(|e| e.u8(3))
@@ -127,7 +131,7 @@ impl SecurityDomain {
                 Material::Public(point) => (0xb0, Zeroizing::new(point.clone())),
                 Material::Scp03(keys) => (0x88, keys.clone()),
             };
-            e.array(7)
+            e.array(8)
                 .and_then(|e| e.u8(kid))
                 .and_then(|e| e.u8(kvn))
                 .and_then(|e| e.u8(kind))
@@ -143,6 +147,7 @@ impl SecurityDomain {
             for serial in &entry.allowlist {
                 e.bytes(serial).map_err(|_| "encode SD serial")?;
             }
+            e.u8(entry.attempts).map_err(|_| "encode SD attempts")?;
         }
         Ok(encoded)
     }
@@ -164,7 +169,7 @@ impl SecurityDomain {
         if version == 1 {
             return Self::load_v1(serial, firmware, form_factor, encoded);
         }
-        if version != 2
+        if !matches!(version, 2 | 3)
             || fields != Some(3)
             || d.u8().ok() != Some(2)
             || d.u32().ok() != Some(serial)
@@ -181,7 +186,7 @@ impl SecurityDomain {
         }
         let mut keys = BTreeMap::new();
         for _ in 0..count {
-            if d.array().ok() != Some(Some(7)) {
+            if d.array().ok() != Some(Some(if version == 3 { 8 } else { 7 })) {
                 return Err("invalid SD entry");
             }
             let kid = d.u8().map_err(|_| "invalid SD KID")?;
@@ -218,6 +223,12 @@ impl SecurityDomain {
                 .any(|s| canonical_serial(s).as_deref() != Ok(s.as_slice()))
             {
                 return Err("invalid SD allowlist");
+            }
+            if version == 3 {
+                entry.attempts = d.u8().map_err(|_| "invalid SD attempts")?;
+                if entry.attempts == 0 || entry.attempts > AUTHENTICATION_ATTEMPTS {
+                    return Err("invalid SD attempts");
+                }
             }
             if keys.insert((kid, kvn), entry).is_some() {
                 return Err("duplicate SD key");
@@ -345,6 +356,60 @@ impl SecurityDomain {
             .insert((kid, kvn), Entry::new(Material::Private(key)));
         self.persistent_change = true;
         Ok(())
+    }
+
+    pub(crate) fn authentication_reference(
+        &self,
+        command: &CommandApdu<'_>,
+        pending: Option<(u8, u8)>,
+    ) -> Result<Option<(u8, u8)>, u16> {
+        let reference = match (command.cla, command.ins) {
+            (0x84, 0x82) => return Ok(pending),
+            (0x80, 0x50) if command.p2 == 0 => self
+                .keys
+                .keys()
+                .find(|&&(kid, kvn)| kid == 0 && (command.p1 == 0 || command.p1 == kvn))
+                .copied(),
+            (0x80, 0x88) if command.p2 == 0x13 => Some((command.p2, command.p1)),
+            (0x80, 0x82) if matches!(command.p2, 0x11 | 0x15) => Some((command.p2, command.p1)),
+            (0x80, 0x2a) if is_ca(command.p2 & 0x7f) => Some((command.p2 & 0x7f, command.p1)),
+            _ => return Ok(None),
+        };
+        let reference = reference.ok_or(0x6982u16)?;
+        if !self.keys.contains_key(&reference) {
+            return Err(0x6982);
+        }
+        Ok(Some(reference))
+    }
+
+    pub(crate) fn start_authentication(&mut self, reference: (u8, u8)) {
+        let entry = self
+            .keys
+            .get_mut(&reference)
+            .expect("resolved key reference");
+        entry.attempts = entry.attempts.saturating_sub(1);
+        self.persistent_change = true;
+    }
+
+    /// Block a depleted key, then restore factory state only when no key remains.
+    /// A successful completed authentication restores that key's retry budget.
+    pub(crate) fn finish_authentication(&mut self, reference: (u8, u8), success: bool) -> bool {
+        let Some(entry) = self.keys.get_mut(&reference) else {
+            return false;
+        };
+        if success {
+            entry.attempts = AUTHENTICATION_ATTEMPTS;
+            return false;
+        }
+        if entry.attempts != 0 {
+            return false;
+        }
+        self.keys.remove(&reference);
+        if self.keys.is_empty() {
+            *self = Self::new(self.serial, [5, 8, 0], 1);
+        }
+        self.persistent_change = true;
+        true
     }
 
     pub(crate) fn scp03_keys(&self, kvn: u8) -> Option<(u8, &[u8])> {
@@ -966,6 +1031,88 @@ fn push_tlv(output: &mut Vec<u8>, tag: &[u8], value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manager_reset_blocks_custom_scp03_scp11a_c_and_ca_keys() {
+        let mut device =
+            crate::VirtualYubiKey::new(crate::DeviceProfile::yubikey_5_8_ccid(12345678));
+        for kid in [0x11, 0x15] {
+            device.security_domain.keys.insert(
+                (kid, 2),
+                Entry::new(Material::Private(
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap(),
+                )),
+            );
+        }
+        let key = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
+        let SoftwarePublicKey::Ec { uncompressed, .. } = key.public_key() else {
+            unreachable!()
+        };
+        device
+            .security_domain
+            .keys
+            .insert((0x20, 3), Entry::new(Material::Public(uncompressed)));
+        device.security_domain.keys.insert(
+            (0, 4),
+            Entry::new(Material::Scp03(Zeroizing::new(vec![0x11; 48]))),
+        );
+        let refs: Vec<_> = device.security_domain.keys.keys().copied().collect();
+        let original = device.scp11b_public_key();
+        for (kid, kvn) in refs {
+            let (ins, kvn, kid) = match kid {
+                0 => (0x50, 0, 0),
+                0x13 => (0x88, kvn, kid),
+                0x11 | 0x15 => (0x82, kvn, kid),
+                _ => (0x2a, kvn, kid),
+            };
+            let mut apdu = vec![0x80, ins, kvn, kid, 8];
+            apdu.extend([0; 8]);
+            let mut blocked = false;
+            for _ in 0..65 {
+                let response = device.transmit(&apdu);
+                let sw = u16::from_be_bytes(response[response.len() - 2..].try_into().unwrap());
+                if matches!(sw, 0x6983 | 0x6982) {
+                    blocked = true;
+                    break;
+                }
+                assert!(
+                    matches!(sw, 0x9000 | 0x6a80),
+                    "{ins:02x}/{kid:02x}: {sw:04x}"
+                );
+            }
+            assert!(blocked, "reset did not block {kid:02x}");
+        }
+        assert_eq!(
+            device
+                .security_domain
+                .keys
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [(0, 0xff), (0x13, 1)]
+        );
+        assert_ne!(device.scp11b_public_key(), original);
+    }
+
+    #[test]
+    fn successful_authentication_restores_the_attempt_budget() {
+        let mut state = SecurityDomain::new(1, [5, 8, 0], 1);
+        for _ in 0..63 {
+            state.start_authentication((0, 0xff));
+            assert!(!state.finish_authentication((0, 0xff), false));
+        }
+        state.start_authentication((0, 0xff));
+        assert!(!state.finish_authentication((0, 0xff), true));
+        assert_eq!(state.keys[&(0, 0xff)].attempts, AUTHENTICATION_ATTEMPTS);
+        let encoded = state.persistent_state().unwrap();
+        assert_eq!(
+            SecurityDomain::from_persistent_state(1, [5, 8, 0], 1, &encoded)
+                .unwrap()
+                .keys[&(0, 0xff)]
+                .attempts,
+            AUTHENTICATION_ATTEMPTS
+        );
+    }
+
     use super::*;
 
     fn execute(domain: &mut SecurityDomain, ins: u8, p1: u8, p2: u8, data: &[u8]) -> ResponseApdu {

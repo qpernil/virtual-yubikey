@@ -49,6 +49,7 @@ struct HostCertificates {
 }
 
 struct PendingScp03 {
+    reference: (u8, u8),
     host_cryptogram: [u8; 8],
     s_enc: Zeroizing<Vec<u8>>,
     s_mac: Zeroizing<Vec<u8>>,
@@ -68,6 +69,10 @@ struct Session {
 }
 
 impl SecureChannel {
+    pub(crate) fn pending_authentication_reference(&self) -> Option<(u8, u8)> {
+        self.pending_scp03.as_ref().map(|pending| pending.reference)
+    }
+
     pub(crate) fn begins_establishment(command: &CommandApdu<'_>) -> bool {
         command.cla == 0x80 && matches!(command.ins, 0x50 | 0x88 | 0x82)
     }
@@ -189,6 +194,7 @@ impl SecureChannel {
             return ResponseApdu::status(0x6f00);
         };
         self.pending_scp03 = Some(PendingScp03 {
+            reference: (0, key_version),
             host_cryptogram,
             s_enc: Zeroizing::new(s_enc),
             s_mac: Zeroizing::new(s_mac),
@@ -254,6 +260,9 @@ impl SecureChannel {
         let Some(card_static) = security_domain.scp11_key(command.p2, command.p1) else {
             return ResponseApdu::status(0x6a88);
         };
+        let Some(host_ephemeral) = parse_scp11_request(command.data, parameter) else {
+            return ResponseApdu::status(0x6a80);
+        };
         let host_static = if parameter == 0 {
             None
         } else {
@@ -268,9 +277,6 @@ impl SecureChannel {
                 return ResponseApdu::status(0x6982);
             };
             Some(point)
-        };
-        let Some(host_ephemeral) = parse_scp11_request(command.data, parameter) else {
-            return ResponseApdu::status(0x6a80);
         };
         let card_ephemeral = if parameter == 3 {
             None

@@ -23,7 +23,8 @@ The core currently implements:
   certificate-backed SCP11b card identity, authenticated key/certificate/CA
   administration, and shared SCP03/SCP11a/b/c secure messaging around selectable
   CCID applets; and
-- the OpenPGP `GET CHALLENGE` subset.
+- OpenPGP discovery, PIN lifecycle, persistent keys and certificates, RSA/ECC/
+  Ed25519/X25519 operations, touch and factory reset.
 
 The active priorities are:
 
@@ -32,7 +33,7 @@ The active priorities are:
 2. qualify the implemented applets against real host tools over USB;
 3. qualify Issuer Security Domain administration and SCP11a/c provisioning
    with public host tools, including failure and recovery workflows; and
-4. expand OpenPGP on the established common CCID and secure-channel layer.
+4. qualify OpenPGP key lifecycle and authentication with public CCID tools.
 
 HID support is added when an applet or real client requires it. CCID remains the
 primary transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
@@ -109,9 +110,9 @@ validation before they can authorize the same administrative operations.
 
 - Keep registration, credential management, resident credentials, PPUAT, and
   `previewSign` covered through core, USB HID, and PKCS #11 tests.
-- FIDO registration currently uses `fmt: "none"`; signed or certificate-backed
-  attestation is not implemented. The ML-DSA certificate and CTAPHID size
-  constraints are documented in the [FIDO attestation status](../README.md#fido-attestation-status).
+- Keep certificate-backed packed attestation for ordinary and nested previewSign
+  registrations covered, including persistence and complete CTAPHID response
+  limits for every credential algorithm. See [FIDO attestation](../README.md#fido-attestation).
 - Keep CTAPHID cancellation and `UP_NEEDED`/`PROCESSING` keepalives covered
   for touch-gated and computationally expensive operations.
 - Preserve explicit state versions and fail closed on unsupported or corrupt
@@ -152,15 +153,15 @@ validation before they can authorize the same administrative operations.
   allowlist, and deletion operations covered through persisted state roundtrips.
 - Keep SCP11a/c explicit OCE trust, certificate validation, and negative
   authorization tests aligned with the shared validator.
-- Qualify public-tool provisioning and define the remaining retry-counter and
-  reset behavior without weakening authenticated administration.
+- Qualify public-tool provisioning and key-blocking factory reset. Preserve
+  durable attempt counters, successful-authentication recovery, and applet isolation.
 - Exercise both `yubico-piv-tool --enc` and `pkcs11rs` secure-channel workflows
   through real USB CCID.
 
 ### OpenPGP
 
-- Keep the current `GET CHALLENGE` behavior covered.
-- Add the OpenPGP card APDU model, data objects, PIN policy, key lifecycle, and
-  client-compatible encodings.
-- Qualify the applet through CCID after the shared secure-channel patterns are
-  stable.
+- Preserve the implemented [OpenPGP card model](openpgp.md), persistent key and
+  credential state, access conditions, algorithms, and touch behavior.
+- Qualify GnuPG and yubikey-manager workflows over live USB CCID.
+- Add optional KDF, AES PSO and Yubico attestation only with matching capability
+  advertisements and independent interoperability tests.

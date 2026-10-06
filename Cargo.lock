@@ -1493,6 +1493,8 @@ dependencies = [
  "display-backends",
  "gpiocdev-uapi",
  "libc",
+ "p256",
+ "signature 3.0.0",
  "software-key-core",
  "toml",
  "usb-gadget-worker",
