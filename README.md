@@ -397,9 +397,9 @@ write visible. Commands coalesce into the current indication without extending
 its minimum on time or accumulating replay pulses. Command execution never
 waits for display rendering.
 
-Activity interrupts a background pattern immediately and ensures at least 8 ms
+Activity interrupts a background pattern immediately and ensures at least 20 ms
 of off time before turning on. An already-dark LED waits only for any remaining
-time since its last off edge; if 8 ms has elapsed, it turns on immediately.
+time since its last off edge; if 20 ms has elapsed, it turns on immediately.
 A completed short command gets a 33.5 ms minimum on pulse.
 While work continues, the measured busy cadence remains 67 ms on and 33 ms off.
 Completion ends the activity indication as soon as its minimum on time is met,

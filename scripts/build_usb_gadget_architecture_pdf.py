@@ -477,7 +477,7 @@ def page_framing_activity(story):
     story.append(data_table(
         ["Policy", "Virtual YubiKey", "Virtual YubiHSM"],
         [
-            ["Minimum off before activity", "8 ms; elapsed off time counts", "20 ms; elapsed off time counts"],
+            ["Minimum off before activity", "20 ms; elapsed off time counts", "20 ms; elapsed off time counts"],
             ["Minimum short activity on", "33.5 ms", "33.5 ms"],
             ["Sustained activity", "67 ms on / 33 ms off", "67 ms on / 33 ms off"],
             ["Background", "Idle off; touch 384/384 ms", "Idle 1.5 s on / 1.5 s off"],

@@ -435,7 +435,7 @@ The command epoch preserves a visible indication when a complete command fits
 inside a synchronous frame write. Commands coalesce into the current indication
 without extending its minimum on time or accumulating replay pulses. The USB
 command path never waits for the renderer. Activity interrupts background
-blinking immediately and ensures at least 8 ms of off time before turning on.
+blinking immediately and ensures at least 20 ms of off time before turning on.
 Time already spent off counts toward that minimum, so activity starts
 immediately if the LED has been dark long enough. Completed short commands
 get a 33.5 ms minimum on pulse. Sustained processing keeps the
