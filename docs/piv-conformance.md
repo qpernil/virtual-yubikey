@@ -37,6 +37,12 @@ Yubico-defined commands.
 | Algorithms | RSA-2048/3072 and P-256/P-384 cover the applicable current PIV asymmetric profiles. RSA-1024, RSA-4096, Ed25519, and X25519 are YubiKey compatibility algorithms; ML-DSA-44/65/87, ML-KEM-512/768/1024, and the concrete hybrid PQ/T KEMs use the private extension below. |
 | YubiKey attestation | The persistent `F9` key and certificate object `5FFF01` implement the Yubico `ATTEST` command for generated RSA, EC, Ed25519, ML-DSA, ML-KEM, and concrete hybrid KEM keys. Generated certificates copy their issuer and validity from `5FFF01`, use the target key as SubjectPublicKeyInfo, and carry the firmware, serial, PIN/touch-policy, and form-factor extensions. F9 may use RSA, EC, Ed25519, or ML-DSA; changing it refreshes the matching self-signed `5FFF01` certificate. PIV reset preserves the key and certificate. |
 
+Ordinary PIV keys and certificate data objects have independent lifecycles.
+Generating or importing a key replaces the key without deleting its existing
+certificate. Host provisioning software must explicitly delete that certificate
+or replace it with one matching the new public key. The `F9` attestation slot is
+the documented exception: replacing its signing key refreshes `5FFF01` to match.
+
 SP 800-73-5 Part 2, Section 2.4.2, requires an aborted or failed
 authentication protocol to clear its credential's security-status indicator;
 Appendix A.2 defines the two-command administration-key protocol. A later APDU

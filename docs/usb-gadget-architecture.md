@@ -571,6 +571,16 @@ reads/writes its bulk FunctionFS endpoint files. The generic supervisor has no
 YubiHSM protocol knowledge; the launch profile selects the worker and its
 resources.
 
+Native YubiHSM framing has a three-byte command/length header and is not CCID.
+The official connector and direct USB backend send a ZLP after each OUT command
+whose total frame length is a multiple of the 64-byte packet size. The virtual
+worker consumes that terminator and appends a ZLP to aligned IN responses. One
+ordered, bounded response writer keeps OUT reception independent of a pending
+IN terminator. The pkcs11rs USB client reads one packet beyond its 8192-byte
+frame ceiling, including for exact-fit caller buffers, so a response terminator
+is consumed in the same transfer. See the
+[read-only Echo qualification](https://github.com/qpernil/pkcs11rs/blob/master/docs/connector.md#usb-echo-qualification).
+
 ### Host-side comparison
 
 | Device interface | Host-visible class | Usual host access | USB transfers | Pi userspace endpoint |
