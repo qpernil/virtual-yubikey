@@ -471,3 +471,44 @@ fn corrupt_or_missing_wrapping_metadata_fails_restoration() {
         FidoState::decode_persistent(&duplicate, [1; 16], FidoConfiguration::default()).is_err()
     );
 }
+
+#[test]
+fn ctap2_u2f_assertions_sign_presence_and_verification_independently() {
+    let mut state = state();
+    let rp = "presence.example";
+    let app = sha256(rp.as_bytes());
+    let reg = run(
+        &mut state,
+        1,
+        0,
+        &[CHALLENGE.as_slice(), &app].concat(),
+        true,
+    )
+    .data;
+    let public = p256::ecdsa::VerifyingKey::from_sec1_bytes(&reg[1..66]).unwrap();
+    for present in [false, true] {
+        for verified in [false, true] {
+            let response = assertion(&mut state, handle(&reg), rp, &CHALLENGE, present, verified)
+                .unwrap()
+                .unwrap();
+            let mut decoder = minicbor::Decoder::new(&response[1..]);
+            let mut auth = Vec::new();
+            let mut signature = Vec::new();
+            for _ in 0..decoder.map().unwrap().unwrap() {
+                match decoder.u8().unwrap() {
+                    2 => auth = decoder.bytes().unwrap().to_vec(),
+                    3 => signature = decoder.bytes().unwrap().to_vec(),
+                    _ => decoder.skip().unwrap(),
+                }
+            }
+            assert_eq!(auth[32], u8::from(present) | (u8::from(verified) << 2));
+            auth.extend_from_slice(&CHALLENGE);
+            public
+                .verify(
+                    &auth,
+                    &p256::ecdsa::Signature::from_der(&signature).unwrap(),
+                )
+                .unwrap();
+        }
+    }
+}

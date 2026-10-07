@@ -52,6 +52,8 @@ const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(target_os = "linux")]
 const CCID_TOUCH_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
+const FIDO_TOUCH_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
 pub(crate) fn run_worker(
     serial: u32,
     display_kind: crate::cli::DisplayKind,
@@ -1162,9 +1164,9 @@ fn serve_hid(
                                 ),
                             );
                         }
-                        let response = if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b) {
+                        let response = if FidoAuthenticator::requires_user_presence(request) {
                             match wait_for_touch(&mut input, receiver, channel, &presence, &clock) {
-                                Ok(true) => match exchange_persistent_fido_with_keepalives(
+                                Ok(crate::presence::WaitOutcome::Granted) => match exchange_persistent_fido_with_keepalives(
                                     &fido, &mut input, receiver, request, channel, true, &clock,
                                 ) {
                                     Ok((response, receipt)) => {
@@ -1176,7 +1178,8 @@ fn serve_hid(
                                         vec![0x7f]
                                     }
                                 },
-                                Ok(false) => vec![0x2d],
+                                Ok(crate::presence::WaitOutcome::Cancelled) => vec![0x2d],
+                                Ok(crate::presence::WaitOutcome::TimedOut) => vec![0x2f],
                                 Err(error) => {
                                     command_error = Some(error);
                                     vec![0x7f]
@@ -1396,16 +1399,19 @@ fn exchange_shared_fido(
         return Ok((response, mutation));
     }
 
-    if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b)
-        && !presence.wait_for(CCID_TOUCH_TIMEOUT, || {
+    let requires_presence = FidoAuthenticator::requires_user_presence(request);
+    if requires_presence {
+        match presence.wait_for_outcome(FIDO_TOUCH_TIMEOUT, || {
             Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
                 crate::presence::WaitControl::Cancel
             } else {
                 crate::presence::WaitControl::Continue
             })
-        })?
-    {
-        return Ok((vec![0x2d], None));
+        })? {
+            crate::presence::WaitOutcome::Granted => {}
+            crate::presence::WaitOutcome::Cancelled => return Ok((vec![0x2d], None)),
+            crate::presence::WaitOutcome::TimedOut => return Ok((vec![0x2f], None)),
+        }
     }
 
     let mut state = fido
@@ -1414,7 +1420,7 @@ fn exchange_shared_fido(
         .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
     let response = state.exchange_with_presence(
         request,
-        if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b) {
+        if requires_presence {
             PresenceAuthorization::Granted
         } else {
             PresenceAuthorization::Absent
@@ -1555,9 +1561,9 @@ fn wait_for_touch(
     channel: u32,
     presence: &crate::presence::Service,
     clock: &crate::keepalive::Handle,
-) -> io::Result<bool> {
+) -> io::Result<crate::presence::WaitOutcome> {
     let keepalives = clock.subscribe(Duration::ZERO, HID_KEEPALIVE_INTERVAL)?;
-    presence.wait(|| {
+    presence.wait_for_outcome(FIDO_TOUCH_TIMEOUT, || {
         if STOP_REQUESTED.load(Ordering::Relaxed) {
             return Ok(crate::presence::WaitControl::Cancel);
         }
@@ -1651,6 +1657,7 @@ fn ctap_status_name(status: u8) -> &'static str {
         0x27 => "operation_denied",
         0x2d => "keepalive_cancel",
         0x2e => "no_credentials",
+        0x2f => "user_action_timeout",
         0x31 => "pin_invalid",
         0x32 => "pin_blocked",
         0x33 => "pin_auth_invalid",

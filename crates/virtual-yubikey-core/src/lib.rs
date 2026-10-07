@@ -488,6 +488,12 @@ impl FidoAuthenticator {
         self.exchange_with_presence(request, PresenceAuthorization::Absent)
     }
 
+    /// Shared USB transport policy: assertions require touch unless a valid
+    /// request explicitly sets `up=false`. Malformed assertions keep the gate.
+    pub fn requires_user_presence(request: &[u8]) -> bool {
+        fido::requires_user_presence(request)
+    }
+
     /// CTAP2 reset requires an explicit fresh-presence grant from the transport.
     /// Other CTAP2 commands retain their existing transport-level touch policy.
     pub fn exchange_with_presence(

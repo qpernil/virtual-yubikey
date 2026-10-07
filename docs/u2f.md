@@ -69,7 +69,8 @@ activity across credentials, as allowed by U2F.
 
 CTAP2 GetAssertion can use a U2F handle in an explicit allow list when the RP ID
 hash matches its AppID hash. Normal CTAP2 PIN/token authorization remains in
-force when requested. U2F handles also participate in CTAP2 exclusion-list
+force when requested. CTAP2 assertions with `up=false` clear the signed UP flag;
+PIN verification controls the independent UV flag. U2F handles also participate in CTAP2 exclusion-list
 checks. They cannot be discovered or listed by credential management. CTAP1
 cannot exercise CTAP2-created credentials, and vendor-specific U2F commands,
 including legacy FIPS PIN commands, are unsupported.
@@ -110,9 +111,20 @@ authentication signatures, a 64-byte handle, persistence restoration with a
 monotonic counter, CTAP2 assertion of the same handle, AppID rejection, and reset
 invalidation against an in-process authenticator fixture.
 
-These protocol tests do not constitute FIDO certification. Physical USB host
-qualification requires deploying the worker and exercising real clients; the
-read-only physical-key probes qualify exposure, not registration/signing.
+Live USB host qualification with `python-fido2` covers registration and verified
+attestation, authentication signatures, fresh-touch rejection, check-only and
+no-presence controls, wrong AppIDs, and modification of every handle byte. The
+deployed gadget passes these checks over HID and CCID, shares credentials and
+counters between the transports, supports CTAP2 assertions of U2F handles, and
+preserves handles and counters across a worker restart. Other applet state is
+unchanged by the qualification. A manual joystick registration separately
+qualifies the physical presence path; automated positive cases use one event
+per request through the documented touch IPC. No-touch polling on the physical
+5.8.0 returns `6985` on both transports throughout a 40-second host loop; median
+response times are 5.4 ms over HID and 1.7 ms over CCID. These are individual
+poll latencies, not a device-side deadline for the entire user interaction. A physical YubiKey 5.8.0 passes
+the registration, authentication, and negative-control baseline over both HID
+and CCID with physical touches. These checks do not constitute FIDO certification.
 
 References:
 

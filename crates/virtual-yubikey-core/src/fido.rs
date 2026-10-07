@@ -99,6 +99,7 @@ pub(crate) struct FidoState {
     assertion_enumeration_offset: usize,
     assertion_client_data_hash: Vec<u8>,
     assertion_user_verified: bool,
+    assertion_user_present: bool,
     persistent_change: bool,
 }
 
@@ -261,6 +262,7 @@ impl FidoState {
             assertion_enumeration_offset: 0,
             assertion_client_data_hash: Vec::new(),
             assertion_user_verified: false,
+            assertion_user_present: true,
             persistent_change: false,
         }
     }
@@ -866,6 +868,7 @@ struct PreviewRequest {
     credential_ids: Vec<Vec<u8>>,
     algorithms: Vec<i64>,
     resident_key: bool,
+    user_presence: Option<bool>,
     preview_requested: bool,
     signing_key_handle: Option<Vec<u8>>,
     to_be_signed: Option<Vec<u8>>,
@@ -1013,6 +1016,16 @@ fn decode_algorithms(
     Ok(())
 }
 
+pub(crate) fn requires_user_presence(request: &[u8]) -> bool {
+    match request.split_first() {
+        Some((0x01 | 0x07 | 0x0b, _)) => true,
+        Some((&AUTHENTICATOR_GET_ASSERTION, payload)) => decode_preview_request(payload, true)
+            .map(|request| request.user_presence.unwrap_or(true))
+            .unwrap_or(true),
+        _ => false,
+    }
+}
+
 pub(crate) fn make_credential_algorithms(request: &[u8]) -> Option<Vec<i64>> {
     let (&command, payload) = request.split_first()?;
     if command != AUTHENTICATOR_MAKE_CREDENTIAL {
@@ -1056,6 +1069,8 @@ fn decode_options(
         let name = decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
         if name == "rk" {
             request.resident_key = decoder.bool().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
+        } else if name == "up" {
+            request.user_presence = Some(decoder.bool().map_err(|_| CTAP2_ERR_INVALID_CBOR)?);
         } else {
             decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
         }
@@ -2012,9 +2027,14 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
     let Some(&index) = candidates.first() else {
         if !request.preview_requested && request.signing_key_handle.is_none() {
             for handle in &request.credential_ids {
-                if let Some(response) =
-                    u2f::assertion(state, handle, rp_id, client_data_hash, user_verified)?
-                {
+                if let Some(response) = u2f::assertion(
+                    state,
+                    handle,
+                    rp_id,
+                    client_data_hash,
+                    request.user_presence.unwrap_or(true),
+                    user_verified,
+                )? {
                     return Ok(response);
                 }
             }
@@ -2053,7 +2073,7 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
             .bytes(&signature)
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let mut auth_data = sha256(credential.rp_id.as_bytes());
-        auth_data.push(0x85);
+        auth_data.push(0x84 | u8::from(request.user_presence.unwrap_or(true)));
         auth_data.extend_from_slice(&1_u32.to_be_bytes());
         auth_data.extend_from_slice(&extensions);
         let mut response = vec![CTAP2_OK];
@@ -2092,6 +2112,7 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
     state.assertion_enumeration_offset = 1;
     state.assertion_client_data_hash = client_data_hash.to_vec();
     state.assertion_user_verified = user_verified;
+    state.assertion_user_present = request.user_presence.unwrap_or(true);
     standard_assertion_response(state, index, client_data_hash, total)
 }
 
@@ -2118,11 +2139,9 @@ fn standard_assertion_response(
     let user_fields = if state.assertion_user_verified { 3 } else { 1 };
     credential.counter = credential.counter.saturating_add(1);
     let mut auth_data = sha256(credential.rp_id.as_bytes());
-    auth_data.push(if state.assertion_user_verified {
-        0x05
-    } else {
-        0x01
-    });
+    auth_data.push(
+        u8::from(state.assertion_user_present) | (u8::from(state.assertion_user_verified) << 2),
+    );
     auth_data.extend_from_slice(&credential.counter.to_be_bytes());
     let mut signed = Vec::with_capacity(auth_data.len() + client_data_hash.len());
     signed.extend_from_slice(&auth_data);
@@ -3240,6 +3259,122 @@ mod tests {
             exchange_with_vector_authorization(&mut state, &[AUTHENTICATOR_SELECTION, 0xa0]),
             [CTAP1_ERR_INVALID_COMMAND]
         );
+    }
+
+    #[test]
+    fn presence_policy_defaults_to_touch_and_validates_silent_requests() {
+        for presence in [None, Some(true), Some(false)] {
+            let mut request = vec![AUTHENTICATOR_GET_ASSERTION];
+            let mut encoder = Encoder::new(&mut request);
+            encoder
+                .map(2 + u64::from(presence.is_some()))
+                .unwrap()
+                .u8(1)
+                .unwrap()
+                .str("presence.example")
+                .unwrap()
+                .u8(2)
+                .unwrap()
+                .bytes(&[0x44; 32])
+                .unwrap();
+            if let Some(presence) = presence {
+                encoder
+                    .u8(5)
+                    .unwrap()
+                    .map(1)
+                    .unwrap()
+                    .str("up")
+                    .unwrap()
+                    .bool(presence)
+                    .unwrap();
+            }
+            assert_eq!(requires_user_presence(&request), presence.unwrap_or(true));
+            if presence == Some(false) {
+                request.pop();
+                assert!(requires_user_presence(&request));
+                Encoder::new(&mut request).str("false").unwrap();
+                assert!(requires_user_presence(&request));
+            }
+        }
+        for command in [0x01, 0x02, 0x07, 0x0b] {
+            assert!(requires_user_presence(&[command]));
+        }
+        for command in [0x04, 0x06, 0x08, 0x0a] {
+            assert!(!requires_user_presence(&[command]));
+        }
+    }
+
+    #[test]
+    fn assertions_sign_requested_presence_and_keep_it_for_next_assertion() {
+        for presence in [None, Some(true), Some(false)] {
+            for verified in [false, true] {
+                let mut state = FidoState::new(*b"virtual-test-id!", FidoConfiguration::default());
+                for marker in [0x22, 0x33] {
+                    state.credentials.push(test_credential(
+                        vec![marker; 32],
+                        "presence.example",
+                        None,
+                    ));
+                }
+                let public = state.credentials[0].private_key.key.public_key();
+                let challenge = [0x44; 32];
+                let mut request = vec![AUTHENTICATOR_GET_ASSERTION];
+                let mut encoder = Encoder::new(&mut request);
+                encoder
+                    .map(2 + u64::from(presence.is_some()) + if verified { 2 } else { 0 })
+                    .unwrap()
+                    .u8(1)
+                    .unwrap()
+                    .str("presence.example")
+                    .unwrap()
+                    .u8(2)
+                    .unwrap()
+                    .bytes(&challenge)
+                    .unwrap();
+                if let Some(presence) = presence {
+                    encoder
+                        .u8(5)
+                        .unwrap()
+                        .map(1)
+                        .unwrap()
+                        .str("up")
+                        .unwrap()
+                        .bool(presence)
+                        .unwrap();
+                }
+                if verified {
+                    encoder
+                        .u8(6)
+                        .unwrap()
+                        .bytes(&pin_auth(&challenge))
+                        .unwrap()
+                        .u8(7)
+                        .unwrap()
+                        .u8(2)
+                        .unwrap();
+                }
+                let first = exchange_with_vector_authorization(&mut state, &request);
+                let next = exchange_with_vector_authorization(
+                    &mut state,
+                    &[AUTHENTICATOR_GET_NEXT_ASSERTION],
+                );
+                for response in [first, next] {
+                    assert_eq!(response[0], CTAP2_OK);
+                    let mut signed = assertion_authenticator_data(&response[1..]);
+                    assert_eq!(
+                        signed[32],
+                        u8::from(presence.unwrap_or(true)) | (u8::from(verified) << 2)
+                    );
+                    signed.extend_from_slice(&challenge);
+                    let signature =
+                        ecdsa_signature_from_der(&assertion_signature_bytes(&response[1..]), 32)
+                            .unwrap();
+                    public
+                        .verify_message(SignatureScheme::EcdsaP256Sha256, &signed, &signature)
+                        .unwrap();
+                }
+            }
+        }
     }
 
     #[test]
