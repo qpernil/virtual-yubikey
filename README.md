@@ -1,5 +1,7 @@
 # Virtual YubiKey
 
+Hostnames and device/account identifiers below are illustrative; replace them with your own configured values.
+
 [![CI](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml/badge.svg)](https://github.com/qpernil/virtual-yubikey/actions/workflows/ci.yml)
 
 `virtual-yubikey` is an unprivileged device worker that makes a Raspberry Pi
@@ -354,9 +356,10 @@ later rustup update cannot silently change the compiler used with the checked-in
 Ubuntu and Ubuntu under WSL2. On a minimal Ubuntu installation, enable the
 Ubuntu `universe` repository first if APT cannot find `rustup`.
 
-Machines that only run prebuilt workers need the `rustup` APT package at most;
-do not install a Rust toolchain on them. In particular, no APT `rustc`,
-`cargo`, LLVM, or Rust standard-library packages are required by this setup.
+Build the virtual YubiKey worker from source on the deployment host, including
+gadget-host. This project does not distribute prebuilt workers. The separate I2C
+YubiHSM deployment on i2c-target-1 and i2c-target-2 uses its own prebuilts;
+those constrained hosts are not virtual YubiKey build targets.
 
 Enable the device controller in `/boot/firmware/config.txt` on current images,
 or `/boot/config.txt` on older images. Add this under `[all]`:
