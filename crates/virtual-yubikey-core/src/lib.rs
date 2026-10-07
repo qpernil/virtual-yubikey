@@ -12,6 +12,8 @@ mod crypto;
 mod fido;
 mod fido_attestation;
 mod hsmauth;
+mod management;
+pub use management::Management;
 mod openpgp;
 mod piv;
 mod presence;
@@ -273,6 +275,7 @@ pub struct AppletConfiguration {
     pub openpgp: bool,
     pub piv: bool,
     pub fido2: bool,
+    pub u2f: bool,
 }
 
 impl AppletConfiguration {
@@ -284,6 +287,7 @@ impl AppletConfiguration {
             openpgp: true,
             piv: true,
             fido2: true,
+            u2f: true,
         }
     }
 
@@ -294,7 +298,7 @@ impl AppletConfiguration {
             Applet::HsmAuth => self.hsmauth,
             Applet::OpenPgp => self.openpgp,
             Applet::Piv => self.piv,
-            Applet::Fido2 => self.fido2,
+            Applet::Fido2 => self.fido2 || self.u2f,
         }
     }
 
@@ -305,6 +309,7 @@ impl AppletConfiguration {
             || self.openpgp
             || self.piv
             || self.fido2
+            || self.u2f
         {
             CAPABILITY_CCID
         } else {
@@ -314,7 +319,7 @@ impl AppletConfiguration {
         let piv = if self.piv { CAPABILITY_PIV } else { 0 };
         let hsmauth = if self.hsmauth { CAPABILITY_HSMAUTH } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | openpgp | piv | hsmauth | fido2 | if self.fido2 { CAPABILITY_U2F } else { 0 }
+        ccid | openpgp | piv | hsmauth | fido2 | if self.u2f { CAPABILITY_U2F } else { 0 }
     }
 }
 
@@ -412,34 +417,14 @@ impl DeviceProfile {
         self.applets.usb_capabilities()
     }
 
+    /// Factory enablement. The shared Management handle owns runtime USB settings.
     pub const fn usb_enabled_capabilities(&self) -> u16 {
         self.applets.usb_capabilities()
     }
 
+    /// Factory configuration only. Runtime hosts must read their shared Management handle.
     pub fn management_device_info(&self, page: u8) -> Option<Vec<u8>> {
-        if page != 0 {
-            return None;
-        }
-        let mut body = Vec::new();
-        push_tlv(
-            &mut body,
-            0x01,
-            &self.usb_supported_capabilities().to_be_bytes(),
-        );
-        push_tlv(&mut body, 0x02, &self.serial.to_be_bytes());
-        push_tlv(
-            &mut body,
-            0x03,
-            &self.usb_enabled_capabilities().to_be_bytes(),
-        );
-        push_tlv(&mut body, 0x04, &[self.form_factor]);
-        push_tlv(&mut body, 0x05, &self.firmware);
-        push_tlv(&mut body, 0x08, &[0]);
-
-        let mut response = Vec::with_capacity(body.len() + 1);
-        response.push(body.len() as u8);
-        response.extend_from_slice(&body);
-        Some(response)
+        Management::new(self.clone()).read_config(page).ok()
     }
 }
 
@@ -453,6 +438,8 @@ pub enum FidoProtocol {
 #[derive(Clone, Debug)]
 pub struct FidoAuthenticator {
     state: fido::FidoState,
+    management: Option<Management>,
+    management_revision: u64,
 }
 
 impl FidoAuthenticator {
@@ -468,6 +455,8 @@ impl FidoAuthenticator {
         let device_identifier = device_identifier(serial);
         Self {
             state: fido::FidoState::new(device_identifier, configuration),
+            management: None,
+            management_revision: 0,
         }
     }
 
@@ -482,6 +471,8 @@ impl FidoAuthenticator {
                 device_identifier(serial),
                 configuration,
             )?,
+            management: None,
+            management_revision: 0,
         })
     }
 
@@ -507,12 +498,46 @@ impl FidoAuthenticator {
         if request == [0x07] && presence != PresenceAuthorization::Granted {
             return vec![0x30];
         }
+        let management = self.management.clone();
+        let settings = match management.as_ref().map(Management::lock).transpose() {
+            Ok(settings) => settings,
+            Err(_) => return vec![0x7f],
+        };
+        if settings
+            .as_ref()
+            .is_some_and(|state| !state.fido2_enabled())
+        {
+            return vec![0x01];
+        }
+        if let Some(settings) = settings.as_ref()
+            && self.management_revision != settings.revision()
+        {
+            self.state.reset_connection();
+            self.management_revision = settings.revision();
+        }
+        self.state.u2f_enabled = settings.as_ref().is_none_or(|state| state.u2f_enabled());
+        drop(settings);
         fido::exchange(&mut self.state, request)
     }
 
     /// CTAP1 APDUs share identity and durable state with CTAP2. The caller must
     /// obtain a fresh physical touch when PresenceRequired is returned.
     pub fn exchange_u2f(&mut self, raw: &[u8], presence: PresenceAuthorization) -> ApduExchange {
+        let management = self.management.clone();
+        let settings = match management.as_ref().map(Management::lock).transpose() {
+            Ok(settings) => settings,
+            Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6f00).encode()),
+        };
+        if settings.as_ref().is_some_and(|state| !state.u2f_enabled()) {
+            return ApduExchange::Complete(ResponseApdu::status(0x6d00).encode());
+        }
+        if let Some(settings) = settings.as_ref()
+            && self.management_revision != settings.revision()
+        {
+            self.state.reset_connection();
+            self.management_revision = settings.revision();
+        }
+        drop(settings);
         let command = match fido::u2f::decode(raw) {
             Ok(command) => command,
             Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
@@ -521,6 +546,10 @@ impl FidoAuthenticator {
             Ok(response) => ApduExchange::Complete(response.encode()),
             Err(policy) => ApduExchange::PresenceRequired(policy),
         }
+    }
+
+    pub fn management(&self) -> Option<Management> {
+        self.management.clone()
     }
 
     pub fn selected_make_credential_algorithm(
@@ -563,6 +592,8 @@ impl Default for FidoAuthenticator {
 #[derive(Debug)]
 pub struct VirtualYubiKey {
     profile: DeviceProfile,
+    management: Management,
+    management_revision: u64,
     selected: Option<Applet>,
     chained_command: Option<ChainedCommand>,
     presence_command: Option<PresenceCommand>,
@@ -575,7 +606,6 @@ pub struct VirtualYubiKey {
     fido: FidoAuthenticator,
 }
 
-#[derive(Debug)]
 struct OwnedCommandApdu {
     cla: u8,
     ins: u8,
@@ -584,6 +614,19 @@ struct OwnedCommandApdu {
     data: Vec<u8>,
     le: Option<u32>,
     extended: bool,
+}
+
+impl std::fmt::Debug for OwnedCommandApdu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedCommandApdu")
+            .field("cla", &self.cla)
+            .field("ins", &self.ins)
+            .field("p1", &self.p1)
+            .field("p2", &self.p2)
+            .field("data_length", &self.data.len())
+            .field("le", &self.le)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OwnedCommandApdu {
@@ -657,7 +700,7 @@ impl FidoDispatch<'_> {
 }
 
 impl VirtualYubiKey {
-    const PERSISTENT_STATE_VERSION: u8 = 2;
+    const PERSISTENT_STATE_VERSION: u8 = 3;
 
     pub fn new(profile: DeviceProfile) -> Self {
         Self::with_fido_configuration(profile, FidoConfiguration::default())
@@ -729,6 +772,7 @@ impl VirtualYubiKey {
         let mut security_domain = None;
         let mut fido = None;
         let mut openpgp = None;
+        let mut management = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -783,6 +827,15 @@ impl VirtualYubiKey {
                             .to_vec(),
                     );
                 }
+                7 if management.is_none() => {
+                    management = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid Management device state")?
+                            .to_vec(),
+                    );
+                }
+                7 => return Err("duplicate Management device state"),
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent device state contains invalid data")?,
@@ -791,7 +844,7 @@ impl VirtualYubiKey {
         if decoder.position() != encoded.len() {
             return Err("persistent device state has trailing data");
         }
-        if !matches!(version, Some(1 | Self::PERSISTENT_STATE_VERSION)) {
+        if !matches!(version, Some(1 | 2 | Self::PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent device state version");
         }
         let piv = piv.ok_or("persistent device state has no PIV data")?;
@@ -820,11 +873,16 @@ impl VirtualYubiKey {
             FidoAuthenticator::from_persistent_state(profile.serial, fido_configuration, &fido)?;
         let mut device =
             Self::with_applets_and_security_domain(profile, piv, hsmauth, fido, security_domain);
-        if version == Some(Self::PERSISTENT_STATE_VERSION) {
+        if matches!(version, Some(2 | Self::PERSISTENT_STATE_VERSION)) {
             device.openpgp = openpgp::OpenPgp::from_persistent_state(
                 device.profile.serial,
                 device.profile.firmware,
                 &openpgp.ok_or("missing OpenPGP device state")?,
+            )?;
+        }
+        if version == Some(Self::PERSISTENT_STATE_VERSION) {
+            device.restore_management_persistent_state(
+                &management.ok_or("missing Management device state")?,
             )?;
         }
         Ok(device)
@@ -848,12 +906,16 @@ impl VirtualYubiKey {
         profile: DeviceProfile,
         piv: piv::PivApplet,
         hsmauth: hsmauth::HsmAuthApplet,
-        fido: FidoAuthenticator,
+        mut fido: FidoAuthenticator,
         security_domain: security_domain::SecurityDomain,
     ) -> Self {
+        let management = Management::new(profile.clone());
+        fido.management = Some(management.clone());
         Self {
             openpgp: openpgp::OpenPgp::new(profile.serial, profile.firmware),
             profile,
+            management,
+            management_revision: 0,
             selected: None,
             chained_command: None,
             presence_command: None,
@@ -864,6 +926,24 @@ impl VirtualYubiKey {
             hsmauth,
             fido,
         }
+    }
+
+    pub fn management(&self) -> Management {
+        self.management.clone()
+    }
+    pub fn management_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.management.persistent_state()
+    }
+    pub fn restore_management_persistent_state(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<(), &'static str> {
+        self.management = Management::from_persistent_state(self.profile.clone(), encoded)?;
+        self.fido.management = Some(self.management.clone());
+        Ok(())
+    }
+    pub fn take_management_persistent_change(&mut self) -> bool {
+        self.management.take_persistent_change()
     }
 
     pub fn piv_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
@@ -904,10 +984,11 @@ impl VirtualYubiKey {
         let security_domain = self.security_domain_persistent_state()?;
         let fido = self.fido_persistent_state()?;
         let openpgp = self.openpgp.persistent_state()?;
+        let management = self.management.persistent_state()?;
         let mut encoded = Vec::new();
         let mut encoder = minicbor::Encoder::new(&mut encoded);
         encoder
-            .map(6)
+            .map(7)
             .map_err(|_| "cannot encode persistent device state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent device state")?
@@ -933,7 +1014,11 @@ impl VirtualYubiKey {
             .u8(6)
             .map_err(|_| "encode OpenPGP state")?
             .bytes(&openpgp)
-            .map_err(|_| "encode OpenPGP state")?;
+            .map_err(|_| "encode OpenPGP state")?
+            .u8(7)
+            .map_err(|_| "encode Management state")?
+            .bytes(&management)
+            .map_err(|_| "encode Management state")?;
         Ok(encoded)
     }
 
@@ -993,6 +1078,7 @@ impl VirtualYubiKey {
             | self.take_security_domain_persistent_change()
             | self.take_fido_persistent_change()
             | self.take_openpgp_persistent_change()
+            | self.take_management_persistent_change()
     }
 
     pub fn profile(&self) -> &DeviceProfile {
@@ -1016,7 +1102,7 @@ impl VirtualYubiKey {
             (Applet::Fido2, &FIDO2_AID),
         ];
         let mut matching = candidates.into_iter().filter(|(applet, candidate)| {
-            self.profile.applets.contains(*applet) && candidate.starts_with(aid)
+            self.management.applet_enabled(*applet) && candidate.starts_with(aid)
         });
         let (applet, _) = matching.next()?;
         matching.next().is_none().then_some(applet)
@@ -1087,6 +1173,18 @@ impl VirtualYubiKey {
         presence: PresenceAuthorization,
         fido: &mut FidoDispatch<'_>,
     ) -> ApduExchange {
+        if let Ok(revision) = self.management.revision()
+            && revision != self.management_revision
+        {
+            for applet in [Applet::Piv, Applet::OpenPgp, Applet::HsmAuth, Applet::Fido2] {
+                self.reset_applet_connection(applet);
+            }
+            self.secure_channel.reset();
+            self.chained_command = None;
+            self.presence_command = None;
+            self.pending_response.clear();
+            self.management_revision = revision;
+        }
         let decoded = CommandApdu::decode(raw).or_else(|error| {
             if self.selected == Some(Applet::Fido2) {
                 fido::u2f::decode(raw)
@@ -1228,11 +1326,17 @@ impl VirtualYubiKey {
         protected: bool,
         fido: &mut FidoDispatch<'_>,
     ) -> ApduExchange {
+        if self
+            .selected
+            .is_some_and(|applet| !self.management.applet_enabled(applet))
+        {
+            return ApduExchange::Complete(ResponseApdu::status(0x6985).encode());
+        }
         let response = match self.selected {
             Some(Applet::IssuerSecurityDomain) => self
                 .security_domain
                 .exchange(command, self.secure_channel.administration_dek(protected)),
-            Some(Applet::Management) => self.management(command),
+            Some(Applet::Management) => self.management_apdu(command),
             Some(Applet::HsmAuth) => match self.hsmauth.exchange(command, presence) {
                 hsmauth::HsmAuthExchange::Complete(response) => response,
                 hsmauth::HsmAuthExchange::PresenceRequired(policy) => {
@@ -1378,14 +1482,23 @@ impl VirtualYubiKey {
         }
     }
 
-    fn management(&self, command: &CommandApdu<'_>) -> ResponseApdu {
-        if command.cla != 0 || command.ins != INS_READ_DEVICE_INFO || command.p2 != 0 {
+    fn management_apdu(&self, command: &CommandApdu<'_>) -> ResponseApdu {
+        if command.cla != 0 || command.p2 != 0 {
             return ResponseApdu::status(0x6d00);
         }
-        self.profile
-            .management_device_info(command.p1)
+        let result = match command.ins {
+            INS_READ_DEVICE_INFO if command.data.is_empty() => {
+                self.management.read_config(command.p1)
+            }
+            0x1c if command.p1 == 0 => self
+                .management
+                .write_config(command.data)
+                .map(|()| Vec::new()),
+            _ => Err(0x6d00),
+        };
+        result
             .map(ResponseApdu::success)
-            .unwrap_or_else(|| ResponseApdu::status(0x6a86))
+            .unwrap_or_else(ResponseApdu::status)
     }
 
     fn fido2(
@@ -1395,6 +1508,9 @@ impl VirtualYubiKey {
         fido: &mut FidoDispatch<'_>,
     ) -> Result<ResponseApdu, UserPresencePolicy> {
         if command.cla == 0x80 && command.ins == INS_CTAP_CBOR && command.p2 == 0 {
+            if !self.management.fido2_enabled() {
+                return Ok(ResponseApdu::status(0x6d00));
+            }
             if command.data == [0x07]
                 && fido.handler.is_none()
                 && presence != PresenceAuthorization::Granted
@@ -1406,6 +1522,9 @@ impl VirtualYubiKey {
                 command.data,
                 presence,
             )));
+        }
+        if !self.management.u2f_enabled() {
+            return Ok(ResponseApdu::status(0x6d00));
         }
         if let Some(handler) = fido.handler.as_mut() {
             let response = handler(FidoProtocol::U2f, &fido::u2f::encode(command));

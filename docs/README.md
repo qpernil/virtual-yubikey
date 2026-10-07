@@ -3,6 +3,8 @@
 - [USB gadget architecture](usb-gadget-architecture.md) - how the host, Pi
   hardware, Linux gadget framework, privileged supervisor, and unprivileged
   Virtual YubiKey, Virtual Trezor, and Virtual YubiHSM profiles fit together.
+- [USB application configuration](management.md) - independent U2F/FIDO2
+  settings, shared Management bindings, configuration locks and persistence.
 - [Applet scope and qualification](applet-roadmap.md) - implemented applets,
   protocol boundaries, remaining gaps and host qualification.
 - [PKCS #11 reuse](pkcs11rs-reuse.md) - boundary between the reusable logical

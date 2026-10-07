@@ -778,6 +778,36 @@ mod tests {
     }
 
     #[test]
+    fn scp03_management_configuration_respects_lock_and_preserves_fido_state() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(42));
+        let management = device.management();
+        let supported = management.usb_supported_capabilities();
+        let code = [0x31; 16];
+        let lock = [vec![18, 10, 16], code.to_vec()].concat();
+        management.write_config(&lock).unwrap();
+        let fido_before = device.fido_persistent_state().unwrap();
+        assert_eq!(send(&mut device, &select(&MANAGEMENT_AID)).status, 0x9000);
+        let mut channel = establish_scp03(&mut device);
+        let mask = supported & !0x0002;
+        let config = [4, 3, 2, (mask >> 8) as u8, mask as u8];
+        assert_eq!(management.write_config(&config), Err(0x6982));
+        assert_eq!(management.usb_enabled_capabilities().unwrap(), supported);
+        let authorized = [
+            vec![22, 3, 2, (mask >> 8) as u8, mask as u8, 11, 16],
+            code.to_vec(),
+        ]
+        .concat();
+        assert_eq!(
+            channel
+                .exchange(&mut device, &HostCommand::short(0x1c, 0, &authorized, 0))
+                .status,
+            0x9000
+        );
+        assert_eq!(management.usb_enabled_capabilities().unwrap(), mask);
+        assert_eq!(device.fido_persistent_state().unwrap(), fido_before);
+    }
+
+    #[test]
     fn factory_scp11b_identity_persists_and_establishes_a_piv_channel() {
         let profile = DeviceProfile::yubikey_5_8_ccid(42);
         let device = VirtualYubiKey::new(profile.clone());

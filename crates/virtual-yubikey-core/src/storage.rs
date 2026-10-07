@@ -29,14 +29,16 @@ pub enum PersistentApplet {
     HsmAuth,
     SecurityDomain,
     OpenPgp,
+    Management,
 }
 impl PersistentApplet {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Fido,
         Self::Piv,
         Self::HsmAuth,
         Self::SecurityDomain,
         Self::OpenPgp,
+        Self::Management,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -45,6 +47,7 @@ impl PersistentApplet {
             Self::HsmAuth => "hsmauth",
             Self::SecurityDomain => "security-domain",
             Self::OpenPgp => "openpgp",
+            Self::Management => "management",
         }
     }
     fn bit(self) -> u8 {
@@ -60,6 +63,7 @@ impl VirtualYubiKey {
             PersistentApplet::HsmAuth => self.hsmauth_persistent_state(),
             PersistentApplet::SecurityDomain => self.security_domain_persistent_state(),
             PersistentApplet::OpenPgp => self.openpgp_persistent_state(),
+            PersistentApplet::Management => self.management_persistent_state(),
         }
         .map_err(io::Error::other)
     }
@@ -71,6 +75,7 @@ impl VirtualYubiKey {
             self.take_hsmauth_persistent_change(),
             self.take_security_domain_persistent_change(),
             self.take_openpgp_persistent_change(),
+            self.take_management_persistent_change(),
         ];
         PersistentApplet::ALL
             .into_iter()
@@ -82,7 +87,8 @@ impl VirtualYubiKey {
     /// other applets. The returned authenticator is the authoritative FIDO state;
     /// CCID must route FIDO requests to it rather than to the placeholder.
     pub fn separate_fido(mut self) -> (Self, FidoAuthenticator) {
-        let placeholder = FidoAuthenticator::for_serial(self.profile.serial);
+        let mut placeholder = FidoAuthenticator::for_serial(self.profile.serial);
+        placeholder.management = Some(self.management.clone());
         let fido = std::mem::replace(&mut self.fido, placeholder);
         (self, fido)
     }
@@ -109,7 +115,7 @@ impl DeviceStorage {
             serial: profile.serial,
             _lock: StateLock::acquire(root.join(format!("yubikey-{}.lock", profile.serial)))?,
         };
-        let mut records: [Option<Vec<u8>>; 5] = Default::default();
+        let mut records: [Option<Vec<u8>>; 6] = Default::default();
         for applet in PersistentApplet::ALL {
             records[applet as usize] = match fs::read(storage.path(applet)) {
                 Ok(encoded) => Some(encoded),
@@ -147,6 +153,9 @@ impl DeviceStorage {
         device.fido = fido;
         device
             .restore_openpgp_persistent_state(&records[4])
+            .map_err(invalid_state)?;
+        device
+            .restore_management_persistent_state(&records[5])
             .map_err(invalid_state)?;
         // Validate every record before initializing anything on disk.
         for applet in PersistentApplet::ALL {
@@ -586,5 +595,45 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(handle.record_mutations([PersistentApplet::Piv]).is_err());
         assert!(runtime.shutdown().is_err());
+    }
+    #[test]
+    fn management_configuration_initializes_missing_file_and_survives_batched_flush() {
+        let directory = Directory::new();
+        let (storage, device) = directory.open();
+        let management = device.management();
+        let path = storage.path(PersistentApplet::Management);
+        let fido_before = device.fido_persistent_state().unwrap();
+        let snapshot = management.clone();
+        let runtime = storage
+            .start(
+                PersistenceMode::Batched(Duration::from_secs(60)),
+                move |applet| {
+                    assert_eq!(applet, PersistentApplet::Management);
+                    snapshot.persistent_state().map_err(io::Error::other)
+                },
+                || {},
+            )
+            .unwrap();
+        let original = fs::read(&path).unwrap();
+        let mask = management.usb_supported_capabilities() & !0x0002;
+        management
+            .write_config(&[4, 3, 2, (mask >> 8) as u8, mask as u8])
+            .unwrap();
+        runtime
+            .handle()
+            .record_mutations([PersistentApplet::Management])
+            .unwrap();
+        runtime.flush().unwrap();
+        assert_ne!(fs::read(&path).unwrap(), original);
+        runtime.shutdown().unwrap();
+        let (storage, device) = directory.open();
+        assert!(!device.management().u2f_enabled());
+        assert!(device.management().fido2_enabled());
+        assert_eq!(device.fido_persistent_state().unwrap(), fido_before);
+        drop(storage);
+        fs::remove_file(&path).unwrap();
+        let (_storage, device) = directory.open();
+        assert!(device.management().u2f_enabled());
+        assert!(path.exists());
     }
 }
