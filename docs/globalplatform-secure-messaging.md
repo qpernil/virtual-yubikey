@@ -17,6 +17,12 @@ Management, PIV, YubiHSM Auth, FIDO2-over-CCID, and the selectable OpenPGP
 fixture. Selecting another AID, resetting the card, or powering it off destroys
 the live channel.
 
+Protected FIDO2 CTAP messages preserve `P1.b8`, which advertises
+`NFCCTAP_GETRESPONSE` keepalive support. This applet flag is independent of
+secure-command fragmentation. The secure-messaging regression uses the same
+`80 10 80 00` command header as the host's CCID CTAP transport and verifies
+the encrypted response and R-MAC.
+
 ## Factory Security Domain
 
 The factory state follows the selectors used by YubiKey host software:
@@ -89,6 +95,13 @@ intermediates may be uploaded with the leaf. Signature, validity, CA constraints
 critical extensions, and key-agreement usage are checked. A host-supplied root
 never becomes trusted merely because it was uploaded. Empty serial allowlists
 remove the serial restriction; nonempty lists restrict otherwise valid hosts.
+
+The shared certificate validator rejects critical `certificatePolicies`
+extensions, including the policy-bearing physical OCE fixture used by
+`pkcs11rs`. Dynamic host-login qualification uses the virtual validator's
+supported key-agreement certificate profile. Acceptance of the physical OCE
+profile requires separate validator work; removing authentication or trust
+checks is not a supported workaround.
 
 Keys, certificate chains, CA identifiers, and allowlists share the atomically
 persisted per-serial Security Domain state. Failed commands leave it unchanged.
