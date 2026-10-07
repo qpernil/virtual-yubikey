@@ -215,6 +215,7 @@ pub(super) fn assertion(
     handle: &[u8],
     rp_id: &str,
     challenge: &[u8],
+    present: bool,
     verified: bool,
 ) -> Result<Option<Vec<u8>>, Error> {
     let app = sha256(rp_id.as_bytes());
@@ -222,7 +223,7 @@ pub(super) fn assertion(
         return Ok(None);
     };
     let mut auth_data = app;
-    auth_data.push(if verified { 5 } else { 1 });
+    auth_data.push(u8::from(present) | (u8::from(verified) << 2));
     auth_data.extend_from_slice(&next_counter(state)?.to_be_bytes());
     let mut signed = auth_data.clone();
     signed.extend_from_slice(challenge);

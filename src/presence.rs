@@ -46,6 +46,14 @@ pub(crate) enum WaitControl {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WaitOutcome {
+    Granted,
+    Cancelled,
+    TimedOut,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct Service {
     inner: Arc<Inner>,
@@ -70,10 +78,6 @@ impl Service {
         }
     }
 
-    pub(crate) fn wait(&self, poll: impl FnMut() -> io::Result<WaitControl>) -> io::Result<bool> {
-        self.wait_until(None, poll)
-    }
-
     pub(crate) fn wait_for(
         &self,
         timeout: Duration,
@@ -83,6 +87,26 @@ impl Service {
             io::Error::new(io::ErrorKind::InvalidInput, "presence timeout overflow")
         })?;
         self.wait_until(Some(deadline), poll)
+    }
+
+    pub(crate) fn wait_for_outcome(
+        &self,
+        timeout: Duration,
+        mut poll: impl FnMut() -> io::Result<WaitControl>,
+    ) -> io::Result<WaitOutcome> {
+        let mut cancelled = false;
+        let granted = self.wait_for(timeout, || {
+            let control = poll()?;
+            cancelled |= control == WaitControl::Cancel;
+            Ok(control)
+        })?;
+        Ok(if granted {
+            WaitOutcome::Granted
+        } else if cancelled {
+            WaitOutcome::Cancelled
+        } else {
+            WaitOutcome::TimedOut
+        })
     }
 
     fn wait_until(

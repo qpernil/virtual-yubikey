@@ -204,6 +204,24 @@ credential enumeration. Its global counter and wrapping key persist across
 restarts. CTAP2 reset invalidates all handles. See [U2F commands, presence,
 interoperability and persistence](docs/u2f.md).
 
+CTAP2 GetAssertion defaults to requiring user presence. Explicit `up=false`
+requests produce silent assertions with the signed UP flag clear; PIN verification
+controls the independent UV flag. GetNextAssertion retains the presence and
+verification flags of the initiating request. This applies to ordinary credentials
+and CTAP2 assertions of U2F handles over both HID and CCID.
+
+FIDO2 touch waits have a 30-second deadline on HID and CCID. HID
+`CTAPHID_CANCEL` terminates a pending CBOR touch request immediately with
+`CTAP2_ERR_KEEPALIVE_CANCEL` (`0x2D`); expiration returns
+`CTAP2_ERR_USER_ACTION_TIMEOUT` (`0x2F`). Silent `up=false` assertions skip
+both the prompt and wait. U2F retains its separate 500 ms polling response
+and `6985` status. The FIDO2 deadline follows the
+[CTAP user-action timeout guidance](https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html#user-action-timeout):
+at least 10 seconds, with 30 seconds suggested. A physical YubiKey 5.8.0
+measured approximately 28.5 seconds for HID and CCID FIDO2 creation and selection
+without touch; creation returned `OPERATION_DENIED`, while selection returned
+`USER_ACTION_TIMEOUT`.
+
 ## FIDO PIN handling
 
 Client PIN protocols 1 and 2 enforce an eight-attempt persistent retry counter.
