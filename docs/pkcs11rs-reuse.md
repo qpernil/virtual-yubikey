@@ -33,7 +33,7 @@ The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
 The physical USB CCID reader also exposes the FIDO2 applet alongside Management,
 PIV, OpenPGP, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
-authoritative authenticator state. U2F uses HID MSG or the same CCID FIDO AID;
+authoritative authenticator state and one shared Management configuration. U2F uses HID MSG or the same CCID FIDO AID;
 its wrapped handles are not discoverable PKCS #11 objects. Runtime FIDO callbacks
 receive `FidoProtocol` to distinguish CTAP2 status/CBOR responses from U2F
 data/ISO-status responses. `pkcs11rs` should normally use HID or its
@@ -45,7 +45,7 @@ and secure-messaging coverage.
 
 | Component | Responsibility |
 | --- | --- |
-| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, and persistent logical device state |
+| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, persistent USB capability configuration, and logical device state |
 | `software-key-core::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |

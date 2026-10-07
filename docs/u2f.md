@@ -1,13 +1,17 @@
 # FIDO U2F / CTAP1
 
 The FIDO application implements U2F `REGISTER` (`01`), `AUTHENTICATE` (`02`),
-and `VERSION` (`03`) alongside CTAP2. It reports `U2F_V2` in CTAP2 GetInfo
-and its U2F capability through Management. NFC is not implemented.
+and `VERSION` (`03`) alongside CTAP2. While enabled it reports `U2F_V2` in CTAP2 GetInfo and
+publishes separate supported and enabled U2F/FIDO2 capability bits through
+Management. The profile has independent `u2f` and `fido2` installation flags;
+[Management configuration](management.md) controls persistent USB enablement.
+Disabling either protocol preserves its credentials. NFC is not implemented.
 
 ## Transports and presence
 
 USB HID carries U2F APDUs in `CTAPHID_MSG` on the existing FIDO interface.
-INIT advertises CBOR support and clears `CAPABILITY_NMSG`. Both command and
+INIT advertises CBOR support while FIDO2 is enabled and clears `CAPABILITY_NMSG`
+while U2F is enabled. Both command and
 response fragmentation use the ordinary 64-byte HID reports. CTAP2 continues
 using `CTAPHID_CBOR`; no separate HID interface is needed.
 
@@ -86,7 +90,8 @@ CTAP2 authenticatorReset requires a fresh touch and acceptance within ten second
 of the current power cycle. A successful reset clears CTAP2 credentials and PIN
 state, invalidates every U2F handle by discarding the wrapping key, and resets the
 U2F counter. The next U2F registration creates fresh random wrapping material.
-The FIDO attestation identity remains stable. Connection resets and applet
+The FIDO attestation identity remains stable. Management enablement and its
+configuration lock are separate device state and survive FIDO reset. Connection resets and applet
 selection do not extend the reset window or invalidate handles. An explicit
 administrative replacement of the FIDO state file also discards its credentials.
 

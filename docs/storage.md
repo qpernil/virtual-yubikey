@@ -17,11 +17,13 @@ For serial `12345678`, every host uses these files in its selected directory:
 | `openpgp-12345678.cbor` | Keys, certificates, PIN verifiers, counters, metadata and lifecycle |
 | `hsmauth-12345678.cbor` | HSM Auth credentials and management policy |
 | `security-domain-12345678.cbor` | SCP keys, certificates, trust policy and attempt budgets |
+| `management-12345678.cbor` | Enabled USB application mask and configuration-lock verifier |
 | `yubikey-12345678.lock` | Exclusive process ownership; not applet state |
 
 Each file uses its applet's versioned CBOR codec. Transport selection, applet
 selection, login authorization, presence grants and secure-channel sessions
-are transient. Applet enablement and device profile remain host configuration.
+are transient. Installed applets and device profile remain host configuration;
+USB application enablement is persistent Management state.
 Disabled applets retain their stored state. To reuse the directory in another
 host, stop its owner and configure the same serial and compatible profile in
 the new host. The directory may be relocated without conversion.
@@ -56,7 +58,9 @@ The writer takes runtime locks only to encode requested applet snapshots.
 Commands release runtime state locks before waiting for receipts or flushing,
 including FIDO PIN operations routed through CCID. Long-running commands can
 delay snapshots. FIDO signature counters, PIN changes/retries, reset, and U2F wrapping-key
-mutations are flushed before their response; embedded hosts conservatively flush all FIDO mutations.
+mutations and Management configuration writes are flushed before their response;
+embedded hosts conservatively flush all FIDO mutations. The USB writer snapshots
+Management separately from FIDO and CCID runtime locks.
 
 Hosts flush on quiesce/ejection and join the writer on shutdown. Storage contains
 unencrypted virtual private keys and applet credential state; directory access

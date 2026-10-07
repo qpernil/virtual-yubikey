@@ -29,7 +29,7 @@ credential management, resident credentials, and `previewSign`.
 | USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, MSG (U2F), CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
-| Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
+| Management | AID `A000000527471117`, firmware 5.8.0, identity, persistent USB application enablement and configuration lock; see [Management](docs/management.md) |
 | PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, ML-KEM, and concrete hybrid PQ/T KEM operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
 | OpenPGP | Persistent RSA/ECC/Ed25519/X25519 keys, PIN/recovery policy, certificates, signing, decipher, touch and applet reset; see [OpenPGP](docs/openpgp.md) |
@@ -43,7 +43,8 @@ credential management, resident credentials, and `previewSign`.
 The implemented applets share one logical device across USB and embedded
 forms. OATH, Yubico OTP, biometric verification, and NFC
 transport are not implemented. Management supplies identity and capability
-discovery; device-configuration writes are not implemented. Applet-specific
+discovery, persistent USB application enablement and a configuration lock; see
+[Management configuration](docs/management.md). Applet-specific
 compatibility gaps are documented in the linked applet guides.
 
 The development profile uses the USB VID/PID, manufacturer string, and product
@@ -196,7 +197,8 @@ for selectors, trust and authorization boundaries, and
 
 ## FIDO U2F
 
-U2F and CTAP2 share the FIDO HID interface and CCID AID. U2F uses `CTAPHID_MSG`
+U2F and CTAP2 share the FIDO HID interface and CCID AID, with independent USB
+enablement through [Management configuration](docs/management.md). U2F uses `CTAPHID_MSG`
 and authenticated 64-byte wrapped handles, without per-credential storage or
 credential enumeration. Its global counter and wrapping key persist across
 restarts. CTAP2 reset invalidates all handles. See [U2F commands, presence,
@@ -438,9 +440,10 @@ Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. All device
 forms use the shared `virtual-yubikey-core::storage` loader and runtime. A serial
-`12345678` device has five independent CBOR records:
+`12345678` device has six independent CBOR records:
 `fido-12345678.cbor`, `piv-12345678.cbor`, `hsmauth-12345678.cbor`,
-`security-domain-12345678.cbor`, and `openpgp-12345678.cbor`.
+`security-domain-12345678.cbor`, `openpgp-12345678.cbor`, and
+`management-12345678.cbor`.
 The directory location is chosen by the host; filenames and record contents are
 identical for embedded readers and USB workers with the same serial.
 
@@ -452,7 +455,7 @@ writer batches dirty applets for up to 500 ms and atomically replaces only their
 mode-`0600` files, using `software-key-core/state-persistence`. USB ejection and
 shutdown flush pending writes. `--persistence immediate` synchronizes changes
 before responses are sent; FIDO signature counters, PIN changes/retries, reset,
-and U2F wrapping-key creation force a flush
+U2F wrapping-key creation, and Management configuration writes force a flush
 in either mode.
 Runtime state locks are released before durability waits. Applet files are
 independent; a batch does not provide a transaction across multiple files.

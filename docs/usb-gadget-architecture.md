@@ -411,7 +411,9 @@ the HID interface. One worker-wide operation lock covers touch authorization,
 command execution, and mutation recording. If one transport already owns a FIDO
 operation, a request arriving through the other receives the CTAP2 channel-busy
 status or U2F `6985`. U2F uses HID `MSG` and has no separate interface or AID;
-see [U2F](u2f.md). A single touch therefore cannot authorize concurrent HID and CCID
+see [U2F](u2f.md). Independent USB protocol enablement and the shared
+configuration lock use [Management](management.md); configuration writes retain
+the published interface descriptors. A single touch therefore cannot authorize concurrent HID and CCID
 operations, and PIN counters, operation tokens, and resident credentials have
 one serialization order. CCID uses ordinary time-extension frames while its
 FIDO operation or touch wait is pending.

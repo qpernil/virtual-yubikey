@@ -12,7 +12,8 @@ are independently enabled and published through the ordinary CCID slot path.
 
 The core currently implements:
 
-- Management identity and capability reporting;
+- Management identity, independent USB application enablement, configuration
+  locks and shared HID/CCID persistence; see [Management](management.md);
 - U2F registration/authentication/version, wrapped handles, shared HID/CCID
   routing and durable global counters; see [U2F](u2f.md);
 - FIDO2 registration, assertions, PIN and credential management, resident
@@ -30,7 +31,8 @@ The core currently implements:
 
 OATH, Yubico OTP, biometric verification, and NFC transport
 are outside the implemented scope. Management implements identity and capability
-discovery, not device-configuration writes. Applet-specific gaps are listed below
+discovery and persistent USB configuration; non-default timeout/device-flag
+behavior and physical interface reconfiguration are unsupported. Applet-specific gaps are listed below
 and in the PIV, OpenPGP, and GlobalPlatform guides.
 
 The active priorities are:

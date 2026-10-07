@@ -1,7 +1,7 @@
 //! CTAPHID packet framing for the FIDO HID gadget transport.
 
 use std::collections::HashSet;
-use virtual_yubikey_core::DeviceProfile;
+use virtual_yubikey_core::{DeviceProfile, Management};
 
 pub(crate) const REPORT_SIZE: usize = 64;
 const INIT_DATA_SIZE: usize = 57;
@@ -17,6 +17,7 @@ const CMD_CANCEL: u8 = 0x11;
 const CMD_KEEPALIVE: u8 = 0x3b;
 const CMD_ERROR: u8 = 0x3f;
 const CMD_YUBIKEY_READ_CONFIG: u8 = 0x42;
+const CMD_YUBIKEY_WRITE_CONFIG: u8 = 0x43;
 
 const ERR_INVALID_CMD: u8 = 0x01;
 const ERR_INVALID_PAR: u8 = 0x02;
@@ -26,6 +27,7 @@ const ERR_CHANNEL_BUSY: u8 = 0x06;
 const ERR_INVALID_CHANNEL: u8 = 0x0b;
 
 const CAPABILITY_CBOR: u8 = 0x04;
+const CAPABILITY_NMSG: u8 = 0x08;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeepaliveStatus {
@@ -45,19 +47,32 @@ struct Transaction {
 #[derive(Debug)]
 pub(crate) struct Device {
     profile: DeviceProfile,
+    management: Management,
+    management_changed: bool,
     next_channel: u32,
     channels: HashSet<u32>,
     transaction: Option<Transaction>,
 }
 
 impl Device {
+    #[cfg(test)]
     pub(crate) fn new(profile: DeviceProfile) -> Self {
+        let management = Management::new(profile.clone());
+        Self::with_management(profile, management)
+    }
+    pub(crate) fn with_management(profile: DeviceProfile, management: Management) -> Self {
         Self {
             profile,
+            management,
+            management_changed: false,
             next_channel: 1,
             channels: HashSet::new(),
             transaction: None,
         }
+    }
+
+    pub(crate) fn take_management_change(&mut self) -> bool {
+        std::mem::take(&mut self.management_changed)
     }
 
     pub(crate) fn receive<F>(
@@ -162,7 +177,17 @@ impl Device {
             response.extend_from_slice(&assigned.to_be_bytes());
             response.push(2); // CTAPHID protocol version
             response.extend_from_slice(&self.profile.firmware);
-            response.push(CAPABILITY_CBOR);
+            response.push(
+                if self.management.fido2_enabled() {
+                    CAPABILITY_CBOR
+                } else {
+                    0
+                } | if self.management.u2f_enabled() {
+                    0
+                } else {
+                    CAPABILITY_NMSG
+                },
+            );
             return encode_message(channel, CMD_INIT, &response);
         }
 
@@ -172,6 +197,12 @@ impl Device {
 
         match command {
             CMD_PING => encode_message(channel, CMD_PING, payload),
+            CMD_CBOR if !self.management.fido2_enabled() => {
+                encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD])
+            }
+            CMD_MSG if !self.management.u2f_enabled() => {
+                encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD])
+            }
             CMD_CBOR => encode_message(
                 channel,
                 CMD_CBOR,
@@ -183,12 +214,21 @@ impl Device {
                 &exchange_fido(virtual_yubikey_core::FidoProtocol::U2f, payload),
             ),
             CMD_YUBIKEY_READ_CONFIG if payload.len() == 1 => {
-                match self.profile.management_device_info(payload[0]) {
-                    Some(config) => encode_message(channel, CMD_YUBIKEY_READ_CONFIG, &config),
-                    None => encode_message(channel, CMD_ERROR, &[ERR_INVALID_PAR]),
+                match self.management.read_config(payload[0]) {
+                    Ok(config) => encode_message(channel, CMD_YUBIKEY_READ_CONFIG, &config),
+                    Err(_) => encode_message(channel, CMD_ERROR, &[ERR_INVALID_PAR]),
                 }
             }
             CMD_YUBIKEY_READ_CONFIG => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
+            CMD_YUBIKEY_WRITE_CONFIG => match self.management.write_config(payload) {
+                Ok(()) => {
+                    self.management_changed = true;
+                    encode_message(channel, CMD_YUBIKEY_WRITE_CONFIG, &[])
+                }
+                Err(0x6982) => encode_message(channel, CMD_ERROR, &[0x27]),
+                Err(0x6f00) => encode_message(channel, CMD_ERROR, &[0x7f]),
+                Err(_) => encode_message(channel, CMD_ERROR, &[ERR_INVALID_PAR]),
+            },
             CMD_CANCEL if payload.is_empty() => Vec::new(),
             CMD_CANCEL => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
             _ => encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD]),
@@ -366,7 +406,7 @@ mod tests {
             |_, _| unreachable!(),
         );
         assert_eq!(response[0][4], 0xc2);
-        assert_eq!(response[0][7], 25);
+        assert_eq!(response[0][7], 35);
         assert!(
             response[0]
                 .windows(6)
@@ -593,5 +633,147 @@ mod tests {
             [0, 0x90, 0]
         );
         assert_eq!(card.transmit(&u2f_request(2, 7, &auth_data)), [0x6a, 0x80]);
+    }
+    #[test]
+    fn management_writes_gate_both_transports_and_update_init_capabilities() {
+        use virtual_yubikey_core::{FIDO2_AID, MANAGEMENT_AID, VirtualYubiKey};
+        let profile = DeviceProfile::yubikey_5_8_ccid(42);
+        let device = VirtualYubiKey::new(profile.clone());
+        let management = device.management();
+        let supported = management.usb_supported_capabilities();
+        let (mut card, mut fido) = device.separate_fido();
+        let mut hid = Device::with_management(profile, management.clone());
+        let init = hid.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_, _| unreachable!(),
+        );
+        let channel = assigned_channel(&init);
+        for (u2f, fido2) in [(true, false), (false, true), (false, false), (true, true)] {
+            let mask = supported & !(0x0002 | 0x0200)
+                | if u2f { 2 } else { 0 }
+                | if fido2 { 0x200 } else { 0 };
+            assert_eq!(
+                hid_call(
+                    &mut hid,
+                    channel,
+                    CMD_YUBIKEY_WRITE_CONFIG,
+                    &[6, 3, 2, (mask >> 8) as u8, mask as u8, 12, 0],
+                    &mut fido,
+                    false
+                ),
+                []
+            );
+            assert!(hid.take_management_change());
+            assert!(!hid.take_management_change());
+            let init = hid.receive(
+                &initial(channel, CMD_INIT, b"abcdefgh"),
+                |_, _| unreachable!(),
+            );
+            assert_eq!(
+                init[0][23],
+                if fido2 { 4 } else { 0 } | if u2f { 0 } else { 8 }
+            );
+            let reports = hid.receive(
+                &initial(channel, CMD_MSG, &u2f_request(3, 0, &[])),
+                |protocol, request| exchange_runtime(&mut fido, protocol, request, false),
+            );
+            assert_eq!(
+                reports[0][4],
+                if u2f {
+                    CMD_MSG | 0x80
+                } else {
+                    CMD_ERROR | 0x80
+                }
+            );
+            assert_eq!(
+                payload(&reports),
+                if u2f {
+                    [b"U2F_V2".as_slice(), &[0x90, 0]].concat()
+                } else {
+                    vec![ERR_INVALID_CMD]
+                }
+            );
+            let mut called = false;
+            let reports = hid.receive(&initial(channel, CMD_CBOR, &[4]), |protocol, request| {
+                called = true;
+                exchange_runtime(&mut fido, protocol, request, false)
+            });
+            assert_eq!(called, fido2);
+            assert_eq!(reports[0][4], if fido2 { 0x90 } else { 0xbf });
+            let select = [
+                vec![0, 0xa4, 4, 0, MANAGEMENT_AID.len() as u8],
+                MANAGEMENT_AID.to_vec(),
+                vec![0],
+            ]
+            .concat();
+            assert!(card.transmit(&select).ends_with(&[0x90, 0]));
+            let ccid_info = card.transmit(&[0, 0x1d, 0, 0, 0]);
+            let hid_info = hid_call(
+                &mut hid,
+                channel,
+                CMD_YUBIKEY_READ_CONFIG,
+                &[0],
+                &mut fido,
+                false,
+            );
+            assert_eq!(&ccid_info[..ccid_info.len() - 2], hid_info);
+            let select = [
+                vec![0, 0xa4, 4, 0, FIDO2_AID.len() as u8],
+                FIDO2_AID.to_vec(),
+                vec![0],
+            ]
+            .concat();
+            assert_eq!(card.transmit(&select).ends_with(&[0x90, 0]), u2f || fido2);
+        }
+        // A CCID configuration write updates the existing HID device's live settings.
+        card.transmit(
+            &[
+                vec![0, 0xa4, 4, 0, MANAGEMENT_AID.len() as u8],
+                MANAGEMENT_AID.to_vec(),
+                vec![0],
+            ]
+            .concat(),
+        );
+        let mask = supported & !2;
+        assert_eq!(
+            card.transmit(&[0, 0x1c, 0, 0, 5, 4, 3, 2, (mask >> 8) as u8, mask as u8]),
+            [0x90, 0]
+        );
+        let reports = hid.receive(
+            &initial(channel, CMD_MSG, &u2f_request(3, 0, &[])),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(reports[0][4], 0xbf);
+        assert_eq!(reports[0][7], ERR_INVALID_CMD);
+    }
+    #[test]
+    fn failed_vendor_management_write_does_not_schedule_or_change_configuration() {
+        let mut hid = device();
+        let init = hid.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_, _| unreachable!(),
+        );
+        let channel = assigned_channel(&init);
+        let before = hid.management.persistent_state().unwrap();
+        let response = hid.receive(
+            &initial(channel, CMD_YUBIKEY_WRITE_CONFIG, &[4, 3, 2, 0]),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(response[0][4], 0xbf);
+        assert_eq!(response[0][7], ERR_INVALID_PAR);
+        assert!(!hid.take_management_change());
+        assert_eq!(hid.management.persistent_state().unwrap(), before);
+        let lock = [vec![18, 10, 16], vec![0x31; 16]].concat();
+        hid.receive(
+            &initial(channel, CMD_YUBIKEY_WRITE_CONFIG, &lock),
+            |_, _| unreachable!(),
+        );
+        assert!(hid.take_management_change());
+        let response = hid.receive(
+            &initial(channel, CMD_YUBIKEY_WRITE_CONFIG, &[4, 3, 2, 0, 2]),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(response[0][7], 0x27);
+        assert!(!hid.take_management_change());
     }
 }

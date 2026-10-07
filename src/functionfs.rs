@@ -86,6 +86,7 @@ pub(crate) fn run_worker(
         DeviceProfile::yubikey_5_8_ccid(serial),
         FidoConfiguration::default(),
     )?;
+    let management = device.management();
     let (card, authenticator) = device.separate_fido();
     let fido_state = Arc::new(Mutex::new(authenticator));
     let ccid_state = Arc::new(Mutex::new(crate::ccid::Device::from_device(card)));
@@ -94,7 +95,9 @@ pub(crate) fn run_worker(
     let persistence = device_storage.start(
         persistence_mode,
         move |applet| {
-            if applet == PersistentApplet::Fido {
+            if applet == PersistentApplet::Management {
+                management.persistent_state().map_err(io::Error::other)
+            } else if applet == PersistentApplet::Fido {
                 snapshot_fido
                     .lock()
                     .map_err(|_| io::Error::other("FIDO state lock poisoned"))?
@@ -342,6 +345,7 @@ struct EndpointServices<'a> {
 #[cfg(target_os = "linux")]
 struct HidRuntime {
     serial: u32,
+    persistence: DevicePersistenceHandle,
     presence: crate::presence::Service,
     operations: Arc<FidoOperationCoordinator>,
     clock: crate::keepalive::Handle,
@@ -487,6 +491,7 @@ impl Endpoints {
             crate::presence::Service::new(storage.touch_socket.clone(), display_activity.clone());
         let fido_operations = Arc::new(FidoOperationCoordinator::default());
 
+        let management_persistence = ccid.persistence.clone();
         let notification_thread = thread::Builder::new()
             .name("ccid-notify".to_owned())
             .spawn(move || {
@@ -563,6 +568,7 @@ impl Endpoints {
         let fido_thread = thread::Builder::new().name("fido-hid".to_owned()).spawn({
             let runtime = HidRuntime {
                 serial,
+                persistence: management_persistence,
                 presence,
                 operations: fido_operations,
                 clock: keepalive.handle(),
@@ -978,9 +984,9 @@ fn serve_ccid(
                         if let Some(error) = fido_error {
                             return Err(error);
                         }
-                        let applet_mutation = ccid
-                            .persistence
-                            .record_mutations(state.take_persistent_applets())?;
+                        let changed = state.take_persistent_applets();
+                        force_fido |= changed.contains(&PersistentApplet::Management);
+                        let applet_mutation = ccid.persistence.record_mutations(changed)?;
                         (replies, applet_mutation, force_fido, fido_mutations)
                     };
                     // The one writer may snapshot CCID as well as FIDO. Wait or
@@ -1016,6 +1022,7 @@ fn serve_hid(
 ) -> io::Result<()> {
     let HidRuntime {
         serial,
+        persistence,
         presence,
         operations,
         clock,
@@ -1024,8 +1031,15 @@ fn serve_hid(
     let reports = HidReader::start(output, lifecycle)?;
     let result = (|| {
         let receiver = reports.receiver();
-        let mut ctaphid = crate::ctaphid::Device::new(
+        let management = fido
+            .state()
+            .lock()
+            .map_err(|_| io::Error::other("FIDO state lock poisoned"))?
+            .management()
+            .ok_or_else(|| io::Error::other("missing shared Management state"))?;
+        let mut ctaphid = crate::ctaphid::Device::with_management(
             virtual_yubikey_core::DeviceProfile::yubikey_5_8_ccid(serial),
+            management,
         );
         while !STOP_REQUESTED.load(Ordering::Relaxed) {
             let report = match receiver.recv_timeout(Duration::from_millis(250)) {
@@ -1199,6 +1213,10 @@ fn serve_hid(
                         );
                         response
                     });
+                    if ctaphid.take_management_change() {
+                        persistence.record_mutations([PersistentApplet::Management])?;
+                        persistence.flush()?;
+                    }
                     if let Some(mutation) = mutation {
                         mutation.wait()?;
                     }
