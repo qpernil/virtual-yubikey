@@ -18,7 +18,7 @@ state, worker-owned USB personality, and declarative launch profile.
 
 The current build exposes FIDO HID and USB CCID interfaces. Its logical device lives in
 the transport-neutral `virtual-yubikey-core` workspace crate, which implements
-YubiKey Management, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, and CTAP 2.1
+YubiKey Management, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, U2F, and CTAP 2.1
 behavior including GlobalPlatform secure messaging, PIN authorization,
 credential management, resident credentials, and `previewSign`.
 
@@ -217,7 +217,7 @@ FIDO2 touch waits have a 30-second deadline on HID and CCID. HID
 both the prompt and wait. U2F samples the physical button once per eligible
 request and returns `6985` promptly if released. Its indication keeps the same
 blink phase across retries and expires one full 768 ms cycle after the last poll,
-or ends when a poll detects touch. The FIDO2 deadline follows the
+or ends when a presence-authorized operation succeeds. The FIDO2 deadline follows the
 [CTAP user-action timeout guidance](https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html#user-action-timeout):
 at least 10 seconds, with 30 seconds suggested. A physical YubiKey 5.8.0
 measured approximately 28.5 seconds for HID and CCID FIDO2 creation and selection
@@ -467,8 +467,8 @@ cut-outs blink until touch, cancellation, or failure ends the wait. Every
 application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
 approximately 1.30 blinks per second. FIDO, PIV, OpenPGP, and YubiHSM Auth use one
 protocol-neutral presence service. U2F keeps that cadence across its immediate
-button-state polls; the indication ends on detected presence or one full cycle
-without polling. Command activity does not interrupt a presence indication.
+button-state polls; the indication ends when a presence-authorized operation
+succeeds or one full cycle passes without polling. Command activity does not interrupt a presence indication.
 General FIDO HID report traffic does not drive the activity
 indication. USB suspend and worker shutdown clear the panel and turn off its
 backlight. Holding KEY3 turns the display off and

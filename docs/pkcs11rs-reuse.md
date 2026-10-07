@@ -19,6 +19,13 @@ additive to external hardware. Readers are ephemeral by default; persistent
 readers use an ID-scoped directory under pkcs11rs token storage and the same
 [per-applet files, loader, lock and writer](storage.md) as USB workers.
 
+Shared-core protocol changes apply to embedded builds when they use the updated
+checkout; pkcs11rs CI selects an exact revision through
+`VIRTUAL_YUBIKEY_REVISION`. Joystick polling, blink scheduling, blocking touch
+deadlines and HID cancellation are USB-worker responsibilities. The embedded
+CCID connector calls the core directly and provides no physical-presence
+handler, so its tests do not qualify those USB interactions.
+
 Protocol-neutral software key operations live in the independent sibling
 `software-key-core` repository. Both this workspace and `pkcs11rs` consume the
 same working tree through dependency-by-path, so neither device emulation nor

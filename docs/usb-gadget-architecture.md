@@ -456,10 +456,17 @@ the scheduler does not need to know which protocol requested presence. Command
 activity is suppressed while a presence indication is active. U2F samples the
 joystick level once per eligible call and returns promptly. Its attention guard
 survives retries without resetting phase; a worker timer drops it one complete
-768 ms cycle after the last eligible poll, and a poll that detects the pressed
-button drops it immediately. The timer owns only indication state, not a FIDO
+768 ms cycle after the last eligible poll, and a successful presence-authorized
+operation drops it immediately. The timer owns only indication state, not a FIDO
 operation lock or touch authorization. USB suspend and worker exit independently
 clear the display and turn off its backlight.
+
+FIDO2 blocks for at most 30 seconds while awaiting touch on either HID or CCID.
+HID `CTAPHID_CANCEL` terminates a pending CBOR wait with `KEEPALIVE_CANCEL`;
+the deadline returns `USER_ACTION_TIMEOUT`. A valid GetAssertion request with
+`up=false` skips the touch prompt and wait and clears the signed presence flag.
+The [browser fixture](fido-browser-test.md) records separate U2F and FIDO2
+qualification, including physical touches, timeout and cancellation.
 
 The ST7789 and buttons share a HAT but not an I/O path. Display frames use SPI;
 GPIO25, GPIO27, and GPIO24 control data/command, reset, and backlight. Separate
@@ -688,16 +695,27 @@ normal USB frames.
 stateDiagram-v2
     [*] --> Preparing
     Preparing --> AwaitingPersonality: start worker; send InitialResources
-    AwaitingPersonality --> AwaitingWorker: receive Configure; publish/open FunctionFS
+    AwaitingPersonality --> Detached: initial empty Configure; readiness declared
+    AwaitingPersonality --> AwaitingWorker: nonempty Configure; publish/open FunctionFS
+    Detached --> AwaitingWorker: nonempty Configure; publish/open FunctionFS
     AwaitingWorker --> Binding: send UsbEndpoints; receive Serving
     Binding --> Running: bind UDC
+    Running --> Running: reject invalid replacement Configure
+    Running --> Quiescing: valid Configure; unbind and request Quiesce
+    Quiescing --> Replacing: Quiesced; remove old endpoints
+    Replacing --> Detached: empty personality
+    Replacing --> AwaitingWorker: nonempty personality; publish/open FunctionFS
     Running --> Cleaning: worker exit or EOF
+    Detached --> Cleaning: worker exit or EOF
     Cleaning --> Preparing: fresh worker incarnation
     Preparing --> FinalCleanup: service stop or setup failure
     AwaitingPersonality --> FinalCleanup: service stop or timeout
     AwaitingWorker --> FinalCleanup: service stop or timeout
     Binding --> FinalCleanup: service stop or bind failure
     Running --> FinalCleanup: service stop
+    Detached --> FinalCleanup: service stop
+    Quiescing --> FinalCleanup: service stop or failed quiescence
+    Replacing --> FinalCleanup: service stop or setup failure
     FinalCleanup --> [*]: UDC unbound and owned resources removed
 ```
 
@@ -706,7 +724,13 @@ immediately unbinds the UDC. It then removes that incarnation's resources and
 starts a fresh process and USB generation while the supervisor service remains
 running. A worker-requested personality change quiesces the current generation,
 publishes replacement endpoints, and preserves the worker process; `SIGHUP`
-intentionally performs the broader fresh-worker reload.
+intentionally performs the broader fresh-worker reload. Atomic replacement and
+fresh-worker recovery keep the UDC detached for at least 250 ms; initial startup
+adds no dwell. Empty `Configure` keeps the same worker detached indefinitely,
+including when it is the initial readiness declaration. A later nonempty
+`Configure` uses the worker-controlled ejection interval without adding the
+atomic-replacement dwell. Invalid replacements return `ConfigurationRejected`
+while the current generation continues serving.
 
 ## Privilege boundary
 

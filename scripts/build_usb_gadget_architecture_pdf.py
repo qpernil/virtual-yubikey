@@ -264,7 +264,7 @@ def cover(story):
                     [p("01", "cover_label"), p("The supervisor constructs and binds the device.", "cover_sub")],
                     [p("02", "cover_label"), p("The worker receives open USB resources, never privileged paths.", "cover_sub")],
                     [p("03", "cover_label"), p("The kernel carries payloads directly between host and worker.", "cover_sub")],
-                    [p("04", "cover_label"), p("Worker exit is the complete reconnect and reset primitive.", "cover_sub")],
+                    [p("04", "cover_label"), p("USB generations can change within a worker; process exit resets its runtime.", "cover_sub")],
                 ],
                 colWidths=[13 * mm, CONTENT_W - 13 * mm],
                 rowHeights=[18 * mm] * 4,
@@ -348,7 +348,8 @@ def page_protocol(story):
         ["Direction", "Record", "Purpose"],
         [
             ["Supervisor -> worker", "InitialResources", "Named, approved local resources"],
-            ["Worker -> supervisor", "Configure", "Typed USB personality"],
+            ["Worker -> supervisor", "Configure", "Initial/replacement personality; empty means detached"],
+            ["Supervisor -> worker", "ConfigurationRejected", "Invalid replacement; current generation remains live"],
             ["Supervisor -> worker", "UsbEndpoints", "Endpoint metadata and data FDs"],
             ["Worker -> supervisor", "Serving", "Ready before UDC binding"],
             ["Supervisor -> worker", "UsbBusEvent / UsbControlRequest", "Lifecycle and setup"],
@@ -362,7 +363,7 @@ def page_protocol(story):
 
 
 def page_lifecycle(story):
-    story.extend(section("One worker, one incarnation", "04 / lifecycle"))
+    story.extend(section("One worker, multiple USB generations", "04 / lifecycle"))
     story.append(code_box([
         "START WORKER with reduced credentials",
         "       | InitialResources",
@@ -376,6 +377,7 @@ def page_lifecycle(story):
         "AWAIT Serving -> bind UDC -> HOST ENUMERATION",
         "       |",
         "       +-> forward lifecycle / setup on control socket",
+        "       +-> Configure: unbind -> quiesce -> rebuild",
         "       | worker exit / EOF",
         "       v",
         "CLEAN: unbind, close, reap, unmount, remove",
@@ -385,8 +387,9 @@ def page_lifecycle(story):
     story += [Spacer(1, 5 * mm)]
     story.append(p("Serving means the worker has validated the endpoint map and initialized its protocol state. Only then does the supervisor bind the UDC. Virtual YubiKey receives five FunctionFS data endpoints: two FIDO interrupt endpoints and three CCID endpoints. There is no separate post-bind ConfigFS HID handoff."))
     story.append(p("The supervisor retains ep0 and forwards lifecycle and setup records. The worker handles ordinary protocol traffic directly on its endpoint handles. Quiesce stops endpoint work and flushes durable state before a controlled teardown."))
-    story.append(p("A firmware reconnect is worker exit. The supervisor unbinds first, destroys the incarnation, and launches a fresh Unix process. A service stop performs final cleanup and exits."))
-    story.append(callout("Process creation is the reset primitive for volatile threads, buffers and capabilities. Persistent applet records survive ordinary restart."))
+    story.append(p("A valid replacement Configure unbinds, quiesces the old endpoints, rebuilds the USB generation and binds again within the same worker. Atomic replacement detaches for at least 250 ms; initial startup adds no dwell. Empty Configure keeps the worker detached indefinitely, including before its first personality. A later bind uses the worker-controlled ejection interval. Invalid replacement leaves the current generation serving."))
+    story.append(p("Firmware reconnect uses this reconfiguration path. Worker exit or control EOF instead destroys the incarnation and starts a fresh process; service stop cleans up and exits."))
+    story.append(callout("USB generations change without replacing the worker. Process creation resets volatile threads, buffers and capabilities; durable applet records survive restart."))
     story.append(PageBreak())
 
 
@@ -405,7 +408,7 @@ def page_data_paths(story):
         )
     )
     story += [Spacer(1, 5 * mm), p("Virtual YubiKey", "h2")]
-    story.append(p("The shared core implements Management, FIDO2, PIV, OpenPGP, YubiHSM Auth, and Issuer Security Domain. GlobalPlatform SCP03/SCP11a/b/c protects every selectable CCID applet. HID and CCID FIDO routes share one authenticator; embedded readers use the same core and per-applet storage runtime."))
+    story.append(p("The shared core implements Management, U2F/FIDO2, PIV, OpenPGP, YubiHSM Auth, and Issuer Security Domain. SCP03/SCP11a/b/c protects every selectable CCID applet. HID and CCID share one authenticator and persistent Management configuration; U2F and FIDO2 are independently enabled. Embedded readers share the core and six-record storage runtime, without the worker's physical-touch handling."))
     story.append(p("The worker advertises the compatibility manufacturer Yubico and product YubiKey Gadget FIDO+CCID for controlled local testing. Gadget distinguishes the virtual reader. Host tools include browsers, ykman, yubico-piv-tool, GnuPG and pkcs11rs. This identity does not imply vendor endorsement."))
     story += [Spacer(1, 2 * mm), p("Virtual Trezor", "h2")]
     story.append(p("The worker owns its USB personality and direct OUT/IN endpoint traffic. Named display and button resources are restricted to the profile's declared device and GPIO line groups. Upstream firmware composes the 128x64 framebuffer; button handling uses edge events and atomic snapshots. Orderly exit clears the display."))
@@ -484,6 +487,7 @@ def page_framing_activity(story):
             ["After activity", "8 ms off, then touch if needed", "8 ms off, then full idle off phase"],
         ], [58 * mm, 59 * mm, CONTENT_W - 117 * mm]))
     story.append(p("A lit background turns off before activity; an already-dark LED waits only for the remaining minimum off time. If that minimum has elapsed, activity starts immediately. The worker owns this policy; the supervisor supplies only display capabilities."))
+    story.append(p("Presence indication suppresses command flashes. U2F samples the button once per eligible poll and returns immediately; retries preserve the blink phase. Success with presence, or 768 ms without another poll, ends the indication. FIDO2 waits at most 30 seconds; HID CANCEL ends a pending wait. Silent up=false assertions skip touch. Browser U2F and FIDO2 runs separately qualify physical touch, polling, timeout and cancellation."))
     story.append(PageBreak())
 
 
@@ -509,6 +513,7 @@ def page_security(story):
         "Validate the profile before installation and keep the installed copy root-owned.",
         "Confirm endpoint count, order, direction, and host-visible interface order.",
         "Observe Configure, UsbEndpoints, Serving, UDC bind, USB activation and teardown logs.",
+        "Replace the USB personality, detach with empty Configure, and reattach within the same worker.",
         "Kill the worker and verify unbind-first cleanup followed by a fresh process.",
         "Stop the service and verify final UDC, ConfigFS, mount, display, and process cleanup.",
     ]:
