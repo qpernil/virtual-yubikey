@@ -18,6 +18,7 @@ use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 mod token;
+pub(crate) mod u2f;
 use token::{CM, GA, MC, PCMR, Token};
 
 fn sha256(data: &[u8]) -> Vec<u8> {
@@ -51,7 +52,7 @@ const CTAP2_ERR_OTHER: u8 = 0x7f;
 const PIN_RETRIES: u8 = 8;
 pub(crate) const MAX_RESIDENT_CREDENTIALS: usize = 100;
 const MAX_CTAP_MESSAGE_SIZE: u16 = 7609;
-const PERSISTENT_STATE_VERSION: u8 = 5;
+const PERSISTENT_STATE_VERSION: u8 = 6;
 
 const CKR_ARGUMENTS_BAD: u64 = 1;
 const CKR_DEVICE_ERROR: u64 = 2;
@@ -75,6 +76,10 @@ impl From<()> for Error {
 pub(crate) struct FidoState {
     device_identifier: [u8; 16],
     attestation: Option<crate::fido_attestation::Identity>,
+    u2f_wrapping_key: Option<Zeroizing<Vec<u8>>>,
+    u2f_counter: u32,
+    pub(super) u2f_enabled: bool,
+    reset_deadline: Option<std::time::Instant>,
     pin: Option<Zeroizing<Vec<u8>>>,
     pin_retries: u8,
     consecutive_pin_failures: u8,
@@ -233,6 +238,10 @@ impl FidoState {
         Self {
             device_identifier,
             attestation: None,
+            u2f_wrapping_key: None,
+            u2f_counter: 0,
+            u2f_enabled: true,
+            reset_deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(10)),
             pin: configuration.initial_pin.map(Zeroizing::new),
             pin_retries: PIN_RETRIES,
             consecutive_pin_failures: 0,
@@ -268,6 +277,7 @@ impl FidoState {
     pub(crate) fn power_cycle(&mut self) {
         self.reset_connection();
         self.consecutive_pin_failures = 0;
+        self.reset_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
     }
 
     fn pin_block_status(&self) -> Option<u8> {
@@ -342,7 +352,7 @@ impl FidoState {
         let mut output = Vec::new();
         let mut encoder = Encoder::new(&mut output);
         encoder
-            .map(8)
+            .map(10)
             .map_err(|_| "cannot encode persistent FIDO state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent FIDO state")?
@@ -459,6 +469,15 @@ impl FidoState {
                 .array(0)
                 .map_err(|_| "cannot encode FIDO attestation")?;
         }
+        encoder
+            .u8(9)
+            .map_err(|_| "cannot encode U2F wrapping key")?
+            .bytes(self.u2f_wrapping_key.as_deref().map_or(&[], Vec::as_slice))
+            .map_err(|_| "cannot encode U2F wrapping key")?
+            .u8(10)
+            .map_err(|_| "cannot encode U2F counter")?
+            .u32(self.u2f_counter)
+            .map_err(|_| "cannot encode U2F counter")?;
         Ok(output)
     }
 
@@ -480,6 +499,8 @@ impl FidoState {
         let mut persistent_token = None;
         let mut persistent_token_granted = None;
         let mut attestation = None;
+        let mut wrapping_key = None;
+        let mut u2f_counter = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -557,6 +578,18 @@ impl FidoState {
                         },
                     );
                 }
+                9 if wrapping_key.is_none() => {
+                    wrapping_key = Some(Zeroizing::new(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid U2F wrapping key")?
+                            .to_vec(),
+                    ));
+                }
+                10 if u2f_counter.is_none() => {
+                    u2f_counter = Some(decoder.u32().map_err(|_| "invalid U2F counter")?);
+                }
+                9 | 10 => return Err("duplicate persistent U2F field"),
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent FIDO state contains invalid data")?,
@@ -565,7 +598,7 @@ impl FidoState {
         if decoder.position() != encoded.len() {
             return Err("persistent FIDO state has trailing data");
         }
-        if !matches!(version, Some(2 | 3 | 4 | PERSISTENT_STATE_VERSION)) {
+        if !matches!(version, Some(2 | 3 | 4 | 5 | PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent FIDO state version");
         }
         if identifier.as_deref() != Some(expected_identifier.as_slice()) {
@@ -599,7 +632,7 @@ impl FidoState {
         if state.pin_retries > PIN_RETRIES {
             return Err("persistent FIDO state has invalid PIN retries");
         }
-        if matches!(version, Some(4 | PERSISTENT_STATE_VERSION)) {
+        if matches!(version, Some(4 | 5 | PERSISTENT_STATE_VERSION)) {
             let token = persistent_token.ok_or("missing persistent PIN token")?;
             if token.len() != 32 {
                 return Err("invalid persistent PIN token length");
@@ -608,8 +641,20 @@ impl FidoState {
             state.persistent_token_granted =
                 persistent_token_granted.ok_or("missing persistent PIN permission")?;
         }
-        if version == Some(PERSISTENT_STATE_VERSION) {
+        if matches!(version, Some(5 | PERSISTENT_STATE_VERSION)) {
             state.attestation = attestation.ok_or("missing FIDO attestation identity")?;
+        }
+        if version == Some(PERSISTENT_STATE_VERSION) {
+            let key = wrapping_key.ok_or("missing U2F wrapping key")?;
+            state.u2f_wrapping_key = match key.len() {
+                0 => None,
+                32 => Some(key),
+                _ => return Err("invalid U2F wrapping key length"),
+            };
+            state.u2f_counter = u2f_counter.ok_or("missing U2F counter")?;
+            if state.u2f_counter != 0 && state.u2f_wrapping_key.is_none() {
+                return Err("U2F counter has no wrapping key");
+            }
         }
         state.credentials = credentials;
         Ok(state)
@@ -774,6 +819,7 @@ fn exchange_inner(state: &mut FidoState, request: &[u8]) -> Result<Vec<u8>, Erro
     match command {
         AUTHENTICATOR_GET_INFO if payload.is_empty() => authenticator_get_info(state),
         AUTHENTICATOR_CLIENT_PIN => authenticator_client_pin(state, payload),
+        0x07 if payload.is_empty() => authenticator_reset(state),
         AUTHENTICATOR_MAKE_CREDENTIAL => authenticator_make_credential(state, payload),
         AUTHENTICATOR_GET_ASSERTION => authenticator_get_assertion(state, payload),
         AUTHENTICATOR_GET_NEXT_ASSERTION if payload.is_empty() => {
@@ -783,6 +829,30 @@ fn exchange_inner(state: &mut FidoState, request: &[u8]) -> Result<Vec<u8>, Erro
         AUTHENTICATOR_SELECTION if payload.is_empty() => Ok(vec![CTAP2_OK]),
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
+}
+
+fn authenticator_reset(state: &mut FidoState) -> Result<Vec<u8>, Error> {
+    if !state
+        .reset_deadline
+        .is_some_and(|deadline| std::time::Instant::now() <= deadline)
+    {
+        return Ok(vec![0x30]); // CTAP2_ERR_NOT_ALLOWED
+    }
+    // Prepare fresh material before invalidating any existing credential.
+    let mut token = Zeroizing::new(vec![0; 32]);
+    getrandom::fill(&mut token).map_err(|_| Error)?;
+    state.reset_connection();
+    state.pin = None;
+    state.pin_retries = PIN_RETRIES;
+    state.consecutive_pin_failures = 0;
+    state.persistent_pin_uv_auth_token = token;
+    state.persistent_token_granted = false;
+    state.credentials.clear();
+    state.u2f_wrapping_key = None;
+    state.u2f_counter = 0;
+    state.reset_deadline = None;
+    state.persistent_change = true;
+    Ok(vec![CTAP2_OK])
 }
 
 #[derive(Default)]
@@ -1753,7 +1823,7 @@ fn authenticator_make_credential(state: &mut FidoState, payload: &[u8]) -> Resul
     if request.credential_ids.iter().any(|credential_id| {
         state.credentials.iter().any(|credential| {
             credential.credential_id == *credential_id && credential.rp_id == rp_id
-        })
+        }) || u2f::unwrap(state, credential_id, &sha256(rp_id.as_bytes())).is_some()
     }) {
         return Ok(vec![CTAP2_ERR_CREDENTIAL_EXCLUDED]);
     }
@@ -1940,6 +2010,15 @@ fn authenticator_get_assertion(state: &mut FidoState, payload: &[u8]) -> Result<
         .map(|(index, _)| index)
         .collect();
     let Some(&index) = candidates.first() else {
+        if !request.preview_requested && request.signing_key_handle.is_none() {
+            for handle in &request.credential_ids {
+                if let Some(response) =
+                    u2f::assertion(state, handle, rp_id, client_data_hash, user_verified)?
+                {
+                    return Ok(response);
+                }
+            }
+        }
         return Ok(vec![CTAP2_ERR_NO_CREDENTIALS]);
     };
     state.reset_connection();
@@ -2118,8 +2197,14 @@ fn authenticator_get_info(state: &FidoState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .array(2)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .array(if state.u2f_enabled { 3 } else { 2 })
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    if state.u2f_enabled {
+        encoder
+            .str("U2F_V2")
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    }
+    encoder
         .str("FIDO_2_0")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("FIDO_2_1")
@@ -3268,7 +3353,7 @@ mod tests {
             }
         }
 
-        assert_eq!(versions, ["FIDO_2_0", "FIDO_2_1"]);
+        assert_eq!(versions, ["U2F_V2", "FIDO_2_0", "FIDO_2_1"]);
         assert_eq!(
             options,
             [

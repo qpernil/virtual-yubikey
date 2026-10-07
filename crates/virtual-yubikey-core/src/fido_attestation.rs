@@ -98,15 +98,17 @@ impl Identity {
             certificate: certificate.to_vec(),
         })
     }
+    pub(crate) fn sign(&self, message: &[u8]) -> Result<Vec<u8>, ()> {
+        self.key
+            .sign_message(EcCurve::P256.signature_scheme(), message)
+            .map_err(|_| ())?
+            .to_ecdsa_der(EcCurve::P256)
+            .map_err(|_| ())
+    }
     pub(crate) fn statement(&self, auth_data: &[u8], client_hash: &[u8]) -> Result<Vec<u8>, ()> {
         let mut message = auth_data.to_vec();
         message.extend_from_slice(client_hash);
-        let signature = self
-            .key
-            .sign_message(EcCurve::P256.signature_scheme(), &message)
-            .map_err(|_| ())?
-            .to_ecdsa_der(EcCurve::P256)
-            .map_err(|_| ())?;
+        let signature = self.sign(&message)?;
         let mut result = Vec::new();
         Encoder::new(&mut result)
             .map(3)

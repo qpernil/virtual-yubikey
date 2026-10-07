@@ -45,7 +45,7 @@ const TIME_EXTENSION_DELAY: Duration = Duration::from_millis(500);
 const TIME_EXTENSION_INTERVAL: Duration = Duration::from_millis(500);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-type FidoHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + Send + 'a;
+type FidoHandler<'a> = dyn FnMut(virtual_yubikey_core::FidoProtocol, &[u8]) -> Vec<u8> + Send + 'a;
 
 pub(crate) struct Device {
     active: bool,
@@ -913,7 +913,11 @@ mod tests {
         ]
         .concat();
         let mut requests = Vec::new();
-        let mut handler = |request: &[u8]| {
+        let mut handler = |protocol, request: &[u8]| {
+            assert!(matches!(
+                protocol,
+                virtual_yubikey_core::FidoProtocol::Ctap2
+            ));
             requests.push(request.to_vec());
             vec![0x2e]
         };

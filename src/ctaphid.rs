@@ -26,7 +26,6 @@ const ERR_CHANNEL_BUSY: u8 = 0x06;
 const ERR_INVALID_CHANNEL: u8 = 0x0b;
 
 const CAPABILITY_CBOR: u8 = 0x04;
-const CAPABILITY_NMSG: u8 = 0x08;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeepaliveStatus {
@@ -64,14 +63,14 @@ impl Device {
     pub(crate) fn receive<F>(
         &mut self,
         report: &[u8; REPORT_SIZE],
-        mut exchange_cbor: F,
+        mut exchange_fido: F,
     ) -> Vec<[u8; REPORT_SIZE]>
     where
-        F: FnMut(&[u8]) -> Vec<u8>,
+        F: FnMut(virtual_yubikey_core::FidoProtocol, &[u8]) -> Vec<u8>,
     {
         let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
         if report[4] & 0x80 != 0 {
-            return self.receive_initial(channel, report, exchange_cbor);
+            return self.receive_initial(channel, report, exchange_fido);
         }
 
         let Some(transaction) = self.transaction.as_mut() else {
@@ -96,7 +95,7 @@ impl Device {
             complete.channel,
             complete.command,
             &complete.payload,
-            &mut exchange_cbor,
+            &mut exchange_fido,
         )
     }
 
@@ -104,10 +103,10 @@ impl Device {
         &mut self,
         channel: u32,
         report: &[u8; REPORT_SIZE],
-        mut exchange_cbor: F,
+        mut exchange_fido: F,
     ) -> Vec<[u8; REPORT_SIZE]>
     where
-        F: FnMut(&[u8]) -> Vec<u8>,
+        F: FnMut(virtual_yubikey_core::FidoProtocol, &[u8]) -> Vec<u8>,
     {
         let command = report[4] & 0x7f;
         let length = usize::from(u16::from_be_bytes([report[5], report[6]]));
@@ -124,7 +123,7 @@ impl Device {
         let mut payload = Vec::with_capacity(length);
         payload.extend_from_slice(&report[7..7 + length.min(INIT_DATA_SIZE)]);
         if payload.len() == length {
-            return self.execute(channel, command, &payload, &mut exchange_cbor);
+            return self.execute(channel, command, &payload, &mut exchange_fido);
         }
 
         self.transaction = Some(Transaction {
@@ -142,10 +141,10 @@ impl Device {
         channel: u32,
         command: u8,
         payload: &[u8],
-        exchange_cbor: &mut F,
+        exchange_fido: &mut F,
     ) -> Vec<[u8; REPORT_SIZE]>
     where
-        F: FnMut(&[u8]) -> Vec<u8>,
+        F: FnMut(virtual_yubikey_core::FidoProtocol, &[u8]) -> Vec<u8>,
     {
         if command == CMD_INIT {
             if payload.len() != 8 {
@@ -163,7 +162,7 @@ impl Device {
             response.extend_from_slice(&assigned.to_be_bytes());
             response.push(2); // CTAPHID protocol version
             response.extend_from_slice(&self.profile.firmware);
-            response.push(CAPABILITY_CBOR | CAPABILITY_NMSG);
+            response.push(CAPABILITY_CBOR);
             return encode_message(channel, CMD_INIT, &response);
         }
 
@@ -173,7 +172,16 @@ impl Device {
 
         match command {
             CMD_PING => encode_message(channel, CMD_PING, payload),
-            CMD_CBOR => encode_message(channel, CMD_CBOR, &exchange_cbor(payload)),
+            CMD_CBOR => encode_message(
+                channel,
+                CMD_CBOR,
+                &exchange_fido(virtual_yubikey_core::FidoProtocol::Ctap2, payload),
+            ),
+            CMD_MSG => encode_message(
+                channel,
+                CMD_MSG,
+                &exchange_fido(virtual_yubikey_core::FidoProtocol::U2f, payload),
+            ),
             CMD_YUBIKEY_READ_CONFIG if payload.len() == 1 => {
                 match self.profile.management_device_info(payload[0]) {
                     Some(config) => encode_message(channel, CMD_YUBIKEY_READ_CONFIG, &config),
@@ -183,7 +191,6 @@ impl Device {
             CMD_YUBIKEY_READ_CONFIG => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
             CMD_CANCEL if payload.is_empty() => Vec::new(),
             CMD_CANCEL => encode_message(channel, CMD_ERROR, &[ERR_INVALID_LEN]),
-            CMD_MSG => encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD]),
             _ => encode_message(channel, CMD_ERROR, &[ERR_INVALID_CMD]),
         }
     }
@@ -260,12 +267,12 @@ mod tests {
         let mut device = device();
         let response = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, &nonce),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         assert_eq!(response.len(), 1);
         assert_eq!(&response[0][0..7], &[0xff, 0xff, 0xff, 0xff, 0x86, 0, 17]);
         assert_eq!(&response[0][7..15], &nonce);
-        assert_eq!(&response[0][19..24], &[2, 5, 8, 0, 0x0c]);
+        assert_eq!(&response[0][19..24], &[2, 5, 8, 0, 0x04]);
         assert_ne!(assigned_channel(&response), 0);
     }
 
@@ -274,10 +281,10 @@ mod tests {
         let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         let channel = assigned_channel(&init);
-        let response = device.receive(&initial(channel, CMD_CBOR, &[4]), |request| {
+        let response = device.receive(&initial(channel, CMD_CBOR, &[4]), |_, request| {
             assert_eq!(request, &[4]);
             vec![0x55; 120]
         });
@@ -293,11 +300,11 @@ mod tests {
         let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         let channel = assigned_channel(&init);
         let payload: Vec<u8> = (0..4_700).map(|index| index as u8).collect();
-        let response = device.receive(&initial(channel, CMD_CBOR, &[2]), |_| payload.clone());
+        let response = device.receive(&initial(channel, CMD_CBOR, &[2]), |_, _| payload.clone());
 
         assert_eq!(response.len(), 80);
         assert_eq!(&response[0][0..7], &[0, 0, 0, 1, 0x90, 0x12, 0x5c]);
@@ -320,13 +327,17 @@ mod tests {
         let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         let channel = assigned_channel(&init);
         let request = vec![0x42; 100];
         let reports = encode_message(channel, CMD_CBOR, &request);
-        assert!(device.receive(&reports[0], |_| unreachable!()).is_empty());
-        let response = device.receive(&reports[1], |payload| {
+        assert!(
+            device
+                .receive(&reports[0], |_, _| unreachable!())
+                .is_empty()
+        );
+        let response = device.receive(&reports[1], |_, payload| {
             assert_eq!(payload, request);
             vec![0]
         });
@@ -337,7 +348,7 @@ mod tests {
     #[test]
     fn rejects_commands_on_unallocated_channels() {
         let mut device = device();
-        let response = device.receive(&initial(7, CMD_CBOR, &[4]), |_| unreachable!());
+        let response = device.receive(&initial(7, CMD_CBOR, &[4]), |_, _| unreachable!());
         assert_eq!(response[0][4], 0xbf);
         assert_eq!(response[0][7], ERR_INVALID_CHANNEL);
     }
@@ -347,12 +358,12 @@ mod tests {
         let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         let channel = assigned_channel(&init);
         let response = device.receive(
             &initial(channel, CMD_YUBIKEY_READ_CONFIG, &[0]),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         assert_eq!(response[0][4], 0xc2);
         assert_eq!(response[0][7], 25);
@@ -382,14 +393,205 @@ mod tests {
         let mut device = device();
         let init = device.receive(
             &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
-            |_| unreachable!(),
+            |_, _| unreachable!(),
         );
         let channel = assigned_channel(&init);
 
-        let cancelled = device.receive(&initial(channel, CMD_CBOR, &[4]), |_| vec![0x2d]);
+        let cancelled = device.receive(&initial(channel, CMD_CBOR, &[4]), |_, _| vec![0x2d]);
         assert_eq!(&cancelled[0][..8], &[0, 0, 0, 1, 0x90, 0, 1, 0x2d]);
 
-        let cancel_command = device.receive(&initial(channel, CMD_CANCEL, &[]), |_| unreachable!());
+        let cancel_command =
+            device.receive(&initial(channel, CMD_CANCEL, &[]), |_, _| unreachable!());
         assert!(cancel_command.is_empty());
+    }
+    fn payload(reports: &[[u8; REPORT_SIZE]]) -> Vec<u8> {
+        let length = usize::from(u16::from_be_bytes([reports[0][5], reports[0][6]]));
+        let mut data = reports[0][7..].to_vec();
+        for report in &reports[1..] {
+            data.extend_from_slice(&report[5..]);
+        }
+        data.truncate(length);
+        data
+    }
+
+    fn u2f_request(ins: u8, p1: u8, data: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0, ins, p1, 0, 0];
+        if !data.is_empty() {
+            raw.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            raw.extend_from_slice(data);
+        }
+        raw.extend_from_slice(&[0, 0]);
+        raw
+    }
+
+    fn exchange_runtime(
+        fido: &mut virtual_yubikey_core::FidoAuthenticator,
+        protocol: virtual_yubikey_core::FidoProtocol,
+        request: &[u8],
+        granted: bool,
+    ) -> Vec<u8> {
+        use virtual_yubikey_core::{ApduExchange, FidoProtocol, PresenceAuthorization};
+        match protocol {
+            FidoProtocol::Ctap2 => fido.exchange_with_presence(
+                request,
+                if granted {
+                    PresenceAuthorization::Granted
+                } else {
+                    PresenceAuthorization::Absent
+                },
+            ),
+            FidoProtocol::U2f => match fido.exchange_u2f(
+                request,
+                if granted {
+                    PresenceAuthorization::Granted
+                } else {
+                    PresenceAuthorization::Absent
+                },
+            ) {
+                ApduExchange::Complete(response) => response,
+                ApduExchange::PresenceRequired(_) => vec![0x69, 0x85],
+            },
+        }
+    }
+
+    fn hid_call(
+        device: &mut Device,
+        channel: u32,
+        command: u8,
+        request: &[u8],
+        fido: &mut virtual_yubikey_core::FidoAuthenticator,
+        granted: bool,
+    ) -> Vec<u8> {
+        let reports = encode_message(channel, command, request);
+        let mut replies = Vec::new();
+        for report in &reports {
+            let result = device.receive(report, |protocol, request| {
+                exchange_runtime(fido, protocol, request, granted)
+            });
+            if !result.is_empty() {
+                replies = result;
+            }
+        }
+        assert_eq!(replies[0][4], command | 0x80);
+        payload(&replies)
+    }
+
+    #[test]
+    fn u2f_hid_and_ccid_share_handles_identity_and_counter() {
+        use virtual_yubikey_core::{FIDO2_AID, FidoAuthenticator};
+        let mut device = device();
+        let init = device.receive(
+            &initial(BROADCAST_CHANNEL, CMD_INIT, b"abcdefgh"),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(init[0][23] & 8, 0); // MSG is supported.
+        let channel = assigned_channel(&init);
+        let mut fido = FidoAuthenticator::new();
+        assert_eq!(
+            hid_call(
+                &mut device,
+                channel,
+                CMD_MSG,
+                &[0, 3, 0, 0, 0, 0, 0],
+                &mut fido,
+                false
+            ),
+            b"U2F_V2\x90\x00"
+        );
+        let registration_data = [0x51; 64];
+        let register = u2f_request(1, 0, &registration_data);
+        assert_eq!(
+            hid_call(&mut device, channel, CMD_MSG, &register, &mut fido, false),
+            [0x69, 0x85]
+        );
+        let registration = hid_call(&mut device, channel, CMD_MSG, &register, &mut fido, true);
+        assert_eq!(&registration[registration.len() - 2..], &[0x90, 0]);
+        assert_eq!(registration[66], 64);
+        let handle = &registration[67..131];
+        let auth_data = [registration_data.as_slice(), &[64], handle].concat();
+        let auth = u2f_request(2, 3, &auth_data);
+        let hid_auth = hid_call(&mut device, channel, CMD_MSG, &auth, &mut fido, true);
+        assert_eq!(&hid_auth[..5], &[1, 0, 0, 0, 1]);
+
+        let mut card = crate::smartcard::Card::new(1);
+        let select = [vec![0, 0xa4, 4, 0, 8], FIDO2_AID.to_vec()].concat();
+        assert_eq!(card.transmit(&select), b"U2F_V2\x90\x00");
+        let ccid_auth = card
+            .transmit_with_presence_and_fido(&auth, || Ok(false), &mut |protocol, request| {
+                exchange_runtime(&mut fido, protocol, request, true)
+            })
+            .unwrap();
+        assert_eq!(&ccid_auth[..5], &[1, 0, 0, 0, 2]);
+        assert_eq!(&ccid_auth[ccid_auth.len() - 2..], &[0x90, 0]);
+        let verify = p256::ecdsa::VerifyingKey::from_sec1_bytes(&registration[1..66]).unwrap();
+        for response in [hid_auth, ccid_auth] {
+            let message = [
+                &registration_data[32..],
+                &response[..5],
+                &registration_data[..32],
+            ]
+            .concat();
+            use signature::Verifier;
+            verify
+                .verify(
+                    &message,
+                    &p256::ecdsa::Signature::from_der(&response[5..response.len() - 2]).unwrap(),
+                )
+                .unwrap();
+        }
+        let info = hid_call(&mut device, channel, CMD_CBOR, &[4], &mut fido, false);
+        assert_eq!(info[0], 0);
+        assert!(info.windows(6).any(|bytes| bytes == b"U2F_V2"));
+        let check = u2f_request(2, 7, &auth_data);
+        assert_eq!(
+            hid_call(&mut device, channel, CMD_MSG, &check, &mut fido, false),
+            [0x69, 0x85]
+        );
+        let malformed = hid_call(&mut device, channel, CMD_MSG, &[0, 1, 0], &mut fido, true);
+        assert_eq!(malformed, [0x67, 0]);
+    }
+
+    #[test]
+    fn embedded_ccid_u2f_obtains_fresh_presence_and_chains_short_registration_response() {
+        let mut card = crate::smartcard::Card::new(1);
+        let select = [
+            vec![0, 0xa4, 4, 0, 8],
+            virtual_yubikey_core::FIDO2_AID.to_vec(),
+        ]
+        .concat();
+        card.transmit(&select);
+        assert_eq!(
+            card.transmit(&[0, 3, 0, 0, 0, 0, 0, 0, 0]),
+            b"U2F_V2\x90\x00"
+        );
+        let mut register = vec![0, 1, 0, 0, 64];
+        register.extend_from_slice(&[0x35; 64]);
+        register.push(32); // Exercise ISO response chaining on a short APDU.
+        assert_eq!(card.transmit(&register), [0x69, 0x85]);
+        let first = card.transmit_with_presence(&register, || Ok(true)).unwrap();
+        assert_eq!(first.len(), 34);
+        assert_eq!(first[first.len() - 2], 0x61);
+        let mut all = first[..first.len() - 2].to_vec();
+        loop {
+            let next = card.transmit(&[0, 0xc0, 0, 0, 0]);
+            all.extend_from_slice(&next[..next.len() - 2]);
+            if next[next.len() - 2..] == [0x90, 0] {
+                break;
+            }
+        }
+        assert_eq!(all[0], 5);
+        assert_eq!(all[66], 64);
+        let auth_data = [vec![0x35; 64], vec![64], all[67..131].to_vec()].concat();
+        let auth = u2f_request(2, 3, &auth_data);
+        assert_eq!(card.transmit(&auth), [0x69, 0x85]);
+        let signed = card.transmit_with_presence(&auth, || Ok(true)).unwrap();
+        assert_eq!(&signed[..5], [1, 0, 0, 0, 1]);
+        let reset = [0x80, 0x10, 0, 0, 1, 7, 0];
+        assert_eq!(card.transmit(&reset), [0x69, 0x85]);
+        assert_eq!(
+            card.transmit_with_presence(&reset, || Ok(true)).unwrap(),
+            [0, 0x90, 0]
+        );
+        assert_eq!(card.transmit(&u2f_request(2, 7, &auth_data)), [0x6a, 0x80]);
     }
 }

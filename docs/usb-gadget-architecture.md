@@ -406,11 +406,12 @@ This middleware provides discovery, reader naming, card insertion state,
 transactions, and multi-application arbitration. The Pi looks like a CCID
 reader containing one permanently inserted smart card.
 
-The FIDO2 AID routes CTAP CBOR APDUs to the same persistent authenticator used by
+The shared FIDO AID routes U2F APDUs and CTAP2 CBOR APDUs to the same persistent authenticator used by
 the HID interface. One worker-wide operation lock covers touch authorization,
 command execution, and mutation recording. If one transport already owns a FIDO
-operation, a request arriving through the other receives the CTAP channel-busy
-status. A single touch therefore cannot authorize concurrent HID and CCID
+operation, a request arriving through the other receives the CTAP2 channel-busy
+status or U2F `6985`. U2F uses HID `MSG` and has no separate interface or AID;
+see [U2F](u2f.md). A single touch therefore cannot authorize concurrent HID and CCID
 operations, and PIN counters, operation tokens, and resident credentials have
 one serialization order. CCID uses ordinary time-extension frames while its
 FIDO operation or touch wait is pending.

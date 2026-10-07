@@ -12,7 +12,7 @@ For serial `12345678`, every host uses these files in its selected directory:
 
 | File | Durable state |
 | --- | --- |
-| `fido-12345678.cbor` | Credentials, PIN state, retry policy and attestation identity |
+| `fido-12345678.cbor` | CTAP2 credentials, U2F wrapping key and global counter, PIN state, retry policy and attestation identity |
 | `piv-12345678.cbor` | Keys, objects, PIN/PUK policy and attestation identity |
 | `openpgp-12345678.cbor` | Keys, certificates, PIN verifiers, counters, metadata and lifecycle |
 | `hsmauth-12345678.cbor` | HSM Auth credentials and management policy |
@@ -55,8 +55,8 @@ operations. These runtime ownership choices do not change the stored records.
 The writer takes runtime locks only to encode requested applet snapshots.
 Commands release runtime state locks before waiting for receipts or flushing,
 including FIDO PIN operations routed through CCID. Long-running commands can
-delay snapshots. FIDO PIN changes and retry mutations are flushed before their
-response; embedded hosts conservatively flush all FIDO mutations.
+delay snapshots. FIDO signature counters, PIN changes/retries, reset, and U2F wrapping-key
+mutations are flushed before their response; embedded hosts conservatively flush all FIDO mutations.
 
 Hosts flush on quiesce/ejection and join the writer on shutdown. Storage contains
 unencrypted virtual private keys and applet credential state; directory access
