@@ -384,7 +384,11 @@ impl SecureChannel {
         // SD commands use all P1 bits (STORE DATA uses 0x90; PUT KEY carries
         // the replacement KVN). Their transport fragmentation is ISO CLA
         // chaining, assembled before this layer, not the legacy P1 convention.
-        if matches!(command.ins, 0xf1 | 0xd8 | 0xe2 | 0xe4 | 0xca) {
+        // CTAP's NFCCTAP_MSG uses P1.b8 to advertise keepalive polling.
+        // Preserve it as applet data, rather than treating it as a fragment.
+        if matches!(command.ins, 0xf1 | 0xd8 | 0xe2 | 0xe4 | 0xca)
+            || (command.cla & !0x0c == 0x80 && matches!(command.ins, 0x10 | 0x11))
+        {
             self.chained_protected = None;
             return Some(OwnedCommandApdu::from_command(command));
         }
@@ -743,7 +747,14 @@ mod tests {
             (
                 &FIDO2_AID,
                 Applet::Fido2,
-                HostCommand::short(0x10, 0, &[0x04], 0),
+                HostCommand {
+                    cla: 0x80,
+                    ins: 0x10,
+                    p1: 0x80,
+                    p2: 0,
+                    data: &[0x04],
+                    le: Some(0),
+                },
             ),
             (
                 &ISSUER_SECURITY_DOMAIN_AID,
