@@ -154,6 +154,40 @@ poll latencies, not a device-side deadline for the entire user interaction. A ph
 the registration, authentication, and negative-control baseline over both HID
 and CCID with physical touches. These checks do not constitute FIDO certification.
 
+### Browser polling and indication
+
+Use the checked-in [browser fixture and manual procedure](fido-browser-test.md)
+to repeat these checks and separately qualify CTAP2.
+
+Chrome 155.0.8059.40 on macOS 27.0.1 successfully creates and authenticates a
+non-discoverable ES256 credential on the Ubuntu3 USB gadget using WebAuthn at
+`localhost`. FIDO2 is disabled during U2F qualification and both protocols are
+restored afterward. Payload-free worker diagnostics identify REGISTER and
+AUTHENTICATE with control byte `03` and measure the following medians:
+
+| Request | Arrival interval | Untouched response latency |
+| --- | --- | --- |
+| REGISTER | 212 ms | 33–34 µs |
+| AUTHENTICATE | 216 ms | 166 µs |
+
+These intervals describe this browser/OS stack. The worker adds no touch wait to
+the retry loop. During an untouched registration, 326 polls keep one continuous
+384 ms on / 384 ms off indication. Cancelling the native browser dialog ends
+polling; the indication expires 768 ms after the final response. The requested
+WebAuthn timeout of 30 seconds does not end that native U2F interaction: polling
+continues for approximately 69 seconds until the dialog is explicitly cancelled.
+
+Physical joystick touches complete both registration and authentication and
+clear the indication on success. The browser reports a 64-byte credential ID.
+The user confirms a steady blink followed by a stop. These browser checks verify
+interoperation and physical presence; independent signature verification is
+covered by the client and core tests described above.
+
+A non-discoverable WebAuthn request with user verification discouraged can also
+use U2F while both protocols are enabled. To qualify CTAP2 separately, disable
+U2F temporarily and confirm CBOR commands in the worker diagnostics; do not infer
+the protocol from the page title or API name.
+
 References:
 
 - [U2F raw message formats](https://fidoalliance.org/specs/fido-u2f-v1.2-ps-20170411/fido-u2f-raw-message-formats-v1.2-ps-20170411.html)

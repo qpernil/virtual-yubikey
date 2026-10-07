@@ -224,6 +224,27 @@ measured approximately 28.5 seconds for HID and CCID FIDO2 creation and selectio
 without touch; creation returned `OPERATION_DENIED`, while selection returned
 `USER_ACTION_TIMEOUT`.
 
+### Browser touch qualification
+
+The reusable [browser test and manual checks](docs/fido-browser-test.md) run
+with `python3 scripts/fido-browser-test.py` on the USB-connected browser host.
+
+Chrome 155.0.8059.40 on macOS 27.0.1 completes WebAuthn ES256 credential creation
+and authentication on the Ubuntu3 USB gadget with physical joystick touches.
+U2F and CTAP2 are qualified independently by temporarily disabling the other
+protocol through Management; the original configuration with both enabled is
+restored afterward. See [U2F browser polling measurements](docs/u2f.md#browser-polling-and-indication)
+for the immediate-response path and indication expiry.
+
+For CTAP2, native PIN entry succeeds before MakeCredential. An untouched request
+waits 30.007 seconds and returns `USER_ACTION_TIMEOUT`; the user observes the
+same steady 384 ms on / 384 ms off indication, followed by a stop. Physical touch
+completes MakeCredential and GetAssertion with status `00`, and the browser
+reports a 32-byte credential ID. Cancelling the native dialog during a separate
+GetAssertion ends the pending wait with `KEEPALIVE_CANCEL` (`2D`). These checks
+verify browser interoperation and touch handling, with independent cryptographic
+verification covered by the core and host-client tests.
+
 ## FIDO PIN handling
 
 Client PIN protocols 1 and 2 enforce an eight-attempt persistent retry counter.

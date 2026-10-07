@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local FIDO browser test</title>
+  <style>
+    body { font: 18px system-ui; max-width: 800px; margin: 48px auto; padding: 0 20px; }
+    button, select { font: inherit; padding: 10px; margin: 6px 6px 6px 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #eee; color: #111; }
+    a { color: inherit; }
+  </style>
+  <script src="/test.js" defer></script>
+</head>
+<body>
+  <h1>Local FIDO browser test</h1>
+  <p>Create and authenticate a non-discoverable ES256 credential for localhost.
+    The returned credential selection stays in this page's memory; reload clears it.</p>
+  <label for="protocol">Protocol to qualify:</label>
+  <select id="protocol">
+    <option value="u2f">FIDO U2F</option>
+    <option value="fido2">FIDO2 / CTAP2</option>
+  </select>
+  <p id="instructions"></p>
+  <p>The selection above changes the instructions. Configure the authenticator
+    separately and confirm the protocol in its diagnostics. User verification is
+    discouraged; the authenticator can still require its PIN. Enter an existing
+    PIN only in the browser's native dialog.</p>
+  <p>Press the joystick centre for a successful touch check. Leave it untouched
+    for a timeout check. Use the native dialog's Cancel button to test browser
+    cancellation, or this page's Cancel button to abort through WebAuthn.</p>
+  <button id="create" disabled>Create credential — 30 second timeout</button>
+  <button id="authenticate" disabled>Authenticate — 30 second timeout</button>
+  <button id="cancel" disabled>Cancel</button>
+  <pre id="result" role="log" aria-live="polite">Loading…</pre>
+  <p>Restore the original USB application configuration after testing.
+    See <a href="https://github.com/qpernil/virtual-yubikey/blob/main/docs/fido-browser-test.md">the test instructions</a>.</p>
+</body>
+</html>
