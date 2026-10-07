@@ -1334,6 +1334,60 @@ fn exchange_shared_fido(
     protocol: FidoProtocol,
     request: &[u8],
 ) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
+    // Metadata only: do not log challenges, AppIDs, handles or response payloads.
+    static TRACE_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let trace =
+        (matches!(protocol, FidoProtocol::U2f) && diagnostics::enabled(Level::Debug)).then(|| {
+            let started = Instant::now();
+            let epoch = *TRACE_EPOCH.get_or_init(|| started);
+            (
+                started,
+                started.saturating_duration_since(epoch).as_micros(),
+            )
+        });
+    let result = exchange_shared_fido_inner(fido, operations, presence, protocol, request);
+    if let Some((started, start_us)) = trace {
+        let duration_us = started.elapsed().as_micros();
+        let instruction = request.get(1).copied().unwrap_or_default();
+        let control = request.get(2).copied().unwrap_or_default();
+        match &result {
+            Ok((response, _)) => {
+                let status = response
+                    .get(response.len().saturating_sub(2)..)
+                    .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+                    .map(u16::from_be_bytes)
+                    .unwrap_or_default();
+                diagnostics::log(
+                    Level::Debug,
+                    "u2f",
+                    "poll",
+                    format_args!(
+                        "ins=0x{instruction:02x} control=0x{control:02x} start_us={start_us} duration_us={duration_us} status=0x{status:04x}"
+                    ),
+                );
+            }
+            Err(error) => diagnostics::log(
+                Level::Debug,
+                "u2f",
+                "poll_failed",
+                format_args!(
+                    "ins=0x{instruction:02x} control=0x{control:02x} start_us={start_us} duration_us={duration_us} kind={:?}",
+                    error.kind()
+                ),
+            ),
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_shared_fido_inner(
+    fido: &AppletPersistenceHandle<FidoAuthenticator>,
+    operations: &FidoOperationCoordinator,
+    presence: &crate::presence::Service,
+    protocol: FidoProtocol,
+    request: &[u8],
+) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
     let command = request.first().copied().unwrap_or_default();
     let _operation = match operations.try_begin()? {
         Some(operation) => operation,

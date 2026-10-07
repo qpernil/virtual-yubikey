@@ -36,6 +36,19 @@ HID and CCID use one operation coordinator, presence service and persistent
 FIDO state. A busy U2F runtime returns `6985`; CTAP2 uses its channel-busy status.
 Touch authorization does not authorize concurrent operations on another transport.
 
+The worker's debug-level `u2f poll` diagnostics report the APDU instruction and
+control byte,
+request-arrival offset from a process-local monotonic epoch, response latency
+(in microseconds), and returned status word. They contain no request or response
+payloads. Per-poll instrumentation is disabled at the default `info` level,
+including timestamp collection; enable it explicitly with `--log-level debug`.
+Indication lifecycle events remain at `info`. Arrival differences measure the client's observed polling interval;
+subtracting the preceding response latency gives its delay between retries.
+A browser WebAuthn test can force this path with a U2F-only USB configuration:
+disable FIDO2 through Management for the test and restore the configuration
+afterward. Credential creation must permit non-discoverable credentials and
+must not require user verification.
+
 ## Wrapped credentials
 
 U2F has no discoverable credentials or per-registration records. Each
