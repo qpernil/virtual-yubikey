@@ -187,6 +187,7 @@ pub(crate) fn run_worker(
                 storage: &storage,
                 keepalive: &keepalive,
                 display_activity: &activity,
+                touch_sensor: buttons.touch_sensor(),
                 lifecycle: Arc::clone(&lifecycle),
             },
         )?;
@@ -341,6 +342,7 @@ struct EndpointServices<'a> {
     storage: &'a WorkerStorage,
     keepalive: &'a crate::keepalive::Scheduler,
     display_activity: &'a crate::display::Activity,
+    touch_sensor: crate::buttons::TouchSensor,
     lifecycle: Arc<EndpointLifecycle>,
 }
 
@@ -479,6 +481,7 @@ impl Endpoints {
             storage,
             keepalive,
             display_activity,
+            touch_sensor,
             lifecycle,
         } = services;
         let Self {
@@ -489,8 +492,11 @@ impl Endpoints {
             mut ccid_interrupt,
         } = self;
         let (notification_tx, notification_rx) = mpsc::sync_channel(1);
-        let presence =
-            crate::presence::Service::new(storage.touch_socket.clone(), display_activity.clone());
+        let presence = crate::presence::Service::new(
+            storage.touch_socket.clone(),
+            display_activity.clone(),
+            touch_sensor,
+        );
         let fido_operations = Arc::new(FidoOperationCoordinator::default());
 
         let management_persistence = ccid.persistence.clone();
@@ -1417,19 +1423,15 @@ fn exchange_shared_fido_inner(
                 .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
             state.exchange_u2f(request, PresenceAuthorization::Absent)
         };
+        let mut touched = false;
         let response = match response {
             ApduExchange::Complete(response) => response,
             ApduExchange::PresenceRequired(_) => {
                 // CTAP1 clients poll after 6985; never send CTAP2 keepalive packets.
-                if !presence.wait_for(Duration::from_millis(500), || {
-                    Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
-                        crate::presence::WaitControl::Cancel
-                    } else {
-                        crate::presence::WaitControl::Continue
-                    })
-                })? {
+                if !presence.poll_u2f_presence()? {
                     return Ok((vec![0x69, 0x85], None));
                 }
+                touched = true;
                 let mut state = fido
                     .state()
                     .lock()
@@ -1442,6 +1444,9 @@ fn exchange_shared_fido_inner(
                 }
             }
         };
+        if touched && response.ends_with(&[0x90, 0x00]) {
+            presence.complete_u2f_presence()?;
+        }
         let mut state = fido
             .state()
             .lock()

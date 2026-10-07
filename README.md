@@ -214,8 +214,10 @@ FIDO2 touch waits have a 30-second deadline on HID and CCID. HID
 `CTAPHID_CANCEL` terminates a pending CBOR touch request immediately with
 `CTAP2_ERR_KEEPALIVE_CANCEL` (`0x2D`); expiration returns
 `CTAP2_ERR_USER_ACTION_TIMEOUT` (`0x2F`). Silent `up=false` assertions skip
-both the prompt and wait. U2F retains its separate 500 ms polling response
-and `6985` status. The FIDO2 deadline follows the
+both the prompt and wait. U2F samples the physical button once per eligible
+request and returns `6985` promptly if released. Its indication keeps the same
+blink phase across retries and expires one full 768 ms cycle after the last poll,
+or ends when a poll detects touch. The FIDO2 deadline follows the
 [CTAP user-action timeout guidance](https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html#user-action-timeout):
 at least 10 seconds, with 30 seconds suggested. A physical YubiKey 5.8.0
 measured approximately 28.5 seconds for HID and CCID FIDO2 creation and selection
@@ -442,7 +444,10 @@ While any application is blocked waiting for physical presence, the same
 cut-outs blink until touch, cancellation, or failure ends the wait. Every
 application uses the measured YubiKey 5 NFC cadence: a 384 ms half-period, or
 approximately 1.30 blinks per second. FIDO, PIV, OpenPGP, and YubiHSM Auth use one
-protocol-neutral presence service. General FIDO HID report traffic does not drive the activity
+protocol-neutral presence service. U2F keeps that cadence across its immediate
+button-state polls; the indication ends on detected presence or one full cycle
+without polling. Command activity does not interrupt a presence indication.
+General FIDO HID report traffic does not drive the activity
 indication. USB suspend and worker shutdown clear the panel and turn off its
 backlight. Holding KEY3 turns the display off and
 publishes an empty personality, leaving the worker powered but absent from USB.

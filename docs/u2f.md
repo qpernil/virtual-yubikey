@@ -23,10 +23,24 @@ The USB CCID layout matches the read-only SELECT/VERSION/GetInfo probes of a
 physical YubiKey 5.8.0. A physical 5.7.4 accepted U2F over HID but rejected the
 FIDO AID over USB CCID. The emulator has no NFC transport.
 
-Registration and authentication with control byte `03` require fresh physical
-presence. The USB worker waits up to 500 ms for a touch on each U2F request and
-returns `6985` if none arrives, allowing ordinary CTAP1 client polling. It does
-not send CTAP2 keepalive messages for U2F. Check-only (`07`) validates the handle
+REGISTER accepts P1 `00` and the P1 `03` form used by the tested Chrome/macOS
+WebAuthn client; both require physical presence. Authentication with control byte
+`03` also requires physical
+presence. Each eligible USB request samples the joystick's current pressed state
+once and returns `6985` promptly when released, allowing ordinary CTAP1 client
+polling. A held button authorizes the operation; a press and release entirely
+between polls supplies no authorization. U2F does not wait for a future touch,
+cache touch events, or use the touch-event IPC intended for blocking applet waits.
+It does not send CTAP2 keepalive messages.
+
+The first untouched presence-required poll starts the 384 ms on / 384 ms off
+indication. Further eligible polls extend its expiry without restarting the blink
+phase. It ends when a presence-authorized operation succeeds, after 768 ms without
+another eligible poll, or on USB suspend/disconnect or worker shutdown. A press
+between polls does not stop it. Command-activity flashes are suppressed during
+the indication; it does not hold an operation lock or retain authorization.
+
+Check-only (`07`) validates the handle
 and AppID and returns `6985` for a match, without signing, touching or advancing
 the counter. An invalid handle returns `6A80` before a presence request.
 Control byte `08` permits signing without presence and accurately reports the
@@ -34,7 +48,8 @@ presence bit in the signed response. U2F does not use the CTAP2 PIN or PIN token
 
 HID and CCID use one operation coordinator, presence service and persistent
 FIDO state. A busy U2F runtime returns `6985`; CTAP2 uses its channel-busy status.
-Touch authorization does not authorize concurrent operations on another transport.
+Blocking touch waits and instantaneous U2F samples share the physical-sensor lock.
+The U2F indication does not reserve the sensor between calls.
 
 The worker's debug-level `u2f poll` diagnostics report the APDU instruction and
 control byte,
@@ -130,10 +145,10 @@ no-presence controls, wrong AppIDs, and modification of every handle byte. The
 deployed gadget passes these checks over HID and CCID, shares credentials and
 counters between the transports, supports CTAP2 assertions of U2F handles, and
 preserves handles and counters across a worker restart. Other applet state is
-unchanged by the qualification. A manual joystick registration separately
-qualifies the physical presence path; automated positive cases use one event
-per request through the documented touch IPC. No-touch polling on the physical
-5.8.0 returns `6985` on both transports throughout a 40-second host loop; median
+unchanged by the qualification. USB U2F presence qualification uses the physical
+joystick: its level must be pressed during an eligible poll. The touch-event IPC
+applies to blocking applet waits and does not authorize U2F requests. No-touch
+polling on the physical 5.8.0 returns `6985` on both transports throughout a 40-second host loop; median
 response times are 5.4 ms over HID and 1.7 ms over CCID. These are individual
 poll latencies, not a device-side deadline for the entire user interaction. A physical YubiKey 5.8.0 passes
 the registration, authentication, and negative-control baseline over both HID

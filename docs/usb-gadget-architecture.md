@@ -437,7 +437,7 @@ therefore has no knowledge of the artwork, backend, or physical display power.
 The command epoch preserves a visible indication when a complete command fits
 inside a synchronous frame write. Commands coalesce into the current indication
 without extending its minimum on time or accumulating replay pulses. The USB
-command path never waits for the renderer. Activity interrupts background
+command path never waits for the renderer. Activity interrupts ordinary background
 blinking immediately and ensures at least 20 ms of off time before turning on.
 Time already spent off counts toward that minimum, so activity starts
 immediately if the LED has been dark long enough. Completed short commands
@@ -452,7 +452,13 @@ A scoped physical-presence override blinks for as long as an application is
 blocked waiting for touch. It uses the measured YubiKey 5 NFC cadence for every
 application: a 384 ms half-period, approximately 1.30 blinks per second. PIV,
 FIDO, OpenPGP and YubiHSM Auth use the same protocol-neutral presence service;
-the scheduler does not need to know which protocol requested presence. USB suspend and worker exit independently
+the scheduler does not need to know which protocol requested presence. Command
+activity is suppressed while a presence indication is active. U2F samples the
+joystick level once per eligible call and returns promptly. Its attention guard
+survives retries without resetting phase; a worker timer drops it one complete
+768 ms cycle after the last eligible poll, and a poll that detects the pressed
+button drops it immediately. The timer owns only indication state, not a FIDO
+operation lock or touch authorization. USB suspend and worker exit independently
 clear the display and turn off its backlight.
 
 The ST7789 and buttons share a HAT but not an I/O path. Display frames use SPI;
@@ -466,7 +472,9 @@ Every GPIO edge is drained immediately. A logical rising edge sends the same
 one-byte touch command as the local helper, but the destination datagram socket
 exists only for the lifetime of the current applet presence wait. Closing a
 wait destroys its socket and queued datagrams. Presses made while idle or while
-a previous request was active can therefore never approve a later operation.
+a previous request was active cannot supply an event to a later blocking wait.
+U2F uses GPIO line-value reads independently of these edge notifications: a held
+button can satisfy a U2F call, but a press released before that call cannot.
 
 PIV reports `Always` or `Cached` requirements from the transport-neutral core.
 Its applet-local presence client owns the monotonic 15-second cache. The CCID

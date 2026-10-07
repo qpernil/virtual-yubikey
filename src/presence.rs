@@ -64,18 +64,54 @@ struct Inner {
     touch_socket: PathBuf,
     display_activity: display::Activity,
     sensor: Mutex<()>,
+    touch_pressed: Box<dyn Fn() -> io::Result<bool> + Send + Sync>,
 }
 
 #[cfg(target_os = "linux")]
 impl Service {
-    pub(crate) fn new(touch_socket: PathBuf, display_activity: display::Activity) -> Self {
+    pub(crate) fn new(
+        touch_socket: PathBuf,
+        display_activity: display::Activity,
+        touch_sensor: crate::buttons::TouchSensor,
+    ) -> Self {
+        Self::with_touch_reader(touch_socket, display_activity, move || {
+            touch_sensor.is_pressed()
+        })
+    }
+
+    fn with_touch_reader(
+        touch_socket: PathBuf,
+        display_activity: display::Activity,
+        touch_pressed: impl Fn() -> io::Result<bool> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 touch_socket,
                 display_activity,
                 sensor: Mutex::new(()),
+                touch_pressed: Box::new(touch_pressed),
             }),
         }
+    }
+
+    /// Samples the physical button once; no touch event is cached between polls.
+    pub(crate) fn poll_u2f_presence(&self) -> io::Result<bool> {
+        let _sensor = match self.inner.sensor.try_lock() {
+            Ok(sensor) => sensor,
+            Err(TryLockError::WouldBlock) => return Ok(false),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(io::Error::other("presence sensor lock poisoned"));
+            }
+        };
+        let pressed = (self.inner.touch_pressed)()?;
+        if !pressed {
+            self.inner.display_activity.poll_u2f_presence()?;
+        }
+        Ok(pressed)
+    }
+
+    pub(crate) fn complete_u2f_presence(&self) -> io::Result<()> {
+        self.inner.display_activity.finish_u2f_presence()
     }
 
     pub(crate) fn wait_for(
@@ -222,6 +258,45 @@ fn with_context(error: io::Error, context: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn u2f_samples_once_per_poll_without_waiting_or_caching_touches() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let fixture = display::TestIndicator::new(|_| Ok(())).unwrap();
+        let pressed = Arc::new(AtomicBool::new(false));
+        let samples = Arc::new(AtomicUsize::new(0));
+        let input = Arc::clone(&pressed);
+        let count = Arc::clone(&samples);
+        let service = Service::with_touch_reader(
+            PathBuf::from("unused-u2f-touch.sock"),
+            fixture.activity.clone(),
+            move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(input.load(Ordering::Acquire))
+            },
+        );
+        let started = Instant::now();
+        assert!(!service.poll_u2f_presence().unwrap());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        pressed.store(true, Ordering::Release);
+        assert!(service.poll_u2f_presence().unwrap());
+        service.complete_u2f_presence().unwrap();
+        pressed.store(false, Ordering::Release);
+        assert!(!service.poll_u2f_presence().unwrap());
+        // A complete press between calls must not authorize the next call.
+        pressed.store(true, Ordering::Release);
+        pressed.store(false, Ordering::Release);
+        assert!(!service.poll_u2f_presence().unwrap());
+        assert_eq!(samples.load(Ordering::Relaxed), 4);
+        // A blocking applet owns the sensor; U2F returns immediately, without
+        // stealing its input or starting a second touch wait.
+        let _sensor = service.inner.sensor.lock().unwrap();
+        let started = Instant::now();
+        assert!(!service.poll_u2f_presence().unwrap());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(samples.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn touch_never_lingers_into_a_later_wait() {
