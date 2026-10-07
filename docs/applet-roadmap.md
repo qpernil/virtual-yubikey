@@ -118,8 +118,15 @@ validation before they can authorize the same administrative operations.
 
 ### FIDO
 
-- Qualify CTAP1 U2F registration/authentication with real host clients over HID
-  and CCID, including polling, restart and reset; see [U2F](u2f.md).
+- Preserve the qualified U2F registration/authentication and negative controls
+  over HID and CCID, shared counters, and worker-restart persistence; see
+  [U2F](u2f.md#qualification). Browser WebAuthn creation/authentication, physical
+  touch, polling and indication expiry pass for U2F. Separate FIDO2 browser runs
+  cover PIN entry, creation/authentication, touch timeout and cancellation. Use
+  the [browser fixture](fido-browser-test.md) to repeat these checks.
+- Extend live USB qualification to reset invalidation; the in-process
+  independent-client fixture covers that behavior. These results do not
+  constitute FIDO certification.
 
 - Keep registration, credential management, resident credentials, PPUAT, and
   `previewSign` covered through core, USB HID, and PKCS #11 tests.
