@@ -747,6 +747,11 @@ mod tests {
             (
                 &FIDO2_AID,
                 Applet::Fido2,
+                HostCommand::short(0x03, 0, &[], 0),
+            ),
+            (
+                &FIDO2_AID,
+                Applet::Fido2,
                 HostCommand {
                     cla: 0x80,
                     ins: 0x10,

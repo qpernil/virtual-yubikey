@@ -27,7 +27,7 @@ credential management, resident credentials, and `previewSign`.
 | Layer | Behavior |
 | --- | --- |
 | USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
-| FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, CBOR and CANCEL |
+| FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, MSG (U2F), CBOR and CANCEL |
 | CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, serial and CCID capability information |
 | PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, ML-KEM, and concrete hybrid PQ/T KEM operations |
@@ -35,12 +35,13 @@ credential management, resident credentials, and `previewSign`.
 | OpenPGP | Persistent RSA/ECC/Ed25519/X25519 keys, PIN/recovery policy, certificates, signing, decipher, touch and applet reset; see [OpenPGP](docs/openpgp.md) |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
+| FIDO U2F | REGISTER, AUTHENTICATE and VERSION over HID MSG and the shared CCID FIDO AID; authenticated wrapped handles, fresh touch, attestation and a persistent global counter; see [U2F](docs/u2f.md) |
 | FIDO2 | Shared CTAP 2.1 authenticator over HID and CCID, Client PIN protocols 1/2, a 100-slot discoverable-credential store, credential management, classical and ML-DSA assertions, and `previewSign` |
 | Persistent state | Starts with factory applet identities; credentials, private keys, PIN changes, counters, and Security Domain keys and policy are atomically stored per serial under `/var/lib/virtual-yubikey` |
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
 The implemented applets share one logical device across USB and embedded
-forms. OATH, Yubico OTP, U2F/CTAP1 commands, biometric verification, and NFC
+forms. OATH, Yubico OTP, biometric verification, and NFC
 transport are not implemented. Management supplies identity and capability
 discovery; device-configuration writes are not implemented. Applet-specific
 compatibility gaps are documented in the linked applet guides.
@@ -192,6 +193,14 @@ Factory reset requires the documented blocked-key conditions and preserves the
 other applets. See [secure messaging](docs/globalplatform-secure-messaging.md)
 for selectors, trust and authorization boundaries, and
 [Security Domain reset](#security-domain-reset) for reset conditions.
+
+## FIDO U2F
+
+U2F and CTAP2 share the FIDO HID interface and CCID AID. U2F uses `CTAPHID_MSG`
+and authenticated 64-byte wrapped handles, without per-credential storage or
+credential enumeration. Its global counter and wrapping key persist across
+restarts. CTAP2 reset invalidates all handles. See [U2F commands, presence,
+interoperability and persistence](docs/u2f.md).
 
 ## FIDO PIN handling
 
@@ -442,7 +451,9 @@ invalid existing files fail startup and are never silently replaced. One shared
 writer batches dirty applets for up to 500 ms and atomically replaces only their
 mode-`0600` files, using `software-key-core/state-persistence`. USB ejection and
 shutdown flush pending writes. `--persistence immediate` synchronizes changes
-before responses are sent; FIDO PIN changes/retries force a flush in either mode.
+before responses are sent; FIDO signature counters, PIN changes/retries, reset,
+and U2F wrapping-key creation force a flush
+in either mode.
 Runtime state locks are released before durability waits. Applet files are
 independent; a batch does not provide a transaction across multiple files.
 
@@ -452,7 +463,7 @@ The files contain unencrypted private keys and applet credential state
 (OpenPGP retains salted PIN verifiers) and are not secure hardware storage.
 See [shared storage](docs/storage.md) for ownership and host integration.
 
-FIDO persistent state uses CBOR schema version 5, PIV version 4, YubiHSM Auth
+FIDO persistent state uses CBOR schema version 6, PIV version 4, YubiHSM Auth
 version 1, Security Domain version 3, and OpenPGP version 1. All device forms
 use those same per-applet records. HID and CCID FIDO routes share one
 authenticator state and identity. Supported older per-applet images are decoded
@@ -478,7 +489,7 @@ profile supplies the worker serial and log level; its direct options are:
 Trace logging includes complete protocol payloads and may expose PINs or
 cryptographic material as the emulator grows.
 
-FIDO HID `authenticatorSelection`, `authenticatorMakeCredential`, and
+FIDO HID `authenticatorReset`, `authenticatorSelection`, `authenticatorMakeCredential`, and
 `authenticatorGetAssertion` wait for an explicit touch. Pressing the display
 HAT joystick straight down supplies that touch; directional movement does
 nothing. While waiting, the worker sends CTAPHID `KEEPALIVE(UP_NEEDED)` reports and accepts a
@@ -554,7 +565,7 @@ payloads start with a one-byte command (`T` is touch); unknown commands are
 ignored so future simulated fingerprint commands and their payloads can extend
 the protocol without replacing the socket transport.
 
-Every CTAP operation runs against a staged clone of the logical authenticator.
+CTAP2 operations other than ClientPIN run against a staged clone of the logical authenticator.
 If processing lasts 100 ms, the HID endpoint starts emitting
 `KEEPALIVE(PROCESSING)` every 100 ms until it can return the final CBOR response.
 An active-channel `CANCEL` receives no response of its own; it makes the original

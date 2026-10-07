@@ -38,7 +38,10 @@ use virtual_yubikey_core::storage::{
     AppletPersistenceHandle, DevicePersistenceHandle, DeviceStorage, PersistentApplet,
 };
 #[cfg(target_os = "linux")]
-use virtual_yubikey_core::{DeviceProfile, FidoAuthenticator, FidoConfiguration};
+use virtual_yubikey_core::{
+    ApduExchange, DeviceProfile, FidoAuthenticator, FidoConfiguration, FidoProtocol,
+    PresenceAuthorization,
+};
 
 #[cfg(target_os = "linux")]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
@@ -948,12 +951,16 @@ fn serve_ccid(
                                     })
                                 })
                             },
-                            &mut |request| {
-                                force_fido |= request.first() == Some(&0x06);
-                                match exchange_ccid_fido(
+                            &mut |protocol, request| {
+                                force_fido |= matches!(protocol, FidoProtocol::U2f)
+                                    || request.first() == Some(&0x02)
+                                    || request.first() == Some(&0x06)
+                                    || request.first() == Some(&0x07);
+                                match exchange_shared_fido(
                                     &fido,
                                     &fido_operations,
                                     &presence,
+                                    protocol,
                                     request,
                                 ) {
                                     Ok((response, mutation)) => {
@@ -978,7 +985,7 @@ fn serve_ccid(
                     };
                     // The one writer may snapshot CCID as well as FIDO. Wait or
                     // force durability only after releasing both runtime locks.
-                    if force_fido && !fido_mutations.is_empty() {
+                    if force_fido && (applet_mutation.is_some() || !fido_mutations.is_empty()) {
                         fido.flush()?;
                     }
                     if let Some(mutation) = applet_mutation {
@@ -1057,7 +1064,30 @@ fn serve_hid(
                     let mut mutation = None;
                     let mut command_error = None;
                     let channel = u32::from_be_bytes(report[0..4].try_into().unwrap());
-                    let replies = ctaphid.receive(&report, |request| {
+                    let replies = ctaphid.receive(&report, |protocol, request| {
+                        if matches!(protocol, FidoProtocol::U2f) {
+                            return match exchange_shared_fido(
+                                &fido, &operations, &presence, protocol, request,
+                            ) {
+                                Ok((response, receipt)) => {
+                                    mutation = receipt;
+                                    let flush_result = if mutation.is_some() {
+                                        fido.flush()
+                                    } else {
+                                        Ok(())
+                                    };
+                                    if let Err(error) = flush_result {
+                                        command_error = Some(error);
+                                        return vec![0x6f, 0];
+                                    }
+                                    response
+                                }
+                                Err(error) => {
+                                    command_error = Some(error);
+                                    vec![0x6f, 0]
+                                }
+                            };
+                        }
                         let command = request.first().copied().unwrap_or_default();
                         diagnostics::log(
                             Level::Info,
@@ -1118,7 +1148,7 @@ fn serve_hid(
                                 ),
                             );
                         }
-                        let response = if matches!(command, 0x01 | 0x02 | 0x0b) {
+                        let response = if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b) {
                             match wait_for_touch(&mut input, receiver, channel, &presence, &clock) {
                                 Ok(true) => match exchange_persistent_fido_with_keepalives(
                                     &fido, &mut input, receiver, request, channel, true, &clock,
@@ -1267,19 +1297,20 @@ fn exchange_persistent_fido_with_keepalives(
         .then(|| fido.record_mutation())
         .transpose()?;
     drop(state);
-    if request.first() == Some(&0x06) && mutation.is_some() {
-        // PIN retries must survive power loss after a response, including when
-        // ordinary credential writes use batched persistence.
+    if matches!(request.first(), Some(0x02 | 0x06 | 0x07)) && mutation.is_some() {
+        // Signature counters, PIN retries and reset must survive power loss after
+        // a response, including when credential writes use batched persistence.
         fido.flush()?;
     }
     Ok((response, mutation))
 }
 
 #[cfg(target_os = "linux")]
-fn exchange_ccid_fido(
+fn exchange_shared_fido(
     fido: &AppletPersistenceHandle<FidoAuthenticator>,
     operations: &FidoOperationCoordinator,
     presence: &crate::presence::Service,
+    protocol: FidoProtocol,
     request: &[u8],
 ) -> io::Result<(Vec<u8>, Option<MutationReceipt>)> {
     let command = request.first().copied().unwrap_or_default();
@@ -1290,13 +1321,64 @@ fn exchange_ccid_fido(
                 Level::Info,
                 "ctap2",
                 "request_busy",
-                format_args!("command=0x{command:02x} transport=ccid"),
+                format_args!("command=0x{command:02x} protocol={protocol:?}"),
             );
-            return Ok((vec![0x06], None));
+            return Ok((
+                if matches!(protocol, FidoProtocol::U2f) {
+                    vec![0x69, 0x85]
+                } else {
+                    vec![0x06]
+                },
+                None,
+            ));
         }
     };
 
-    if matches!(command, 0x01 | 0x02 | 0x0b)
+    if matches!(protocol, FidoProtocol::U2f) {
+        let response = {
+            let mut state = fido
+                .state()
+                .lock()
+                .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
+            state.exchange_u2f(request, PresenceAuthorization::Absent)
+        };
+        let response = match response {
+            ApduExchange::Complete(response) => response,
+            ApduExchange::PresenceRequired(_) => {
+                // CTAP1 clients poll after 6985; never send CTAP2 keepalive packets.
+                if !presence.wait_for(Duration::from_millis(500), || {
+                    Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
+                        crate::presence::WaitControl::Cancel
+                    } else {
+                        crate::presence::WaitControl::Continue
+                    })
+                })? {
+                    return Ok((vec![0x69, 0x85], None));
+                }
+                let mut state = fido
+                    .state()
+                    .lock()
+                    .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
+                match state.exchange_u2f(request, PresenceAuthorization::Granted) {
+                    ApduExchange::Complete(response) => response,
+                    ApduExchange::PresenceRequired(_) => {
+                        return Err(io::Error::other("U2F requested another touch"));
+                    }
+                }
+            }
+        };
+        let mut state = fido
+            .state()
+            .lock()
+            .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
+        let mutation = state
+            .take_persistent_change()
+            .then(|| fido.record_mutation())
+            .transpose()?;
+        return Ok((response, mutation));
+    }
+
+    if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b)
         && !presence.wait_for(CCID_TOUCH_TIMEOUT, || {
             Ok(if STOP_REQUESTED.load(Ordering::Relaxed) {
                 crate::presence::WaitControl::Cancel
@@ -1312,7 +1394,14 @@ fn exchange_ccid_fido(
         .state()
         .lock()
         .map_err(|_| io::Error::other("FIDO state lock poisoned"))?;
-    let response = state.exchange(request);
+    let response = state.exchange_with_presence(
+        request,
+        if matches!(command, 0x01 | 0x02 | 0x07 | 0x0b) {
+            PresenceAuthorization::Granted
+        } else {
+            PresenceAuthorization::Absent
+        },
+    );
     let mutation = state
         .take_persistent_change()
         .then(|| fido.record_mutation())
@@ -1350,7 +1439,14 @@ fn exchange_fido_with_keepalives(
     thread::Builder::new()
         .name("fido-command".to_owned())
         .spawn(move || {
-            let response = staged.exchange(&request);
+            let response = staged.exchange_with_presence(
+                &request,
+                if follows_user_presence {
+                    PresenceAuthorization::Granted
+                } else {
+                    PresenceAuthorization::Absent
+                },
+            );
             let _ = result_tx.send((staged, response));
         })?;
 

@@ -13,7 +13,9 @@ are independently enabled and published through the ordinary CCID slot path.
 The core currently implements:
 
 - Management identity and capability reporting;
-- FIDO registration, assertions, PIN and credential management, resident
+- U2F registration/authentication/version, wrapped handles, shared HID/CCID
+  routing and durable global counters; see [U2F](u2f.md);
+- FIDO2 registration, assertions, PIN and credential management, resident
   credentials, PPUAT, and `previewSign`;
 - PIV discovery, authentication, objects, certificates, key lifecycle, signing,
   raw RSA operations, ECDH, Ed25519, and X25519;
@@ -26,7 +28,7 @@ The core currently implements:
 - OpenPGP discovery, PIN lifecycle, persistent keys and certificates, RSA/ECC/
   Ed25519/X25519 operations, touch and factory reset.
 
-OATH, Yubico OTP, U2F/CTAP1 commands, biometric verification, and NFC transport
+OATH, Yubico OTP, biometric verification, and NFC transport
 are outside the implemented scope. Management implements identity and capability
 discovery, not device-configuration writes. Applet-specific gaps are listed below
 and in the PIV, OpenPGP, and GlobalPlatform guides.
@@ -113,6 +115,9 @@ validation before they can authorize the same administrative operations.
 ## Applet priorities
 
 ### FIDO
+
+- Qualify CTAP1 U2F registration/authentication with real host clients over HID
+  and CCID, including polling, restart and reset; see [U2F](u2f.md).
 
 - Keep registration, credential management, resident credentials, PPUAT, and
   `previewSign` covered through core, USB HID, and PKCS #11 tests.

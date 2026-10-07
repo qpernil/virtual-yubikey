@@ -237,6 +237,7 @@ const ISO7816_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
 const CAPABILITY_CCID: u16 = 0x0004;
 const CAPABILITY_FIDO2: u16 = 0x0200;
+const CAPABILITY_U2F: u16 = 0x0002;
 const CAPABILITY_OPENPGP: u16 = 0x0008;
 const CAPABILITY_PIV: u16 = 0x0010;
 const CAPABILITY_HSMAUTH: u16 = 0x0100;
@@ -313,7 +314,7 @@ impl AppletConfiguration {
         let piv = if self.piv { CAPABILITY_PIV } else { 0 };
         let hsmauth = if self.hsmauth { CAPABILITY_HSMAUTH } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | openpgp | piv | hsmauth | fido2
+        ccid | openpgp | piv | hsmauth | fido2 | if self.fido2 { CAPABILITY_U2F } else { 0 }
     }
 }
 
@@ -442,6 +443,13 @@ impl DeviceProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Runtime routing: CTAP2 responses are status || CBOR; U2F responses are data || ISO status.
+pub enum FidoProtocol {
+    Ctap2,
+    U2f,
+}
+
 #[derive(Clone, Debug)]
 pub struct FidoAuthenticator {
     state: fido::FidoState,
@@ -486,7 +494,33 @@ impl FidoAuthenticator {
     }
 
     pub fn exchange(&mut self, request: &[u8]) -> Vec<u8> {
+        self.exchange_with_presence(request, PresenceAuthorization::Absent)
+    }
+
+    /// CTAP2 reset requires an explicit fresh-presence grant from the transport.
+    /// Other CTAP2 commands retain their existing transport-level touch policy.
+    pub fn exchange_with_presence(
+        &mut self,
+        request: &[u8],
+        presence: PresenceAuthorization,
+    ) -> Vec<u8> {
+        if request == [0x07] && presence != PresenceAuthorization::Granted {
+            return vec![0x30];
+        }
         fido::exchange(&mut self.state, request)
+    }
+
+    /// CTAP1 APDUs share identity and durable state with CTAP2. The caller must
+    /// obtain a fresh physical touch when PresenceRequired is returned.
+    pub fn exchange_u2f(&mut self, raw: &[u8], presence: PresenceAuthorization) -> ApduExchange {
+        let command = match fido::u2f::decode(raw) {
+            Ok(command) => command,
+            Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
+        };
+        match fido::u2f::exchange(&mut self.state, &command, presence) {
+            Ok(response) => ApduExchange::Complete(response.encode()),
+            Err(policy) => ApduExchange::PresenceRequired(policy),
+        }
     }
 
     pub fn selected_make_credential_algorithm(
@@ -506,7 +540,8 @@ impl FidoAuthenticator {
         self.state.reset_connection();
     }
 
-    /// Start a new device power cycle, clearing only the volatile PIN block.
+    /// Start a new device power cycle, clearing the volatile PIN block and
+    /// opening the ten-second authenticator-reset window.
     /// Transport reconnects and CTAPHID INIT must not call this method.
     pub fn power_cycle(&mut self) {
         self.state.power_cycle();
@@ -601,17 +636,22 @@ struct PresenceCommand {
     protected: bool,
 }
 
-type FidoExchangeHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + 'a;
+type FidoExchangeHandler<'a> = dyn FnMut(FidoProtocol, &[u8]) -> Vec<u8> + 'a;
 
 struct FidoDispatch<'a> {
     handler: Option<&'a mut FidoExchangeHandler<'a>>,
 }
 
 impl FidoDispatch<'_> {
-    fn exchange(&mut self, fallback: &mut FidoAuthenticator, request: &[u8]) -> Vec<u8> {
+    fn exchange(
+        &mut self,
+        fallback: &mut FidoAuthenticator,
+        request: &[u8],
+        presence: PresenceAuthorization,
+    ) -> Vec<u8> {
         match self.handler.as_mut() {
-            Some(handler) => handler(request),
-            None => fallback.exchange(request),
+            Some(handler) => handler(FidoProtocol::Ctap2, request),
+            None => fallback.exchange_with_presence(request, presence),
         }
     }
 }
@@ -1047,7 +1087,14 @@ impl VirtualYubiKey {
         presence: PresenceAuthorization,
         fido: &mut FidoDispatch<'_>,
     ) -> ApduExchange {
-        let command = match CommandApdu::decode(raw) {
+        let decoded = CommandApdu::decode(raw).or_else(|error| {
+            if self.selected == Some(Applet::Fido2) {
+                fido::u2f::decode(raw)
+            } else {
+                Err(error)
+            }
+        });
+        let command = match decoded {
             Ok(command) => command,
             Err(_) => return ApduExchange::Complete(ResponseApdu::status(0x6700).encode()),
         };
@@ -1204,7 +1251,10 @@ impl VirtualYubiKey {
                     return ApduExchange::PresenceRequired(policy);
                 }
             },
-            Some(Applet::Fido2) => self.fido2(command, fido),
+            Some(Applet::Fido2) => match self.fido2(command, presence, fido) {
+                Ok(response) => response,
+                Err(policy) => return ApduExchange::PresenceRequired(policy),
+            },
             None => ResponseApdu::status(0x6999),
         };
         let response = if protected {
@@ -1338,13 +1388,37 @@ impl VirtualYubiKey {
             .unwrap_or_else(|| ResponseApdu::status(0x6a86))
     }
 
-    fn fido2(&mut self, command: &CommandApdu<'_>, fido: &mut FidoDispatch<'_>) -> ResponseApdu {
-        if command.ins != INS_CTAP_CBOR || command.p2 != 0 {
-            return ResponseApdu::status(0x6d00);
+    fn fido2(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+        fido: &mut FidoDispatch<'_>,
+    ) -> Result<ResponseApdu, UserPresencePolicy> {
+        if command.cla == 0x80 && command.ins == INS_CTAP_CBOR && command.p2 == 0 {
+            if command.data == [0x07]
+                && fido.handler.is_none()
+                && presence != PresenceAuthorization::Granted
+            {
+                return Err(UserPresencePolicy::Always);
+            }
+            return Ok(ResponseApdu::success(fido.exchange(
+                &mut self.fido,
+                command.data,
+                presence,
+            )));
         }
-
-        let response = fido.exchange(&mut self.fido, command.data);
-        ResponseApdu::success(response)
+        if let Some(handler) = fido.handler.as_mut() {
+            let response = handler(FidoProtocol::U2f, &fido::u2f::encode(command));
+            if response.len() < 2 {
+                return Ok(ResponseApdu::status(0x6f00));
+            }
+            let end = response.len() - 2;
+            return Ok(ResponseApdu {
+                data: response[..end].to_vec(),
+                status: u16::from_be_bytes([response[end], response[end + 1]]),
+            });
+        }
+        fido::u2f::exchange(&mut self.fido.state, command, presence)
     }
 
     fn prepare_response(&mut self, le: Option<u32>, response: ResponseApdu) -> ResponseApdu {
@@ -1698,8 +1772,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 3, 28]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 3, 28]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 3, 30]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 3, 30]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }

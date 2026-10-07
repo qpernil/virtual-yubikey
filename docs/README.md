@@ -9,6 +9,8 @@
   device, Linux USB transports, and configurable embedded CCID applets.
 - [PIV standards and compatibility](piv-conformance.md) - current NIST
   baseline, YubiKey extensions, and explicit conformance gaps.
+- [FIDO U2F](u2f.md) - CTAP1 over HID and CCID, wrapped credentials,
+  presence, persistence and CTAP2 interoperability.
 - [OpenPGP card](openpgp.md) - commands, algorithms, PIN/recovery and touch
   policies, persistent keys, reset, and physical RSA qualification.
 - [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03

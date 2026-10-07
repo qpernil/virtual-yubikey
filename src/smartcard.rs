@@ -12,7 +12,7 @@ pub(crate) use virtual_yubikey_core::ATR;
 #[cfg(test)]
 pub(crate) use virtual_yubikey_core::{MANAGEMENT_AID, OPENPGP_AID};
 
-type FidoHandler<'a> = dyn FnMut(&[u8]) -> Vec<u8> + 'a;
+type FidoHandler<'a> = dyn FnMut(virtual_yubikey_core::FidoProtocol, &[u8]) -> Vec<u8> + 'a;
 
 pub(crate) struct Card {
     device: VirtualYubiKey,
@@ -375,7 +375,11 @@ mod tests {
             .transmit_with_presence_and_fido(
                 &[0x80, 0x10, 0, 0, 2, 0xaa, 0xbb, 0],
                 || Ok(false),
-                &mut |request| {
+                &mut |protocol, request| {
+                    assert!(matches!(
+                        protocol,
+                        virtual_yubikey_core::FidoProtocol::Ctap2
+                    ));
                     requests.push(request.to_vec());
                     vec![0x2e]
                 },
