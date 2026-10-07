@@ -128,7 +128,8 @@ fn exchange_inner(
         return status(0x6d00);
     }
     if command.p2 != 0
-        || (command.ins != 2 && command.p1 != 0)
+        || (command.ins == 1 && !matches!(command.p1, 0x00 | 0x03))
+        || (command.ins == 3 && command.p1 != 0)
         || (command.ins == 2 && !matches!(command.p1, 0x03 | 0x07 | 0x08))
     {
         return status(0x6a86);

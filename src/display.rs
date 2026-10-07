@@ -24,9 +24,11 @@ use std::io;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 #[cfg(target_os = "linux")]
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 const BUSY_CADENCE: Cadence = Cadence::new(Duration::from_millis(67), Duration::from_millis(33));
@@ -51,21 +53,191 @@ fn indicator_policy() -> Policy {
 #[derive(Clone)]
 pub(crate) struct Activity {
     inner: display_backends::indicator::Activity,
+    presence: Arc<PresenceIndication>,
 }
 
 #[cfg(target_os = "linux")]
 impl Activity {
-    pub(crate) fn begin(&self) -> CommandGuard {
-        self.inner.begin()
+    pub(crate) fn begin(&self) -> Option<CommandGuard> {
+        let state = self.presence.state.lock().ok()?;
+        if state.waiting || state.u2f.is_some() {
+            None
+        } else {
+            Some(self.inner.begin())
+        }
     }
 
-    pub(crate) fn wait_for_presence(&self) -> io::Result<AttentionGuard> {
-        self.inner.attention(PRESENCE_CADENCE)
+    pub(crate) fn poll_u2f_presence(&self) -> io::Result<()> {
+        let mut state = self.presence.lock()?;
+        if state.waiting || state.stopped {
+            return Ok(());
+        }
+        let deadline = Instant::now() + PRESENCE_CADENCE.on + PRESENCE_CADENCE.off;
+        if let Some(prompt) = &mut state.u2f {
+            // Refresh expiry only; retaining the guard preserves the blink phase.
+            prompt.deadline = deadline;
+        } else {
+            state.u2f = Some(U2fPrompt {
+                deadline,
+                _guard: self.inner.attention(PRESENCE_CADENCE)?,
+            });
+            diagnostics::log(
+                Level::Info,
+                "u2f",
+                "indication",
+                format_args!("active=true"),
+            );
+        }
+        self.presence.changed.notify_one();
+        Ok(())
+    }
+
+    pub(crate) fn finish_u2f_presence(&self) -> io::Result<()> {
+        self.presence.lock()?.clear_u2f("completed");
+        self.presence.changed.notify_one();
+        Ok(())
+    }
+
+    pub(crate) fn wait_for_presence(&self) -> io::Result<PresenceGuard> {
+        let mut state = self.presence.lock()?;
+        state.clear_u2f("presence_wait");
+        let guard = self.inner.attention(PRESENCE_CADENCE)?;
+        state.waiting = true;
+        self.presence.changed.notify_one();
+        Ok(PresenceGuard {
+            guard: Some(guard),
+            presence: Arc::clone(&self.presence),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct PresenceGuard {
+    guard: Option<AttentionGuard>,
+    presence: Arc<PresenceIndication>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PresenceGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.presence.lock() {
+            self.guard.take();
+            state.waiting = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct U2fPrompt {
+    deadline: Instant,
+    _guard: AttentionGuard,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct PresenceState {
+    u2f: Option<U2fPrompt>,
+    waiting: bool,
+    stopped: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PresenceState {
+    fn clear_u2f(&mut self, reason: &str) {
+        if self.u2f.take().is_some() {
+            diagnostics::log(
+                Level::Info,
+                "u2f",
+                "indication",
+                format_args!("active=false reason={reason}"),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct PresenceIndication {
+    state: Mutex<PresenceState>,
+    changed: Condvar,
+}
+
+#[cfg(target_os = "linux")]
+impl PresenceIndication {
+    fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, PresenceState>> {
+        self.state
+            .lock()
+            .map_err(|_| io::Error::other("presence indication lock poisoned"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct IndicationExpiry {
+    presence: Arc<PresenceIndication>,
+    thread: Option<JoinHandle<io::Result<()>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl IndicationExpiry {
+    fn start(presence: Arc<PresenceIndication>) -> io::Result<Self> {
+        let timer = Arc::clone(&presence);
+        let thread = thread::Builder::new()
+            .name("yubikey-u2f-indication".into())
+            .spawn(move || {
+                let mut state = timer.lock()?;
+                while !state.stopped {
+                    if let Some(prompt) = &state.u2f {
+                        let remaining = prompt.deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            state.clear_u2f("polling_ended");
+                        } else {
+                            state = timer
+                                .changed
+                                .wait_timeout(state, remaining)
+                                .map_err(|_| io::Error::other("presence indication lock poisoned"))?
+                                .0;
+                        }
+                    } else {
+                        state = timer
+                            .changed
+                            .wait(state)
+                            .map_err(|_| io::Error::other("presence indication lock poisoned"))?;
+                    }
+                }
+                Ok(())
+            })?;
+        Ok(Self {
+            presence,
+            thread: Some(thread),
+        })
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        {
+            let mut state = self.presence.lock()?;
+            state.clear_u2f("shutdown");
+            state.stopped = true;
+            self.presence.changed.notify_one();
+        }
+        thread
+            .join()
+            .map_err(|_| io::Error::other("U2F indication thread panicked"))?
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for IndicationExpiry {
+    fn drop(&mut self) {
+        let _ = self.finish();
     }
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) struct Controller {
+    expiry: IndicationExpiry,
     indicator: IndicatorController,
     hardware: Arc<Mutex<Hardware>>,
 }
@@ -85,7 +257,9 @@ impl Controller {
             },
             "yubikey-indicator",
         )?;
+        let expiry = IndicationExpiry::start(Arc::new(PresenceIndication::default()))?;
         Ok(Self {
+            expiry,
             indicator,
             hardware,
         })
@@ -94,6 +268,7 @@ impl Controller {
     pub(crate) fn activity(&self) -> Activity {
         Activity {
             inner: self.indicator.activity(),
+            presence: Arc::clone(&self.expiry.presence),
         }
     }
 
@@ -103,12 +278,14 @@ impl Controller {
     }
 
     pub(crate) fn unbind(&self) -> io::Result<()> {
+        self.activity().finish_u2f_presence()?;
         let result = self.indicator.disable();
         self.with_hardware(|hardware| hardware.turn_off("USB unbind"))?;
         result
     }
 
     pub(crate) fn suspend(&self) -> io::Result<()> {
+        self.activity().finish_u2f_presence()?;
         let result = self.indicator.disable();
         self.with_hardware(|hardware| hardware.turn_off("USB suspend"))?;
         result
@@ -121,9 +298,11 @@ impl Controller {
 
     pub(crate) fn shutdown(self) -> io::Result<()> {
         let Self {
+            mut expiry,
             indicator,
             hardware,
         } = self;
+        expiry.finish()?;
         let result = indicator.shutdown();
         lock_hardware(&hardware)?.turn_off("worker shutdown");
         result
@@ -251,9 +430,98 @@ impl Hardware {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) struct TestIndicator {
+    pub(crate) activity: Activity,
+    _expiry: IndicationExpiry,
+    _indicator: IndicatorController,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl TestIndicator {
+    pub(crate) fn new(renderer: impl IndicatorRenderer) -> io::Result<Self> {
+        let indicator =
+            IndicatorController::start(indicator_policy(), renderer, "test-u2f-indicator")?;
+        indicator.enable()?;
+        let presence = Arc::new(PresenceIndication::default());
+        let expiry = IndicationExpiry::start(Arc::clone(&presence))?;
+        let activity = Activity {
+            inner: indicator.activity(),
+            presence,
+        };
+        Ok(Self {
+            activity,
+            _expiry: expiry,
+            _indicator: indicator,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn u2f_polls_preserve_visible_blink_phase_and_expire_without_further_calls() {
+        let (sender, edges) = std::sync::mpsc::channel();
+        let fixture = TestIndicator::new(move |lit| {
+            sender.send((Instant::now(), lit)).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        fixture.activity.poll_u2f_presence().unwrap();
+        let first = edges.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(first.1);
+        // A client retrying faster than the blink must not restart its phase or
+        // insert command-activity flashes. The renderer observes actual edges.
+        for _ in 0..12 {
+            thread::sleep(Duration::from_millis(100));
+            assert!(fixture.activity.begin().is_none());
+            fixture.activity.poll_u2f_presence().unwrap();
+        }
+        let last_poll = Instant::now();
+        let mut transitions = vec![first];
+        loop {
+            if fixture.activity.presence.lock().unwrap().u2f.is_none() {
+                break;
+            }
+            assert!(last_poll.elapsed() < Duration::from_secs(2));
+            if let Ok(edge) = edges.recv_timeout(Duration::from_millis(50)) {
+                transitions.push(edge);
+            }
+        }
+        transitions.extend(edges.try_iter());
+        assert!(last_poll.elapsed() >= Duration::from_millis(768));
+        assert!(last_poll.elapsed() < Duration::from_millis(1000));
+        assert!(transitions.len() >= 5);
+        for pair in transitions[..4].windows(2) {
+            assert_ne!(pair[0].1, pair[1].1);
+            let half_period = pair[1].0.duration_since(pair[0].0);
+            assert!(
+                (Duration::from_millis(300)..Duration::from_millis(500)).contains(&half_period),
+                "{half_period:?}"
+            );
+        }
+        assert!(!transitions.last().unwrap().1);
+        assert!(fixture.activity.begin().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_u2f_presence_ends_the_indication_before_its_timeout() {
+        let (sender, edges) = std::sync::mpsc::channel();
+        let fixture = TestIndicator::new(move |lit| {
+            sender.send(lit).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        fixture.activity.poll_u2f_presence().unwrap();
+        assert!(edges.recv_timeout(Duration::from_secs(1)).unwrap());
+        fixture.activity.finish_u2f_presence().unwrap();
+        assert!(!edges.recv_timeout(Duration::from_millis(200)).unwrap());
+        assert!(fixture.activity.presence.lock().unwrap().u2f.is_none());
+    }
 
     #[test]
     fn display_frames_are_native_st7789_images() {

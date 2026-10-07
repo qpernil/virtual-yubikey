@@ -22,7 +22,19 @@ pub(crate) struct Controller {
     shutdown: UnixDatagram,
     reconnect: UnixDatagram,
     reconnect_pressed: Arc<AtomicBool>,
+    touch_sensor: TouchSensor,
     thread: JoinHandle<io::Result<()>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TouchSensor {
+    lines: Arc<File>,
+}
+
+impl TouchSensor {
+    pub(crate) fn is_pressed(&self) -> io::Result<bool> {
+        read_pressed(&self.lines)
+    }
 }
 
 impl Controller {
@@ -31,6 +43,9 @@ impl Controller {
         reconnect_lines: File,
         touch_socket: PathBuf,
     ) -> io::Result<Self> {
+        let touch_sensor = TouchSensor {
+            lines: Arc::new(touch_lines.try_clone()?),
+        };
         let reconnect_pressed = Arc::new(AtomicBool::new(read_pressed(&reconnect_lines)?));
         set_nonblocking(&touch_lines)?;
         set_nonblocking(&reconnect_lines)?;
@@ -55,8 +70,13 @@ impl Controller {
             shutdown,
             reconnect,
             reconnect_pressed,
+            touch_sensor,
             thread,
         })
+    }
+
+    pub(crate) fn touch_sensor(&self) -> TouchSensor {
+        self.touch_sensor.clone()
     }
 
     pub(crate) fn reconnect_descriptor(&self) -> i32 {
@@ -270,10 +290,10 @@ fn drain_reconnect_events(
 fn read_pressed(lines: &File) -> io::Result<bool> {
     let mut values = gpiocdev_uapi::v2::LineValues { bits: 0, mask: 1 };
     gpiocdev_uapi::v2::get_line_values(lines, &mut values)
-        .map_err(|error| io::Error::other(format!("read reconnect-button level: {error}")))?;
+        .map_err(|error| io::Error::other(format!("read button level: {error}")))?;
     values
         .get(0)
-        .ok_or_else(|| io::Error::other("reconnect-button level was not returned"))
+        .ok_or_else(|| io::Error::other("button level was not returned"))
 }
 
 fn signal_touch(notifier: &UnixDatagram, touch_socket: &PathBuf) {

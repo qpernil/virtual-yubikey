@@ -66,6 +66,26 @@ fn cert_len(bytes: &[u8]) -> usize {
 }
 
 #[test]
+fn browser_registration_control_requires_presence_and_creates_a_usable_key() {
+    let mut state = state();
+    let data = [CHALLENGE.as_slice(), APP.as_slice()].concat();
+    assert_eq!(run(&mut state, 1, 3, &data, false).status, 0x6985);
+    assert!(state.u2f_wrapping_key.is_none());
+    let registration = run(&mut state, 1, 3, &data, true);
+    assert_eq!(registration.status, 0x9000);
+    let reg = registration.data;
+    let request = authentication(handle(&reg), &APP);
+    assert_eq!(run(&mut state, 2, 3, &request, false).status, 0x6985);
+    let signed = run(&mut state, 2, 3, &request, true);
+    verify_auth(&reg, &signed, &APP);
+    assert_eq!(signed.data[0], 1);
+    assert_eq!(u32::from_be_bytes(signed.data[1..5].try_into().unwrap()), 1);
+    for unsupported in [1, 2, 4, 7, 8, 0x80, 0x83] {
+        assert_eq!(run(&mut state, 1, unsupported, &data, true).status, 0x6a86);
+    }
+}
+
+#[test]
 fn registration_is_attested_wrapped_and_does_not_store_a_credential() {
     let mut state = state();
     let reg = register(&mut state);
