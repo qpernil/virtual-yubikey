@@ -85,6 +85,60 @@ requires the explicit delete-last flag.
 Card keys use KIDs `11`, `13`, and `15`; trusted host CA public keys use
 `10` or `20`–`2F`. SCP11 versions are `1`–`127`. GET DATA exposes key
 information, stored card chains at `BF21`, and CA identifiers at `FF33`/`FF34`.
+CPLC is available at `9F7F` through `00 CA` or `80 CA`, including protected
+requests. The legacy 42-byte value is returned directly for `00 CA`, or wrapped
+as a `9F7F 2A` TLV for `80 CA`. This value-versus-TLV distinction applies to all
+supported GET DATA objects, following GlobalPlatform Card Specification
+section 11.3.3.1.
+Its four-byte IC serial field (value bytes 12–15) contains a synthetic IC serial,
+mapped from the configured virtual device serial in big-endian order. This is
+an emulator identity choice; physical IC and YubiKey serials are independent.
+All other fields are zero because physical production metadata is unavailable.
+The value follows the configured device identity across
+applet selection, reload, and Security Domain reset; it requires no state-schema
+migration and does not claim a physical chip manufacturer or production date.
+The public Issuer SD inventory supports these data objects:
+
+| Selector | Object | Availability |
+| --- | --- | --- |
+| `0066` | Security Domain Recognition Data | Supported SCP03/SCP11 implementation options |
+| `00E0` | Key Information Template | Existing SCP and trusted host-CA keys |
+| `9F7F` | CPLC | Stable 42-byte virtual identity |
+| `BF21` | Card certificate store | `A6 {83 KID KVN}` selects the stored issuer-to-leaf chain |
+| `FF34` | Card CA identifiers | Factory root identifier and explicitly stored card issuer metadata |
+| `FF33` | Host CA identifiers | Configured or explicitly stored host issuer metadata |
+| `0083` | Host CA key lookup | `A6 {42 CA-ID}` resolves a host CA to KID/KVN |
+
+Recognition Data contains the `73` template and GlobalPlatform protocol OIDs:
+SCP03 uses option `60`, matching INITIALIZE UPDATE; SCP11 uses option bytes
+`9B 06` (a/b/c, certificate chains, S8, X.509, without GP legacy certificates,
+BF20 authorization or persistent host-key storage). Optional full-card
+management-version and IIN/CIN claims are omitted: the emulator implements a
+Security Domain subset rather than generic GlobalPlatform card management.
+
+Factory `FF34` metadata references the subject key identifier of the virtual
+attestation root. Generated certificates include SKI and AKI extensions.
+Configured certificate-backed host CAs similarly supply their root's SKI;
+if an older certificate lacks SKI, RFC 5280 method 1 derives it from the public
+key. Older persisted factory identities and configured host CAs recover missing
+metadata without changing private keys or stored certificates. Explicit
+identifiers retain precedence. Raw public-key imports require STORE DATA to
+associate their caller-chosen identifiers. Replacement or deletion removes
+that key's identifier. No host CA is advertised on a factory-only card.
+
+`83` returns a two-byte KID/KVN value for `00 CA`, or `83 02 KID KVN` for
+`80 CA`. Unknown host identifiers return `6A88`; malformed selectors return
+`6A80`; duplicate host identifiers return `6985` because no unique reference
+can be selected. Card issuer identifiers cannot resolve as host CAs.
+The listed objects are available publicly and through secure messaging.
+
+A physical firmware 5.7.4 YubiKey's public full-selector scan confirms `66`,
+`E0`, `9F7F`, `BF21` (with a key selector), and `FF34`; see the
+[client's public Issuer SD inventory](https://github.com/qpernil/pkcs11rs/blob/master/docs/scp11.md#public-issuer-sd-data-objects).
+Definitions follow GlobalPlatform Card Specification Annex H.3 and SCP11
+sections 7.3/7.4. Embedded client qualification covers public and protected
+SCP03/SCP11b reads, long certificate response chaining, persistence reload,
+and configured host-CA reads over SCP11a/c.
 Stored card certificates must have a leaf matching the selected private key.
 They are presentation material, not host trust anchors.
 
