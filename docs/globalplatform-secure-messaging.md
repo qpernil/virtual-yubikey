@@ -50,7 +50,10 @@ SCP11b authenticates the card and protects traffic, but it does not authenticate
 the off-card entity. It therefore does not by itself authorize Security Domain
 key or trust changes. Factory SCP03 does authenticate the off-card entity.
 SCP11a and SCP11c require explicitly provisioned host CA trust and are not
-factory-provisioned. A valid uploaded certificate is not sufficient authority:
+factory-provisioned. A CA imported by PUT KEY is trusted as its fixed public
+key, represented as an RFC 5914 anchor for the portable RFC 5280 validator.
+Critical GlobalPlatform OCE policies work with both bare-key and certificate
+trust; the uploaded chain cannot supply an additional trusted key. A valid uploaded certificate is not sufficient authority:
 the first protected command must prove possession of the corresponding private
 key through a valid C-MAC.
 
