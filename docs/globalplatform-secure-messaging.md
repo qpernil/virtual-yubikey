@@ -96,12 +96,15 @@ critical extensions, and key-agreement usage are checked. A host-supplied root
 never becomes trusted merely because it was uploaded. Empty serial allowlists
 remove the serial restriction; nonempty lists restrict otherwise valid hosts.
 
-The shared certificate validator rejects critical `certificatePolicies`
-extensions, including the policy-bearing physical OCE fixture used by
-`pkcs11rs`. Dynamic host-login qualification uses the virtual validator's
-supported key-agreement certificate profile. Acceptance of the physical OCE
-profile requires separate validator work; removing authentication or trust
-checks is not a supported workaround.
+Certificate-backed host CA trust uses the shared portable RFC 5280 validator,
+including critical `certificatePolicies` processing. Bare host CA public keys
+imported through PUT KEY use the webpki validation path, which rejects critical
+certificate policies, including the policy-bearing physical OCE fixture used
+by `pkcs11rs`. Such profiles require certificate-backed configured host trust
+on the virtual card; the bare-key path retains this compatibility limitation.
+Dynamic host-login qualification also covers the supported key-agreement
+certificate profile with bare CA keys. Neither path bypasses signature,
+validity, usage or trust checks.
 
 Keys, certificate chains, CA identifiers, and allowlists share the atomically
 persisted per-serial Security Domain state. Failed commands leave it unchanged.

@@ -107,6 +107,13 @@ The factory Security Domain exposes the published YubiKey SCP03 key set at KVN
 Its certificate store uses the conventional issuer-to-leaf order expected by
 `libykpiv`; the final certificate carries the card key. The virtual certificate
 chain identifies this project and does not chain to a Yubico trust anchor.
+Hosts must explicitly configure the virtual card's CA certificate. In pkcs11rs,
+`scp11.sd_intermediate_bundle` supplies any missing card-side intermediates;
+it cannot introduce additional roots and is separate from the OCE host chain.
+Factory YubiKey validation uses the embedded Yubico root and published
+intermediates through the portable certificate-policy validator. The worker's
+`x509-validation` dependency requires the pinned `x509-ocsp` patch in this
+workspace manifest until that dependency has a 0.3 crates.io release.
 
 SCP11b authenticates the card to the host but does not authenticate the
 off-card entity. It therefore provides protected applet traffic without
