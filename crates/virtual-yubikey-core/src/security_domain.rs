@@ -1,4 +1,5 @@
 use crate::{CommandApdu, ResponseApdu, certificate};
+use der::referenced::OwnedToRef;
 use software_key_core::{
     certificate_chain::{CertificateTrust, ParsedCertificate},
     certificate_signing::{CertificateSigner, subject_public_key_info},
@@ -13,7 +14,9 @@ use x509_cert::{
     certificate::TbsCertificate,
     ext::{
         Extension, ToExtension,
-        pkix::{BasicConstraints, KeyUsage, KeyUsages},
+        pkix::{
+            AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
+        },
     },
     name::Name,
     time::{Time, Validity},
@@ -100,6 +103,10 @@ impl SecurityDomain {
         let certificates =
             certificate_chain(serial, firmware, form_factor, &key).expect("virtual SD certificate");
         let mut entry = Entry::new(Material::Private(key));
+        entry.issuer = certificate_key_identifier(
+            &ParsedCertificate::parse(&certificates[0]).expect("virtual SD root"),
+        )
+        .expect("virtual SD root identifier");
         entry.certificates = certificates;
         let mut keys = BTreeMap::new();
         keys.insert(
@@ -216,6 +223,23 @@ impl SecurityDomain {
             if entry.issuer.len() > 64 {
                 return Err("invalid SD issuer");
             }
+            // Preserve existing identities and explicit identifiers. Older factory
+            // states omitted metadata for the same virtual attestation root.
+            if (kid, kvn) == (SCP11B_KEY_ID, SCP11B_KEY_VERSION) && entry.issuer.is_empty() {
+                entry.issuer = factory_issuer_identifier(&entry.certificates).unwrap_or_default();
+            }
+            if is_ca(kid)
+                && entry.issuer.is_empty()
+                && let Some(root) = entry
+                    .certificates
+                    .iter()
+                    .filter_map(|cert| ParsedCertificate::parse(cert).ok())
+                    .find(|cert| {
+                        cert.is_self_issued() && cert.p256_public_point().ok() == entry.point()
+                    })
+            {
+                entry.issuer = certificate_key_identifier(&root)?;
+            }
             entry.allowlist = decode_blobs(&mut d, 64, 21)?;
             if entry
                 .allowlist
@@ -281,6 +305,7 @@ impl SecurityDomain {
             Entry::new(Material::Scp03(Zeroizing::new(FACTORY_SCP03_KEY.repeat(3)))),
         );
         let mut entry = Entry::new(Material::Private(key));
+        entry.issuer = factory_issuer_identifier(&certificates).ok_or("invalid SD issuer")?;
         entry.certificates = certificates;
         state.keys.insert((0x13, 1), entry);
         if count == 4 {
@@ -350,6 +375,7 @@ impl SecurityDomain {
             return Err("too many SD keys");
         }
         let mut ca = Entry::new(Material::Public(point));
+        ca.issuer = certificate_key_identifier(&root)?;
         ca.certificates = host_ca.to_vec();
         self.keys.insert((host_kid, host_kvn), ca);
         self.keys
@@ -487,7 +513,7 @@ impl SecurityDomain {
         command: &CommandApdu<'_>,
         admin_dek: Option<&[u8]>,
     ) -> ResponseApdu {
-        let result = if command.cla == 0 && command.ins == 0xca {
+        let result = if matches!(command.cla, 0 | 0x80) && command.ins == 0xca {
             self.get_data(command)
         } else if matches!(
             (command.cla, command.ins),
@@ -510,6 +536,56 @@ impl SecurityDomain {
         let tag = u16::from_be_bytes([command.p1, command.p2]);
         let mut output = Vec::new();
         match tag {
+            0x66 if command.data.is_empty() => {
+                // Security Domain Recognition Data (GPCS Annex H.3). Optional
+                // card-management version and IIN/CIN claims are omitted.
+                let mut recognition = Vec::new();
+                push_tlv(
+                    &mut recognition,
+                    &[0x06],
+                    &[0x2a, 0x86, 0x48, 0x86, 0xfc, 0x6b, 1],
+                );
+                for options in [&[3, 0x60][..], &[0x11, 0x9b, 6][..]] {
+                    let mut oid = vec![0x2a, 0x86, 0x48, 0x86, 0xfc, 0x6b, 4];
+                    oid.extend_from_slice(options);
+                    let mut protocol = Vec::new();
+                    push_tlv(&mut protocol, &[0x06], &oid);
+                    push_tlv(&mut recognition, &[0x64], &protocol);
+                }
+                push_tlv(&mut output, &[0x73], &recognition);
+            }
+            0x83 => {
+                let mut data = command.data;
+                let mut selector = take_tlv(&mut data, 0xa6)?;
+                let identifier = take_tlv(&mut selector, 0x42)?;
+                if !data.is_empty()
+                    || !selector.is_empty()
+                    || identifier.is_empty()
+                    || identifier.len() > 64
+                {
+                    return Err(0x6a80);
+                }
+                let mut matches = self
+                    .keys
+                    .iter()
+                    .filter(|((kid, _), entry)| is_ca(*kid) && entry.issuer == identifier);
+                let (&(kid, kvn), _) = matches.next().ok_or(0x6a88_u16)?;
+                // A single identifier must resolve to exactly one key reference.
+                if matches.next().is_some() {
+                    return Err(0x6985);
+                }
+                output.extend([kid, kvn]);
+            }
+            0x9f7f => {
+                if !command.data.is_empty() {
+                    return Err(0x6a80);
+                }
+                // Legacy GlobalPlatform CPLC field layout. Production fields are
+                // unspecified for a virtual card; IC serial is the profile serial.
+                let mut cplc = [0_u8; 42];
+                cplc[12..16].copy_from_slice(&self.serial.to_be_bytes());
+                output.extend_from_slice(&cplc);
+            }
             0xe0 if command.data.is_empty() => {
                 for (&(kid, kvn), entry) in &self.keys {
                     match &entry.material {
@@ -552,6 +628,17 @@ impl SecurityDomain {
                 }
             }
             _ => return Err(0x6a88),
+        }
+        if command.cla == 0x80 {
+            let value = output;
+            output = Vec::new();
+            let tag_bytes = tag.to_be_bytes();
+            let encoded_tag = if tag <= 0xff {
+                &tag_bytes[1..]
+            } else {
+                &tag_bytes[..]
+            };
+            push_tlv(&mut output, encoded_tag, &value);
         }
         Ok(output)
     }
@@ -940,11 +1027,14 @@ impl BuilderProfile for CertificateProfile {
 
     fn build_extensions(
         &self,
-        _subject_key: SubjectPublicKeyInfoRef<'_>,
-        _issuer_key: SubjectPublicKeyInfoRef<'_>,
+        subject_key: SubjectPublicKeyInfoRef<'_>,
+        issuer_key: SubjectPublicKeyInfoRef<'_>,
         tbs: &TbsCertificate,
     ) -> x509_cert::builder::Result<Vec<Extension>> {
-        let mut extensions = Vec::new();
+        let mut extensions = vec![
+            SubjectKeyIdentifier::try_from(subject_key)?.to_extension(tbs.subject(), &[])?,
+            AuthorityKeyIdentifier::try_from(issuer_key)?.to_extension(tbs.subject(), &[])?,
+        ];
         extensions.push(
             BasicConstraints {
                 ca: self.is_ca,
@@ -963,6 +1053,45 @@ impl BuilderProfile for CertificateProfile {
         extensions.push(KeyUsage(usages).to_extension(tbs.subject(), &extensions)?);
         Ok(extensions)
     }
+}
+
+fn certificate_key_identifier(certificate: &ParsedCertificate) -> Result<Vec<u8>, &'static str> {
+    let certificate = certificate.certificate();
+    let identifier = match certificate
+        .tbs_certificate()
+        .get_extension::<SubjectKeyIdentifier>()
+        .map_err(|_| "invalid CA identifier")?
+    {
+        Some((_, identifier)) => identifier,
+        None => SubjectKeyIdentifier::try_from(
+            certificate
+                .tbs_certificate()
+                .subject_public_key_info()
+                .owned_to_ref(),
+        )
+        .map_err(|_| "invalid CA public key")?,
+    };
+    let identifier = identifier.0.as_bytes();
+    if identifier.is_empty() || identifier.len() > 64 {
+        return Err("invalid CA identifier");
+    }
+    Ok(identifier.to_vec())
+}
+
+fn factory_issuer_identifier(certificates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let root = ParsedCertificate::parse(certificates.first()?).ok()?;
+    let key = SoftwareSigningKey::from_serialized_for_kind(
+        KeyKind::Ec(EcCurve::P256),
+        &VIRTUAL_ATTESTATION_ROOT_PRIVATE_KEY,
+    )
+    .ok()?;
+    let SoftwarePublicKey::Ec { uncompressed, .. } = key.public_key() else {
+        return None;
+    };
+    if !root.is_self_issued() || root.p256_public_point().ok()? != uncompressed {
+        return None;
+    }
+    certificate_key_identifier(&root).ok()
 }
 
 fn certificate_chain(
@@ -1032,6 +1161,251 @@ fn push_tlv(output: &mut Vec<u8>, tag: &[u8], value: &[u8]) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn get_data_class_selects_raw_value_or_complete_tlv() {
+        let mut device = crate::VirtualYubiKey::new(crate::DeviceProfile::yubikey_5_8_ccid(42));
+        for (tag, selector) in [
+            (0x0066_u16, &[][..]),
+            (0x00e0, &[][..]),
+            (0x9f7f, &[][..]),
+            (0xff34, &[][..]),
+            (0xbf21, &[0xa6, 4, 0x83, 2, 0x13, 1][..]),
+        ] {
+            let [p1, p2] = tag.to_be_bytes();
+            let mut command = CommandApdu {
+                cla: 0,
+                ins: 0xca,
+                p1,
+                p2,
+                data: selector,
+                le: Some(256),
+                extended: false,
+            };
+            let raw = device.security_domain.exchange(&command, None);
+            assert_eq!(raw.status, 0x9000);
+            assert!(!raw.data.is_empty());
+            if tag == 0xbf21 {
+                assert!(raw.data.len() > 256);
+                assert_eq!(
+                    raw.data,
+                    device.security_domain.keys[&(0x13, 1)]
+                        .certificates
+                        .concat()
+                );
+            }
+            command.cla = 0x80;
+            let wrapped = device.security_domain.exchange(&command, None);
+            assert_eq!(wrapped.status, 0x9000);
+            let mut remaining = wrapped.data.as_slice();
+            assert_eq!(take_tlv(&mut remaining, tag).unwrap(), raw.data);
+            assert!(remaining.is_empty());
+        }
+    }
+
+    #[test]
+    fn factory_ca_identifier_matches_certificates_and_preserves_older_identities() {
+        let mut domain = SecurityDomain::new(42, [5, 8, 0], 1);
+        let entry = &domain.keys[&(0x13, 1)];
+        let original_point = entry.point();
+        let issuer = entry.issuer.clone();
+        assert_eq!(issuer.len(), 20);
+        let root = ParsedCertificate::parse(&entry.certificates[0]).unwrap();
+        let leaf = ParsedCertificate::parse(entry.certificates.last().unwrap()).unwrap();
+        let ski = root
+            .certificate()
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()
+            .unwrap()
+            .unwrap()
+            .1;
+        let aki = leaf
+            .certificate()
+            .tbs_certificate()
+            .get_extension::<AuthorityKeyIdentifier>()
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(issuer, ski.0.as_bytes());
+        assert_eq!(aki.key_identifier.unwrap().as_bytes(), issuer);
+        // Recreate the older certificate profile, without key-ID extensions.
+        struct LegacyProfile(CertificateProfile);
+        impl BuilderProfile for LegacyProfile {
+            fn get_issuer(&self, subject: &Name) -> Name {
+                self.0.get_issuer(subject)
+            }
+            fn get_subject(&self) -> Name {
+                self.0.get_subject()
+            }
+            fn build_extensions(
+                &self,
+                subject_key: SubjectPublicKeyInfoRef<'_>,
+                issuer_key: SubjectPublicKeyInfoRef<'_>,
+                tbs: &TbsCertificate,
+            ) -> x509_cert::builder::Result<Vec<Extension>> {
+                let mut extensions = self.0.build_extensions(subject_key, issuer_key, tbs)?;
+                extensions.retain(|extension| extension.critical);
+                Ok(extensions)
+            }
+        }
+        let root_key = SoftwareSigningKey::from_serialized_for_kind(
+            KeyKind::Ec(EcCurve::P256),
+            &VIRTUAL_ATTESTATION_ROOT_PRIVATE_KEY,
+        )
+        .unwrap();
+        let root_signer = CertificateSigner::from_key(&root_key).unwrap();
+        let root_name = Name::from_str("CN=Virtual YubiKey Security Domain Root").unwrap();
+        let legacy_root = certificate::build(
+            LegacyProfile(CertificateProfile {
+                subject: root_name.clone(),
+                issuer: root_name,
+                is_ca: true,
+                key_agreement: false,
+            }),
+            &[0x56, 0x59, 0x4b, 0x53, 0x44, 0x01],
+            *root.certificate().tbs_certificate().validity(),
+            subject_public_key_info(&root_key.public_key()).unwrap(),
+            &root_signer,
+        )
+        .unwrap();
+        let parsed = ParsedCertificate::parse(&legacy_root).unwrap();
+        assert!(
+            parsed
+                .certificate()
+                .tbs_certificate()
+                .get_extension::<SubjectKeyIdentifier>()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(certificate_key_identifier(&parsed).unwrap(), issuer);
+        domain.keys.get_mut(&(0x13, 1)).unwrap().certificates[0] = legacy_root;
+        let original_chain = domain.keys[&(0x13, 1)].certificates.clone();
+        // A pre-metadata state retains its exact card key and stored chain.
+        domain.keys.get_mut(&(0x13, 1)).unwrap().issuer.clear();
+        let restored = SecurityDomain::from_persistent_state(
+            42,
+            [5, 8, 0],
+            1,
+            &domain.persistent_state().unwrap(),
+        )
+        .unwrap();
+        let entry = &restored.keys[&(0x13, 1)];
+        assert_eq!(entry.issuer, issuer);
+        assert_eq!(entry.point(), original_point);
+        assert_eq!(entry.certificates, original_chain);
+        // Explicit metadata has precedence over inferred factory metadata.
+        domain.keys.get_mut(&(0x13, 1)).unwrap().issuer = vec![0x55; 20];
+        let restored = SecurityDomain::from_persistent_state(
+            42,
+            [5, 8, 0],
+            1,
+            &domain.persistent_state().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.keys[&(0x13, 1)].issuer, vec![0x55; 20]);
+    }
+
+    #[test]
+    fn configured_host_ca_identifier_is_inferred_and_restored() {
+        let mut domain = SecurityDomain::new(42, [5, 8, 0], 1);
+        let entry = &domain.keys[&(0x13, 1)];
+        let root = entry.certificates[0].clone();
+        let issuer = entry.issuer.clone();
+        let private = domain.scp11_key(0x13, 1).unwrap().serialized().unwrap();
+        domain
+            .provision_scp11(0x11, 2, &private, 0x20, 2, &[root])
+            .unwrap();
+        assert_eq!(domain.keys[&(0x20, 2)].issuer, issuer);
+        domain.keys.get_mut(&(0x20, 2)).unwrap().issuer.clear();
+        let restored = SecurityDomain::from_persistent_state(
+            42,
+            [5, 8, 0],
+            1,
+            &domain.persistent_state().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.keys[&(0x20, 2)].issuer, issuer);
+    }
+
+    #[test]
+    fn host_ca_lookup_validates_selectors_and_tracks_key_lifetime() {
+        let mut domain = SecurityDomain::new(42, [5, 8, 0], 1);
+        let point = domain.keys[&(0x13, 1)].point().unwrap();
+        let mut ca = Entry::new(Material::Public(point));
+        ca.issuer = vec![0x55; 20];
+        domain.keys.insert((0x20, 2), ca);
+        let mut query = vec![0xa6, 22, 0x42, 20];
+        query.extend([0x55; 20]);
+        let lookup = |domain: &mut SecurityDomain, cla, data: &[u8]| {
+            domain.exchange(
+                &CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0x83,
+                    data,
+                    le: Some(256),
+                    extended: false,
+                },
+                None,
+            )
+        };
+        assert_eq!(
+            lookup(&mut domain, 0, &query),
+            ResponseApdu::success(vec![0x20, 2])
+        );
+        assert_eq!(
+            lookup(&mut domain, 0x80, &query),
+            ResponseApdu::success(vec![0x83, 2, 0x20, 2])
+        );
+        for data in [
+            &[][..],
+            &[0xa6, 2, 0x42, 0],
+            &query[..query.len() - 1],
+            &[0xa6, 3, 0x43, 1, 0x55],
+        ] {
+            assert_eq!(lookup(&mut domain, 0x80, data).status, 0x6a80);
+        }
+        let mut duplicate = Entry::new(Material::Public(domain.keys[&(0x13, 1)].point().unwrap()));
+        duplicate.issuer = vec![0x55; 20];
+        domain.keys.insert((0x21, 3), duplicate);
+        assert_eq!(lookup(&mut domain, 0x80, &query).status, 0x6985);
+        domain.keys.remove(&(0x21, 3));
+        let mut trailing = query.clone();
+        trailing.push(0);
+        assert_eq!(lookup(&mut domain, 0x80, &trailing).status, 0x6a80);
+        let mut unknown = query.clone();
+        unknown[4] ^= 1;
+        assert_eq!(lookup(&mut domain, 0x80, &unknown).status, 0x6a88);
+        let restored = SecurityDomain::from_persistent_state(
+            42,
+            [5, 8, 0],
+            1,
+            &domain.persistent_state().unwrap(),
+        )
+        .unwrap();
+        domain = restored;
+        assert_eq!(lookup(&mut domain, 0x80, &query).status, 0x9000);
+        // Card issuer metadata must not resolve as a host CA.
+        domain.keys.get_mut(&(0x13, 1)).unwrap().issuer = vec![0x55; 20];
+        assert_eq!(
+            execute(&mut domain, 0xe4, 0, 0, &[0xd0, 1, 0x20, 0xd2, 1, 2]).status,
+            0x9000
+        );
+        assert_eq!(lookup(&mut domain, 0x80, &query).status, 0x6a88);
+        // Replacing a CA key also removes its former issuer association.
+        let mut ca = Entry::new(Material::Public(domain.keys[&(0x13, 1)].point().unwrap()));
+        ca.issuer = vec![0x55; 20];
+        domain.keys.insert((0x20, 2), ca);
+        domain
+            .replace(
+                (0x20, 3),
+                2,
+                Entry::new(Material::Public(domain.keys[&(0x13, 1)].point().unwrap())),
+            )
+            .unwrap();
+        assert_eq!(lookup(&mut domain, 0x80, &query).status, 0x6a88);
+    }
+
+    #[test]
     fn manager_reset_blocks_custom_scp03_scp11a_c_and_ca_keys() {
         let mut device =
             crate::VirtualYubiKey::new(crate::DeviceProfile::yubikey_5_8_ccid(12345678));
@@ -1057,6 +1431,17 @@ mod tests {
         );
         let refs: Vec<_> = device.security_domain.keys.keys().copied().collect();
         let original = device.scp11b_public_key();
+        let cplc_command = CommandApdu {
+            cla: 0,
+            ins: 0xca,
+            p1: 0x9f,
+            p2: 0x7f,
+            data: &[],
+            le: Some(256),
+            extended: false,
+        };
+        let cplc = device.security_domain.exchange(&cplc_command, None);
+        assert_eq!(cplc.status, 0x9000);
         for (kid, kvn) in refs {
             let (ins, kvn, kid) = match kid {
                 0 => (0x50, 0, 0),
@@ -1091,6 +1476,7 @@ mod tests {
             [(0, 0xff), (0x13, 1)]
         );
         assert_ne!(device.scp11b_public_key(), original);
+        assert_eq!(device.security_domain.exchange(&cplc_command, None), cplc);
     }
 
     #[test]

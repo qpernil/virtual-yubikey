@@ -186,8 +186,14 @@ and remaining gaps are documented in [OpenPGP](docs/openpgp.md).
 
 The Issuer Security Domain provides factory SCP03 keys, a persistent
 certificate-backed P-256 SCP11b identity, and authenticated administration of
-SCP03/SCP11 keys, certificates, host CAs, allowlists, and key deletion. SCP03 and
+SCP03/SCP11 keys, certificates, host CAs, allowlists, and key deletion. Public
+GET DATA provides recognition data, key information, certificate chains, card
+and host CA identifiers, and host CA identifier lookup. SCP03 and
 SCP11a/c authenticate administrative clients; SCP11b authenticates the card.
+The CPLC object uses the standard 42-byte field layout with the configured
+device serial as its synthetic IC serial, with unspecified production fields. It is available publicly
+and through secure messaging; see the CPLC encoding in
+[secure messaging](docs/globalplatform-secure-messaging.md).
 Shared GlobalPlatform SCP03/SCP11a/b/c secure messaging protects every selectable
 CCID applet through command/response authentication, encryption, and chaining.
 Factory reset requires the documented blocked-key conditions and preserves the
