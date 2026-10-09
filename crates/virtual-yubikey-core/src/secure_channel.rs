@@ -222,8 +222,11 @@ impl SecureChannel {
             return ResponseApdu::status(0x6982);
         }
         let mut input = vec![0; AES_BLOCK_SIZE];
-        input.extend([0x84, 0x82, security_level, 0x00, 0x10]);
-        input.extend_from_slice(&command.data[..8]);
+        let Ok(header) = encode_header_and_data(command, command.data.len(), &command.data[..8])
+        else {
+            return ResponseApdu::status(0x6700);
+        };
+        input.extend_from_slice(&header);
         let Ok(mac) = aes_cmac(&pending.s_mac, &input) else {
             return ResponseApdu::status(0x6f00);
         };
@@ -643,6 +646,10 @@ mod tests {
     }
 
     fn establish_scp03(device: &mut VirtualYubiKey) -> HostSession {
+        establish_scp03_with_format(device, false)
+    }
+
+    fn establish_scp03_with_format(device: &mut VirtualYubiKey, extended: bool) -> HostSession {
         let host_challenge = [0x11; 8];
         let mut initialize = vec![0x80, 0x50, 0xff, 0x00, 0x08];
         initialize.extend_from_slice(&host_challenge);
@@ -663,11 +670,16 @@ mod tests {
             response.data[21..29]
         );
         let host_cryptogram = scp03_cryptogram(&s_mac, 0x01, &context).unwrap();
+        let mut authenticate = vec![0x84, 0x82, 0x33, 0];
+        if extended {
+            authenticate.extend([0, 0, 0x10]);
+        } else {
+            authenticate.push(0x10);
+        }
         let mut mac_input = vec![0; 16];
-        mac_input.extend([0x84, 0x82, 0x33, 0, 0x10]);
+        mac_input.extend_from_slice(&authenticate);
         mac_input.extend_from_slice(&host_cryptogram);
         let mac = aes_cmac(&s_mac, &mac_input).unwrap();
-        let mut authenticate = vec![0x84, 0x82, 0x33, 0, 0x10];
         authenticate.extend_from_slice(&host_cryptogram);
         authenticate.extend_from_slice(&mac[..8]);
         assert_eq!(send(device, &authenticate).status, 0x9000);
@@ -719,6 +731,23 @@ mod tests {
             s_rmac: keys[48..64].to_vec(),
             chain: receipt,
             counter: 0,
+        }
+    }
+
+    #[test]
+    fn scp03_external_authenticate_supports_short_and_extended_apdus() {
+        for extended in [false, true] {
+            let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(12345678));
+            let mut select = vec![0, 0xa4, 4, 0, ISSUER_SECURITY_DOMAIN_AID.len() as u8];
+            select.extend_from_slice(&ISSUER_SECURITY_DOMAIN_AID);
+            assert_eq!(send(&mut device, &select).status, 0x9000);
+            let expected = send(&mut device, &[0, 0xca, 0, 0xe0, 0]).data;
+            let mut host = establish_scp03_with_format(&mut device, extended);
+            for _ in 0..3 {
+                let response = host.exchange(&mut device, &HostCommand::short(0xca, 0xe0, &[], 0));
+                assert_eq!(response.status, 0x9000);
+                assert_eq!(response.data, expected);
+            }
         }
     }
 

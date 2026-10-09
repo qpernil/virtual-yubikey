@@ -11,6 +11,10 @@ selected applet. It clears that applet's connection-scoped authentication while
 leaving its AID selected. By contrast, reselecting the same AID preserves its
 authentication state, matching validated YubiKey behavior.
 
+SCP03 EXTERNAL AUTHENTICATE accepts both short and extended APDU encoding;
+its command MAC includes the received length encoding. This permits bootstrap
+administration with Yubico host tools as well as pkcs11rs.
+
 The layer supports C-MAC, C-ENC, R-MAC, and R-ENC, protected-command
 segmentation, and response chaining. It covers the Issuer Security Domain,
 Management, PIV, YubiHSM Auth, FIDO2-over-CCID, and the selectable OpenPGP
