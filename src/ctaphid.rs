@@ -661,7 +661,7 @@ mod tests {
                     &mut fido,
                     false
                 ),
-                []
+                Vec::<u8>::new()
             );
             assert!(hid.take_management_change());
             assert!(!hid.take_management_change());
