@@ -77,6 +77,12 @@ PIV's supplied CRT fields retain their wire-format bounds but are discarded.
 Trusted persisted keys are reconstructed without repeating import-time tests.
 Legacy RSA-1024 support does not claim NIST key-establishment acceptance.
 
+Ed25519 private keys use 32-byte seeds; seed expansion derives the public key.
+Public-point validation and signature verification use the shared
+[Edwards validation policy](https://github.com/qpernil/software-key-core/blob/main/docs/edwards-key-validation.md),
+including Dalek weak-key rejection and strict verification. Applet support
+remains Ed25519; the shared library also supports Ed448 for other consumers.
+
 ## Source layout
 
 | Module | Responsibility |
