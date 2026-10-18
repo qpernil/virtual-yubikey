@@ -116,3 +116,7 @@ The reproducible harness and device-selection guards are documented in
 [the provider's qualification workflow](https://github.com/qpernil/pkcs11rs/blob/master/docs/openpgp.md#physical-rsa-qualification).
 
 Reference: [OpenPGP card specification 3.4.1](https://gnupg.org/ftp/specs/OpenPGP-smart-card-application-3.4.1.pdf).
+
+RSA generation and private import use the common [RSA validation and CRT
+normalization boundary](https://github.com/qpernil/software-key-core/blob/main/docs/rsa-key-validation.md).
+Applet size/exponent acceptance and authorization remain protocol policy.

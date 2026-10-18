@@ -1442,12 +1442,7 @@ impl PivApplet {
             }
             SoftwareSigningKey::from_rsa_primes(components[0], components[1], &[1, 0, 1])
                 .and_then(|key| {
-                    let computed = key.rsa_crt_components()?;
-                    if components
-                        .iter()
-                        .zip(computed.iter())
-                        .all(|(supplied, expected)| unsigned_integer_equal(supplied, expected))
-                    {
+                    if key.key_kind() == (KeyKind::Rsa { modulus_bits: algorithm.rsa_bits().unwrap() }) {
                         Ok(key)
                     } else {
                         Err(software_key_core::software_signing::SoftwareSigningError::InvalidPrivateKey)
@@ -2275,18 +2270,6 @@ fn certificate_der(object: &[u8]) -> Option<&[u8]> {
         return None;
     }
     unique_field(&fields, 0x70)
-}
-
-fn unsigned_integer_equal(left: &[u8], right: &[u8]) -> bool {
-    let left = left
-        .iter()
-        .position(|byte| *byte != 0)
-        .map_or(&[][..], |first| &left[first..]);
-    let right = right
-        .iter()
-        .position(|byte| *byte != 0)
-        .map_or(&[][..], |first| &right[first..]);
-    left == right
 }
 
 fn decode_object_id(request: &[u8]) -> Option<u32> {
@@ -3435,7 +3418,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_and_validates_rsa_crt_components() {
+    fn imports_rsa_factors_and_recalculates_crt_parameters() {
         let imported = SoftwareSigningKey::generate_for_kind(KeyKind::Rsa {
             modulus_bits: 1_024,
         })
@@ -3483,7 +3466,7 @@ mod tests {
                 &corrupted,
             ))
             .status,
-            STATUS_INCORRECT_DATA
+            0x9000
         );
     }
 

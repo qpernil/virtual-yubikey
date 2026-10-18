@@ -68,6 +68,15 @@ The card-side channel model, factory selectors, trust boundary, and host-tool
 behavior are documented in
 [`docs/globalplatform-secure-messaging.md`](docs/globalplatform-secure-messaging.md).
 
+RSA generation and PIV/OpenPGP private imports share the
+[`software-key-core` RSA boundary](https://github.com/qpernil/software-key-core/blob/main/docs/rsa-key-validation.md).
+All supported sizes, including intermediate OpenPGP sizes, receive the same
+size-dependent key-quality validation and pairwise test. Applet algorithm and
+exponent acceptance remains separate. The library recalculates CRT parameters;
+PIV's supplied CRT fields retain their wire-format bounds but are discarded.
+Trusted persisted keys are reconstructed without repeating import-time tests.
+Legacy RSA-1024 support does not claim NIST key-establishment acceptance.
+
 ## Source layout
 
 | Module | Responsibility |
