@@ -415,6 +415,10 @@ fn private_key_from_serialized(
     serialized: &[u8],
 ) -> Result<SoftwarePrivateKey, ()> {
     if let Some(key_kind) = algorithm.key_kind() {
+        // The native PIV ML-DSA import and persistence format contains a seed.
+        if matches!(key_kind, KeyKind::MlDsa(_)) && serialized.len() != 32 {
+            return Err(());
+        }
         SoftwareSigningKey::from_serialized_for_kind(key_kind, serialized)
             .map(SoftwarePrivateKey::Signing)
             .map_err(|_| ())
@@ -3810,7 +3814,11 @@ mod tests {
                 ManagementAlgorithm::Aes192,
                 &FACTORY_MANAGEMENT_KEY,
             );
+            let expanded =
+                software_key_core::post_quantum::MlDsaPrivateKey::from_seed(parameter_set, seed)
+                    .expanded_private_key();
             for invalid in [
+                encode_tlv(IMPORT_TAG_PQ_SEED, &expanded),
                 encode_tlv(IMPORT_TAG_PQ_SEED, &seed[..31]),
                 encode_tlv(IMPORT_TAG_PQ_SEED, &[algorithm as u8; 33]),
                 encode_tlv(0x08, &seed),
