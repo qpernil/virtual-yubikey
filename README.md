@@ -150,6 +150,11 @@ ML-DSA-44/65/87, ML-KEM-512/768/1024, and concrete hybrid PQ/T KEM key generatio
 import and seed-only PQC import, metadata, signing, raw RSA private operations,
 ECDH/X25519 agreement, ML-KEM and hybrid-KEM decapsulation, and key move/delete. Reads of the
 four biometric and printed-information objects enforce PIV PIN verification.
+The native PIV PQC import and persistence formats use seeds even though the
+shared software-key-core API supports validated expanded ML-DSA/ML-KEM imports
+for consumers such as the PKCS #11 software slot. Hybrid imports use one
+32-byte seed for both components.
+
 Generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys can be attested by the
 persistent RSA, EC, Ed25519, or ML-DSA key in slot F9. Changing F9 refreshes
 its matching self-signed certificate in object `5FFF01`; imported user keys
