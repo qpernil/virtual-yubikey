@@ -147,13 +147,14 @@ lifecycle: factory PIN/PUK and
 3TDEA/AES management authentication, retry configuration/reset, data and
 certificate objects, RSA-1024/2048/3072/4096, P-256/P-384, Ed25519/X25519,
 ML-DSA-44/65/87, ML-KEM-512/768/1024, and concrete hybrid PQ/T KEM key generation, classical private-key
-import and seed-only PQC import, metadata, signing, raw RSA private operations,
+import and seed/expanded/combined standalone PQC import, metadata, signing, raw RSA private operations,
 ECDH/X25519 agreement, ML-KEM and hybrid-KEM decapsulation, and key move/delete. Reads of the
 four biometric and printed-information objects enforce PIV PIN verification.
-The native PIV PQC import and persistence formats use seeds even though the
-shared software-key-core API supports validated expanded ML-DSA/ML-KEM imports
-for consumers such as the PKCS #11 software slot. Hybrid imports use one
-32-byte seed for both components.
+Standalone ML-DSA/ML-KEM imports and persistence share software-key-core
+validation with the PKCS #11 software token and virtual YubiHSM. PIV import
+uses tag `09` for seeds and `0A` for expanded keys, accepting both with a full
+consistency check. Persistent records retain seeds when known and expanded keys
+otherwise. Hybrid imports use one 32-byte seed for both components.
 
 Generated RSA, EC, Ed25519, ML-DSA, and ML-KEM keys can be attested by the
 persistent RSA, EC, Ed25519, or ML-DSA key in slot F9. Changing F9 refreshes

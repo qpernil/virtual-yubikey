@@ -64,6 +64,7 @@ const INS_SET_RETRIES: u8 = 0xfa;
 const INS_RESET: u8 = 0xfb;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 const IMPORT_TAG_PQ_SEED: u32 = 0x09;
+const IMPORT_TAG_PQ_EXPANDED: u32 = 0x0a;
 // Provisional ML-DSA GENERAL AUTHENTICATE extensions; not allocated by SP 800-73.
 const AUTH_TAG_ML_DSA_CONTEXT: u32 = 0x88;
 const AUTH_TAG_ML_DSA_HEDGE: u32 = 0x89;
@@ -415,10 +416,6 @@ fn private_key_from_serialized(
     serialized: &[u8],
 ) -> Result<SoftwarePrivateKey, ()> {
     if let Some(key_kind) = algorithm.key_kind() {
-        // The native PIV ML-DSA import and persistence format contains a seed.
-        if matches!(key_kind, KeyKind::MlDsa(_)) && serialized.len() != 32 {
-            return Err(());
-        }
         SoftwareSigningKey::from_serialized_for_kind(key_kind, serialized)
             .map(SoftwarePrivateKey::Signing)
             .map_err(|_| ())
@@ -427,7 +424,7 @@ fn private_key_from_serialized(
             .map(SoftwarePrivateKey::Montgomery)
             .map_err(|_| ())
     } else if let Some(parameter_set) = algorithm.ml_kem_parameter_set() {
-        MlKemPrivateKey::from_seed_slice(parameter_set, serialized)
+        MlKemPrivateKey::from_serialized(parameter_set, serialized)
             .map(SoftwarePrivateKey::MlKem)
             .map_err(|_| ())
     } else if let Some(construction) = algorithm.hybrid_kem() {
@@ -443,7 +440,7 @@ fn serialized_private_key(key: &SoftwarePrivateKey) -> Result<Zeroizing<Vec<u8>>
     match key {
         SoftwarePrivateKey::Signing(key) => key.serialized().map_err(|_| ()),
         SoftwarePrivateKey::Montgomery(key) => Ok(key.serialized()),
-        SoftwarePrivateKey::MlKem(key) => key.seed().ok_or(()),
+        SoftwarePrivateKey::MlKem(key) => Ok(key.serialized()),
         SoftwarePrivateKey::HybridKem(key) => Ok(Zeroizing::new(key.seed().to_vec())),
     }
 }
@@ -1454,6 +1451,46 @@ impl PivApplet {
                 })
                 .map(SoftwarePrivateKey::Signing)
                 .map_err(|_| ())
+        } else if algorithm.ml_dsa_parameter_set().is_some()
+            || algorithm.ml_kem_parameter_set().is_some()
+        {
+            // PIV identifies components explicitly; cryptographic validation
+            // and seed/expanded consistency belong to the shared key core.
+            if fields.is_empty()
+                || fields.len() > 4
+                || fields
+                    .iter()
+                    .any(|(tag, _)| !matches!(*tag, 0x09 | 0x0a | 0xaa | 0xab))
+                || fields
+                    .iter()
+                    .filter(|(tag, _)| *tag == IMPORT_TAG_PQ_SEED)
+                    .count()
+                    > 1
+                || fields
+                    .iter()
+                    .filter(|(tag, _)| *tag == IMPORT_TAG_PQ_EXPANDED)
+                    .count()
+                    > 1
+            {
+                return ResponseApdu::status(STATUS_INCORRECT_DATA);
+            }
+            let seed = unique_field(&fields, IMPORT_TAG_PQ_SEED);
+            let expanded = unique_field(&fields, IMPORT_TAG_PQ_EXPANDED);
+            if let Some(parameters) = algorithm.ml_dsa_parameter_set() {
+                software_key_core::post_quantum::MlDsaPrivateKey::from_components(
+                    parameters, seed, expanded,
+                )
+                .map(|key| SoftwarePrivateKey::Signing(SoftwareSigningKey::MlDsa(key)))
+                .map_err(|_| ())
+            } else {
+                MlKemPrivateKey::from_components(
+                    algorithm.ml_kem_parameter_set().unwrap(),
+                    seed,
+                    expanded,
+                )
+                .map(SoftwarePrivateKey::MlKem)
+                .map_err(|_| ())
+            }
         } else {
             let Some(import_tag) = algorithm.import_tag() else {
                 return ResponseApdu::status(STATUS_INCORRECT_DATA);
@@ -4015,7 +4052,139 @@ mod tests {
     }
 
     #[test]
-    fn imports_ml_kem_seeds_and_rejects_non_seed_private_keys() {
+    fn standalone_pqc_imports_preserve_seed_and_expanded_keys_across_restart() {
+        use software_key_core::post_quantum::{MlDsaPrivateKey, ml_kem_encapsulate, verify_ml_dsa};
+        for algorithm in [
+            PivAlgorithm::MlDsa44,
+            PivAlgorithm::MlDsa65,
+            PivAlgorithm::MlDsa87,
+            PivAlgorithm::MlKem512,
+            PivAlgorithm::MlKem768,
+            PivAlgorithm::MlKem1024,
+        ] {
+            let (seed, expanded, public) = if let Some(parameters) =
+                algorithm.ml_dsa_parameter_set()
+            {
+                let key = MlDsaPrivateKey::from_seed(parameters, [7; 32]);
+                (vec![7; 32], key.expanded_private_key(), key.public_key())
+            } else {
+                let key =
+                    MlKemPrivateKey::from_seed(algorithm.ml_kem_parameter_set().unwrap(), [7; 64]);
+                (vec![7; 64], key.expanded_private_key(), key.public_key())
+            };
+            for form in 0..3 {
+                let mut piv = PivApplet::new(26, [5, 8, 0]);
+                authenticate_management(
+                    &mut piv,
+                    ManagementAlgorithm::Aes192,
+                    &FACTORY_MANAGEMENT_KEY,
+                );
+                let mut fields = Vec::new();
+                if form != 1 {
+                    fields.extend(encode_tlv(IMPORT_TAG_PQ_SEED, &seed));
+                }
+                if form != 0 {
+                    fields.extend(encode_tlv(IMPORT_TAG_PQ_EXPANDED, &expanded));
+                }
+                fields.extend(encode_tlv(0xaa, &[PIN_POLICY_NEVER]));
+                assert_eq!(
+                    piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9c, &fields))
+                        .status,
+                    0x9000
+                );
+                let stored_key = serialized_private_key(&piv.keys[&0x9c].private_key).unwrap();
+                assert_eq!(
+                    stored_key.as_slice(),
+                    if form == 1 {
+                        expanded.as_slice()
+                    } else {
+                        seed.as_slice()
+                    }
+                );
+                // An inconsistent pair and duplicate components must not replace the key.
+                let mut other_seed = seed.clone();
+                other_seed[0] ^= 1;
+                for malformed in [
+                    [
+                        encode_tlv(IMPORT_TAG_PQ_SEED, &other_seed),
+                        encode_tlv(IMPORT_TAG_PQ_EXPANDED, &expanded),
+                    ]
+                    .concat(),
+                    [
+                        encode_tlv(IMPORT_TAG_PQ_EXPANDED, &expanded),
+                        encode_tlv(IMPORT_TAG_PQ_EXPANDED, &expanded),
+                    ]
+                    .concat(),
+                    encode_tlv(IMPORT_TAG_PQ_EXPANDED, &expanded[..expanded.len() - 1]),
+                    encode_tlv(IMPORT_TAG_PQ_EXPANDED, &vec![0; expanded.len()]),
+                ] {
+                    assert_eq!(
+                        piv.transmit(&command(INS_IMPORT_KEY, algorithm as u8, 0x9c, &malformed))
+                            .status,
+                        STATUS_INCORRECT_DATA
+                    );
+                    assert_eq!(
+                        serialized_private_key(&piv.keys[&0x9c].private_key).unwrap(),
+                        stored_key
+                    );
+                }
+                for _ in 0..2 {
+                    if let Some(parameters) = algorithm.ml_dsa_parameter_set() {
+                        let request = encode_tlv(
+                            0x7c,
+                            &[
+                                encode_tlv(0x82, &[]),
+                                encode_tlv(0x8a, &[0]),
+                                encode_tlv(0x81, b"expanded import"),
+                            ]
+                            .concat(),
+                        );
+                        let response = piv.transmit(&command(
+                            INS_AUTHENTICATE,
+                            algorithm as u8,
+                            0x9c,
+                            &request,
+                        ));
+                        assert_eq!(response.status, 0x9000);
+                        let signature =
+                            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82)
+                                .unwrap();
+                        verify_ml_dsa(parameters, &public, b"expanded import", &[], signature)
+                            .unwrap();
+                    } else {
+                        let (ciphertext, expected) =
+                            ml_kem_encapsulate(algorithm.ml_kem_parameter_set().unwrap(), &public)
+                                .unwrap();
+                        let request = encode_tlv(
+                            0x7c,
+                            &[encode_tlv(0x82, &[]), encode_tlv(0x81, &ciphertext)].concat(),
+                        );
+                        let response = piv.transmit(&command(
+                            INS_AUTHENTICATE,
+                            algorithm as u8,
+                            0x9c,
+                            &request,
+                        ));
+                        assert_eq!(response.status, 0x9000);
+                        assert_eq!(
+                            decode_exact_tlv(decode_exact_tlv(&response.data, 0x7c).unwrap(), 0x82)
+                                .unwrap(),
+                            expected.as_slice()
+                        );
+                    }
+                    let stored = piv.persistent_state().unwrap();
+                    piv = PivApplet::from_persistent_state(26, [5, 8, 0], &stored).unwrap();
+                    assert_eq!(
+                        serialized_private_key(&piv.keys[&0x9c].private_key).unwrap(),
+                        stored_key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn imports_ml_kem_seeds_and_rejects_invalid_seed_components() {
         for (algorithm, parameter_set) in [
             (PivAlgorithm::MlKem512, MlKemParameterSet::MlKem512),
             (PivAlgorithm::MlKem768, MlKemParameterSet::MlKem768),

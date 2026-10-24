@@ -95,15 +95,23 @@ tests cover direct/multipart hash-specific calls and context boundaries.
 
 PIN and touch policies apply to both operations. Key generation and persistent
 restore are supported. The private `IMPORT KEY` command (`FE`, P1 = algorithm
-ID, P2 = slot) accepts a single private tag `09` containing the 32-byte
-ML-DSA seed, 64-byte ML-KEM seed, or 32-byte hybrid-KEM decapsulation seed,
-optionally alongside the existing `AA`
-PIN-policy and `AB` touch-policy TLVs. The exact seed length and algorithm
-are validated before replacing a slot. Expanded private keys and PKCS#8 are
-not accepted on this PIV wire format. Import requires management-key
-authentication; use encrypted SCP03 or SCP11 secure messaging if the seed
-must be confidential in transit, since management authentication alone does not
-encrypt the import APDU. Imported user keys are not eligible for the
+ID, P2 = slot) accepts private tag `09` containing the 32-byte ML-DSA seed
+or 64-byte ML-KEM seed, private tag `0A` containing the expanded FIPS 204/203
+private key, or both tags. Expanded lengths are 2,560/4,032/4,896 bytes for
+ML-DSA-44/65/87 and 1,632/2,400/3,168 bytes for ML-KEM-512/768/1024.
+The existing `AA` PIN-policy and `AB` touch-policy TLVs are optional.
+Duplicate components, malformed keys, and inconsistent seed/expanded pairs
+are rejected before replacing a slot, using software-key-core validation.
+Tag `09` retains its seed-only meaning; expanded bytes belong in `0A`.
+Hybrid KEMs accept only tag `09` with their inseparable 32-byte seed. PKCS #8
+is not a native APDU encoding.
+
+Persistent keys retain the seed when available and otherwise the expanded
+private encoding, inside the existing protected state record. Both forms
+restore through the shared key code; existing seed records remain readable.
+Import requires management-key authentication; use encrypted SCP03 or SCP11
+secure messaging when private material must be confidential in transit, since
+management authentication alone does not encrypt the import APDU. Imported user keys are not eligible for the
 device-generated-key attestation claim.
 
 Attestation certificates use the standard X.509 ML-DSA and ML-KEM
