@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 const-oid = "0.10.2"
-der = { version = "0.8.1", features = ["alloc", "derive", "std"] }
+der = { version = "0.8.3", features = ["alloc", "derive", "std"] }
 software-key-core = { path = "../../../software-key-core", features = ["x509-signing", "x509-validation"] }
 getrandom = "0.4.3"
 minicbor = { version = "2.3.1", features = ["alloc"] }
