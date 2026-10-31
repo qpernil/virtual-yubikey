@@ -127,8 +127,9 @@ dependencies = [
 
 [[package]]
 name = "certval"
-version = "0.2.0-pre"
-source = "git+https://github.com/carl-wallace/rust-pki?rev=7b45426af9a1b99b5f5aa5c348deea8c338412b5#7b45426af9a1b99b5f5aa5c348deea8c338412b5"
+version = "0.2.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc6f0bddbf3de03eac84e36737d40f788805a49472d25c00f1e2c0b784757995"
 dependencies = [
  "base64ct",
  "bitvec",
@@ -137,10 +138,9 @@ dependencies = [
  "cidr",
  "cms",
  "const-oid 0.10.2",
- "der 0.8.2",
+ "der 0.8.3",
  "ecdsa",
  "flagset",
- "hex-literal",
  "log",
  "p256",
  "p384",
@@ -158,7 +158,6 @@ dependencies = [
  "subtle-encoding",
  "walkdir",
  "x509-cert",
- "x509-ocsp",
 ]
 
 [[package]]
@@ -236,12 +235,12 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cms"
-version = "0.3.0-pre.2"
+version = "0.3.0-rc.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986e7713348fbe5322df18082d73a0ad53a2946dbb7a02452cf3622b83b91e7c"
+checksum = "2a7e16fb99a745fd8c7327eeb7deb9f667c03320f4f61d23c1927a55813b4466"
 dependencies = [
  "const-oid 0.10.2",
- "der 0.8.2",
+ "der 0.8.3",
  "spki 0.8.1",
  "x509-cert",
 ]
@@ -327,9 +326,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "a2376ffd6f96d8a9db59875b4b6b0237d6900b5baf64279714e05493ce64828a"
 dependencies = [
  "cmov",
  "subtle",
@@ -383,9 +382,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+checksum = "6a996a108feb8b427a6e12fcf6af4aa83409b79d72c15337d7741368131ee004"
 dependencies = [
  "const-oid 0.10.2",
  "der_derive",
@@ -451,7 +450,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
- "der 0.8.2",
+ "der 0.8.3",
  "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
@@ -665,12 +664,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
-name = "hex-literal"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e712f64ec3850b98572bffac52e2c6f282b29fe6c5fa6d42334b30be438d95c1"
-
-[[package]]
 name = "hkdf"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,7 +800,7 @@ checksum = "e7244eafd1e09e7c4e33043881997aa6ab6dffff3ed2cee3395a278980481d6e"
 [[package]]
 name = "ml-dsa"
 version = "0.1.1"
-source = "git+https://github.com/RustCrypto/signatures.git#7b8bdcde8917a9db5775e689e25c91adb784492a"
+source = "git+https://github.com/RustCrypto/signatures.git?rev=a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e#a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e"
 dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
@@ -1013,14 +1006,15 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
- "der 0.8.2",
+ "der 0.8.3",
  "spki 0.8.1",
 ]
 
 [[package]]
 name = "pkiprocmacros"
 version = "0.1.2"
-source = "git+https://github.com/carl-wallace/rust-pki?rev=7b45426af9a1b99b5f5aa5c348deea8c338412b5#7b45426af9a1b99b5f5aa5c348deea8c338412b5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5df93c69801978b114a3e8f84e395bc72cee6666b26794adc799cfa4d95fc07"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1240,7 +1234,7 @@ checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct",
  "ctutils",
- "der 0.8.2",
+ "der 0.8.3",
  "hybrid-array",
  "subtle",
  "zeroize",
@@ -1422,7 +1416,7 @@ dependencies = [
  "certval",
  "cmac",
  "const-oid 0.10.2",
- "der 0.8.2",
+ "der 0.8.3",
  "des",
  "ecdsa",
  "ed25519-dalek",
@@ -1495,7 +1489,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
 dependencies = [
  "base64ct",
- "der 0.8.2",
+ "der 0.8.3",
 ]
 
 [[package]]
@@ -1687,7 +1681,7 @@ name = "virtual-yubikey-core"
 version = "0.1.0"
 dependencies = [
  "const-oid 0.10.2",
- "der 0.8.2",
+ "der 0.8.3",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "minicbor",
@@ -1874,22 +1868,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "105ef4642d9cb137ef83d623d0e4bf08b8adf69e9918ca904a174adb6d3d038b"
 dependencies = [
  "const-oid 0.10.2",
- "der 0.8.2",
+ "der 0.8.3",
  "sha1",
  "signature 3.0.0",
  "spki 0.8.1",
  "tls_codec",
-]
-
-[[package]]
-name = "x509-ocsp"
-version = "0.3.0-pre"
-source = "git+https://github.com/RustCrypto/formats.git?rev=2c0b0f99cf2bbc0738edc4e439e97dcc204099f5#2c0b0f99cf2bbc0738edc4e439e97dcc204099f5"
-dependencies = [
- "const-oid 0.10.2",
- "der 0.8.2",
- "spki 0.8.1",
- "x509-cert",
 ]
 
 [[package]]
