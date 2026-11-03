@@ -195,9 +195,9 @@ applet. The shared storage writer atomically replaces its
 The [YKOATH applet](docs/oath.md) shares persistent HOTP/TOTP credentials,
 SHA1/SHA256/SHA512 calculation, password authentication and touch policy across
 USB and embedded CCID. OATH uses `SEND REMAINING` for response continuation,
-including fragmented SCP03/SCP11 protected responses. pkcs11rs embedded readers
-opt in with `"applets": ["oath"]`; their native OATH path and PKCS #11 mapping use
-the same protocol as physical readers.
+including fragmented SCP03/SCP11 protected responses. pkcs11rs embedded virtual
+YubiKeys opt in through `embedded.yubikeys` with `"applets": ["oath"]`; their
+native OATH path and PKCS #11 mapping use the same protocol as physical readers.
 
 ## OpenPGP
 
@@ -527,7 +527,7 @@ forms use the shared `virtual-yubikey-core::storage` loader and runtime. A seria
 `security-domain-12345678.cbor`, `openpgp-12345678.cbor`,
 `management-12345678.cbor`, and `oath-12345678.cbor`.
 The directory location is chosen by the host; filenames and record contents are
-identical for embedded readers and USB workers with the same serial.
+identical for embedded virtual YubiKeys and USB workers with the same serial.
 
 Before reading or creating records, the core exclusively locks
 `yubikey-12345678.lock`. The lock covers all applets and remains held through

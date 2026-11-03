@@ -1,7 +1,7 @@
 # YKOATH applet
 
 The shared core implements YKOATH at AID `A0000005272101` for the USB CCID
-worker and pkcs11rs embedded readers. The default 5.8 profile installs OATH and
+worker and pkcs11rs embedded virtual YubiKeys. The default 5.8 profile installs OATH and
 advertises Management capability `0x0020`. Management USB enablement also gates
 applet selection. The factory application has no credentials or access password.
 
