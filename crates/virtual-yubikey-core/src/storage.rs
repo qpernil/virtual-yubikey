@@ -30,15 +30,17 @@ pub enum PersistentApplet {
     SecurityDomain,
     OpenPgp,
     Management,
+    Oath,
 }
 impl PersistentApplet {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Fido,
         Self::Piv,
         Self::HsmAuth,
         Self::SecurityDomain,
         Self::OpenPgp,
         Self::Management,
+        Self::Oath,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -48,6 +50,7 @@ impl PersistentApplet {
             Self::SecurityDomain => "security-domain",
             Self::OpenPgp => "openpgp",
             Self::Management => "management",
+            Self::Oath => "oath",
         }
     }
     fn bit(self) -> u8 {
@@ -64,6 +67,7 @@ impl VirtualYubiKey {
             PersistentApplet::SecurityDomain => self.security_domain_persistent_state(),
             PersistentApplet::OpenPgp => self.openpgp_persistent_state(),
             PersistentApplet::Management => self.management_persistent_state(),
+            PersistentApplet::Oath => self.oath_persistent_state(),
         }
         .map_err(io::Error::other)
     }
@@ -76,6 +80,7 @@ impl VirtualYubiKey {
             self.take_security_domain_persistent_change(),
             self.take_openpgp_persistent_change(),
             self.take_management_persistent_change(),
+            self.take_oath_persistent_change(),
         ];
         PersistentApplet::ALL
             .into_iter()
@@ -115,7 +120,7 @@ impl DeviceStorage {
             serial: profile.serial,
             _lock: StateLock::acquire(root.join(format!("yubikey-{}.lock", profile.serial)))?,
         };
-        let mut records: [Option<Vec<u8>>; 6] = Default::default();
+        let mut records: [Option<Vec<u8>>; 7] = Default::default();
         for applet in PersistentApplet::ALL {
             records[applet as usize] = match fs::read(storage.path(applet)) {
                 Ok(encoded) => Some(encoded),
@@ -156,6 +161,9 @@ impl DeviceStorage {
             .map_err(invalid_state)?;
         device
             .restore_management_persistent_state(&records[5])
+            .map_err(invalid_state)?;
+        device
+            .restore_oath_persistent_state(&records[6])
             .map_err(invalid_state)?;
         // Validate every record before initializing anything on disk.
         for applet in PersistentApplet::ALL {

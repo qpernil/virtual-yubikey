@@ -1104,6 +1104,57 @@ mod tests {
     }
 
     #[test]
+    fn oath_touch_timeout_and_success_use_ccid_presence_without_consuming_extra_hotp() {
+        use virtual_yubikey_core::OATH_AID;
+        let mut card = Card::new(1);
+        let select = [vec![0, 0xa4, 4, 0, OATH_AID.len() as u8], OATH_AID.to_vec()].concat();
+        assert!(card.transmit(&select).ends_with(&[0x90, 0]));
+        let key = [&[0x11, 6][..], b"12345678901234567890"].concat();
+        let put = [tlv(0x71, b"touch"), tlv(0x73, &key), vec![0x78, 2]].concat();
+        assert_eq!(card.transmit(&short_apdu(1, &put)), [0x90, 0]);
+        let data = [tlv(0x71, b"touch"), tlv(0x74, &[])].concat();
+        let calculate = [vec![0, 0xa2, 0, 1, data.len() as u8], data].concat();
+        assert_eq!(
+            card.transmit_with_presence(&calculate, || Ok(false))
+                .unwrap(),
+            [0x69, 0x85]
+        );
+        let scheduler = keepalive::Scheduler::start().unwrap();
+        let mut extensions = Vec::new();
+        let response = run_with_keepalives(
+            || {
+                card.transmit_with_presence(&calculate, || {
+                    thread::sleep(Duration::from_millis(35));
+                    Ok(true)
+                })
+            },
+            0,
+            13,
+            &scheduler.handle(),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            &mut |frame| {
+                extensions.push(frame.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(response, [0x76, 5, 6, 0x4c, 0x93, 0xcf, 0x18, 0x90, 0]);
+        assert!(!extensions.is_empty());
+        assert!(
+            extensions
+                .iter()
+                .all(|frame| frame == &time_extension(0, 13))
+        );
+        assert_eq!(card.transmit(&calculate), [0x69, 0x85]);
+        let response = card
+            .transmit_with_presence(&calculate, || Ok(true))
+            .unwrap();
+        assert_eq!(response, [0x76, 5, 6, 0x41, 0x39, 0x7e, 0xea, 0x90, 0]);
+    }
+
+    #[test]
     fn hsmauth_touch_wait_emits_ccid_time_extensions() {
         let (mut card, calculate) = hsmauth_touch_calculation();
         let scheduler = keepalive::Scheduler::start().unwrap();

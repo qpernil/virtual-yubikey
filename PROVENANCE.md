@@ -19,7 +19,7 @@ The principal public implementation references are:
 - OpenPGP card specifications;
 - GlobalPlatform secure-channel specifications; and
 - Yubico's publicly available developer documentation for YubiKey Management,
-  PIV, OpenPGP, YubiHSM Auth, and Security Domain administration.
+  PIV, OpenPGP, OATH, YubiHSM Auth, and Security Domain administration.
 
 The optional physical display uses Yubico's publicly published YubiKey 5 NFC
 front product image as recorded in `assets/README.md`. The image is kept as an

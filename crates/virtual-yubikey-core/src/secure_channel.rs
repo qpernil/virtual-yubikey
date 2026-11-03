@@ -536,7 +536,7 @@ mod tests {
     use super::*;
     use crate::{
         Applet, DeviceProfile, FIDO2_AID, HSMAUTH_AID, ISSUER_SECURITY_DOMAIN_AID, MANAGEMENT_AID,
-        OPENPGP_AID, PIV_AID, VirtualYubiKey,
+        OATH_AID, OPENPGP_AID, PIV_AID, VirtualYubiKey,
     };
 
     struct HostSession {
@@ -772,6 +772,7 @@ mod tests {
                 Applet::OpenPgp,
                 HostCommand::short(0x84, 0, &[], 8),
             ),
+            (&OATH_AID, Applet::Oath, HostCommand::short(0xa1, 0, &[], 0)),
             (&PIV_AID, Applet::Piv, HostCommand::short(0xfd, 0, &[], 0)),
             (
                 &FIDO2_AID,
@@ -802,7 +803,11 @@ mod tests {
             let mut channel = establish_scp03(&mut device);
             let response = channel.exchange(&mut device, command);
             assert_eq!(response.status, 0x9000, "{applet:?}");
-            assert!(!response.data.is_empty(), "{applet:?}");
+            if *applet == Applet::Oath {
+                assert!(response.data.is_empty(), "factory OATH inventory is empty");
+            } else {
+                assert!(!response.data.is_empty(), "{applet:?}");
+            }
         }
     }
 
