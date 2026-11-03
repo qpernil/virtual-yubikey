@@ -1,5 +1,7 @@
 # YKOATH applet
 
+Hostnames and device/account identifiers below are illustrative; replace them with your own configured values.
+
 The shared core implements YKOATH at AID `A0000005272101` for the USB CCID
 worker and pkcs11rs embedded virtual YubiKeys. The default 5.8 profile installs OATH and
 advertises Management capability `0x0020`. Management USB enablement also gates
@@ -88,9 +90,47 @@ multi-fragment enumeration. Exported PKCS #11 tests cover login visibility,
 import, all six type/hash combinations, length queries and short buffers,
 shared SHA1 HOTP views, deletion, password changes, deselection and restart.
 
-These are software interoperability checks. Live USB OATH host-tool qualification
-and physical password/SCP OTP-vector qualification are separate from them. The
-virtual applet does not supply hardware secret protection or NFC transport.
+Live USB qualification uses the gadget-host gadget with the 5.8 profile and serial
+`12345678`, accessed from macOS with YubiKey Manager 5.9.2. The `ykman` CLI
+checks OATH disable/re-enable with credential preservation, add/list/delete, all
+three HOTP hashes, rename without resetting the counter, and password
+installation/change/removal with incorrect-password rejection. Yubico's Python SDK
+checks all six RFC 6238 timestamps per hash, ten HOTP counters per hash, and
+fragmented LIST/CALCULATE ALL in plain mode, SCP03 and SCP11b. Password installation, incorrect-password
+rejection, protected login, change and removal pass over USB. An actual worker
+restart preserves the application ID, password, credential and next HOTP counter.
+Temporary qualification credentials and password protection are removed afterward.
+
+The deployed gadget-host device retains the same six public-fixture credentials as
+the physical smoke-test YubiKeys: `HOTP-SHA1`, `HOTP-SHA256`, `HOTP-SHA512`,
+`TOTP-SHA1`, `TOTP-SHA256` and `TOTP-SHA512`, all with the `pkcs11rs-smoke:`
+prefix. They use the public RFC 6238 secrets, six-digit HOTP starting at counter
+zero, and eight-digit TOTP with a 30-second period. Provisioning
+does not calculate HOTP codes. Worker restart preserves all six credentials;
+native pkcs11rs discovers their seven OTP object views after module
+reinitialization.
+
+Native pkcs11rs USB checks generate codes for all six retained samples, including
+all six RFC 6238 timestamps per hash, repeated output-length queries and
+short-buffer retries without extra HOTP counter consumption. `C_SetPIN` installs
+and removes the application password; incorrect-password rejection and protected
+login preserve the sample inventory.
+
+A touch-required USB calculation times out after 15 seconds while CCID keeps the
+connection alive. A physical joystick-center press also completes native
+`C_Sign` with the expected RFC 6238 code. The display's slow presence-wait blink
+and its completion on touch are visually confirmed. USB SCP11a/c and OTP vectors
+against password-protected physical YubiKeys are separate qualification targets.
+The virtual applet does not supply hardware secret protection or NFC transport.
+
+iOS runtime qualification uses temporary embedded profiles with preseeded sample
+credentials and an explicit pin for the matching persisted SCP11b public key.
+Both Swift and Objective-C smoke apps discover six applet slots and seven OATH
+object views on iOS 27.0 Simulator; the Swift app also passes on a physical iPhone
+running iOS 27.2. OATH login reports SCP11b in each case. A different valid card
+key is rejected with `CKR_DEVICE_ERROR`, without authenticated OATH inventory.
+These checks qualify iOS discovery, login and inventory rather than OTP-vector
+generation. The normal app configurations contain no embedded device or pin.
 
 References: [YKOATH protocol](https://developers.yubico.com/OATH/YKOATH_Protocol.html),
 [Yubico OATH client](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/oath.html),

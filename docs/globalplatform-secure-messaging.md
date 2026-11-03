@@ -1,5 +1,7 @@
 # GlobalPlatform secure messaging
 
+Hostnames and device/account identifiers below are illustrative; replace them with your own configured values.
+
 The virtual YubiKey implements card-side GlobalPlatform SCP03 and SCP11a/b/c over
 CCID. Secure messaging is a property of the selected card session, not of one
 applet implementation. A host selects an applet AID, establishes the secure
@@ -198,6 +200,14 @@ certificate; it does not authenticate that certificate's issuer.
 or use an explicit uncompressed P-256 public point. That trust decision belongs
 to the host. The virtual card exposes the chain and proves possession but never
 chooses the host's trust policy.
+
+Live gadget-host USB qualification with `yubico-piv-tool` 2.7.3 covers encrypted
+PIV version and status reads using `--enc` and the explicit virtual reader.
+Native pkcs11rs qualification uses a public-key pin obtained through authenticated
+SSH from the worker's persisted public certificate, then verifies OATH inventory
+and RFC TOTP codes for all three hashes over SCP11b. A different valid P-256 pin
+fails login with `CKR_DEVICE_ERROR`. The PIV-tool check qualifies encrypted
+interoperability; it does not qualify certificate trust validation.
 
 Protocol and tool behavior are based on the
 [YubiKey secure-channel description](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-apps-scp.html)
