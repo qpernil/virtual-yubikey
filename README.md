@@ -28,10 +28,11 @@ credential management, resident credentials, and `previewSign`.
 | --- | --- |
 | USB identity | Full-speed (12 Mbit/s) `1050:0406`, manufacturer `Yubico`, product `YubiKey Gadget FIDO+CCID`, `bcdDevice` `0x0580`, no USB serial string |
 | FIDO HID transport | FIDO Alliance HID report descriptor, 64-byte reports, CTAPHID 2, INIT, PING, MSG (U2F), CBOR and CANCEL |
-| CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
+| CCID transport | Class `0x0b`, T=1, one inserted card, bulk OUT/IN and interrupt IN; routes Management, PIV, OpenPGP, OATH, YubiHSM Auth, Issuer SD, and FIDO2 APDUs |
 | Management | AID `A000000527471117`, firmware 5.8.0, identity, persistent USB application enablement and configuration lock; see [Management](docs/management.md) |
 | PIV | Persistent objects, PIN/PUK and management authentication, RSA, NIST EC, Ed25519, X25519, ML-DSA, ML-KEM, and concrete hybrid PQ/T KEM operations |
 | YubiHSM Auth | Persistent symmetric and P-256 credentials, management and credential retry counters, touch policy, SCP03 session-key derivation, and asymmetric SCP11 authentication |
+| OATH | Persistent HOTP/TOTP with SHA1/SHA256/SHA512, application password authentication, touch, continuation and SCP; see [YKOATH](docs/oath.md) |
 | OpenPGP | Persistent RSA/ECC/Ed25519/X25519 keys, PIN/recovery policy, certificates, signing, decipher, touch and applet reset; see [OpenPGP](docs/openpgp.md) |
 | Issuer Security Domain | Persistent SCP03/SCP11 keys, certificate and host-CA administration, allowlists, and a factory P-256 SCP11b identity at KID `13`/KVN `1` |
 | GlobalPlatform secure messaging | Target-side SCP03 and SCP11a/b/c establishment plus C-MAC, C-ENC, R-MAC, and R-ENC around every selectable CCID applet |
@@ -41,7 +42,7 @@ credential management, resident credentials, and `previewSign`.
 | Diagnostics | Lifecycle, CCID, SELECT, APDU status, and unsupported-command events in stderr/journal |
 
 The implemented applets share one logical device across USB and embedded
-forms. OATH, Yubico OTP, biometric verification, and NFC
+forms. Yubico OTP, biometric verification, and NFC
 transport are not implemented. Management supplies identity and capability
 discovery, persistent USB application enablement and a configuration lock; see
 [Management configuration](docs/management.md). Applet-specific
@@ -188,6 +189,15 @@ command chaining and `61xx`/`GET RESPONSE`
 response chaining are handled once in the shared APDU router rather than by the
 applet. The shared storage writer atomically replaces its
 `hsmauth-<serial>.cbor` record after mutations.
+
+## OATH
+
+The [YKOATH applet](docs/oath.md) shares persistent HOTP/TOTP credentials,
+SHA1/SHA256/SHA512 calculation, password authentication and touch policy across
+USB and embedded CCID. OATH uses `SEND REMAINING` for response continuation,
+including fragmented SCP03/SCP11 protected responses. pkcs11rs embedded readers
+opt in with `"applets": ["oath"]`; their native OATH path and PKCS #11 mapping use
+the same protocol as physical readers.
 
 ## OpenPGP
 
@@ -512,10 +522,10 @@ Display traffic never blocks a USB endpoint thread.
 
 The supervisor creates `/var/lib/virtual-yubikey` for the worker. All device
 forms use the shared `virtual-yubikey-core::storage` loader and runtime. A serial
-`12345678` device has six independent CBOR records:
+`12345678` device has seven independent CBOR records:
 `fido-12345678.cbor`, `piv-12345678.cbor`, `hsmauth-12345678.cbor`,
-`security-domain-12345678.cbor`, `openpgp-12345678.cbor`, and
-`management-12345678.cbor`.
+`security-domain-12345678.cbor`, `openpgp-12345678.cbor`,
+`management-12345678.cbor`, and `oath-12345678.cbor`.
 The directory location is chosen by the host; filenames and record contents are
 identical for embedded readers and USB workers with the same serial.
 
@@ -527,7 +537,7 @@ writer batches dirty applets for up to 500 ms and atomically replaces only their
 mode-`0600` files, using `software-key-core/state-persistence`. USB ejection and
 shutdown flush pending writes. `--persistence immediate` synchronizes changes
 before responses are sent; FIDO signature counters, PIN changes/retries, reset,
-U2F wrapping-key creation, and Management configuration writes force a flush
+U2F wrapping-key creation, OATH mutations, and Management configuration writes force a flush
 in either mode.
 Runtime state locks are released before durability waits. Applet files are
 independent; a batch does not provide a transaction across multiple files.

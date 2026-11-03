@@ -39,7 +39,7 @@ CryptoTokenKit, PKCS #11 slots, and provider policy remain in `pkcs11rs`.
 The USB gadget exposes both CCID and FIDO HID because Yubico Authenticator uses
 HID for FIDO operations even when the same physical device has a CCID interface.
 The physical USB CCID reader also exposes the FIDO2 applet alongside Management,
-PIV, OpenPGP, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
+PIV, OpenPGP, OATH, YubiHSM Auth, and Issuer SD. HID and CCID route FIDO requests to one
 authoritative authenticator state and one shared Management configuration. U2F uses HID MSG or the same CCID FIDO AID;
 its wrapped handles are not discoverable PKCS #11 objects. Runtime FIDO callbacks
 receive `FidoProtocol` to distinguish CTAP2 status/CBOR responses from U2F
@@ -52,7 +52,7 @@ and secure-messaging coverage.
 
 | Component | Responsibility |
 | --- | --- |
-| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, persistent USB capability configuration, and logical device state |
+| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, OATH, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, persistent USB capability configuration, and logical device state |
 | `software-key-core::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |
@@ -95,7 +95,7 @@ select only the combinations advertised by their COSE algorithms.
 2. Run the core's FIDO, PIN, credential-management and `previewSign`
    registration/signing tests through the standalone logical device.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
-   PIV, OpenPGP, YubiHSM Auth, and Issuer Security Domain through CCID, including
+   PIV, OpenPGP, OATH, YubiHSM Auth, and Issuer Security Domain through CCID, including
    shared GlobalPlatform secure messaging.
 4. Keep the `pkcs11rs` embedded-reader tests running against the core for every
    configured applet, including OpenPGP key lifecycle and persistence, Security

@@ -7,7 +7,7 @@ device. It owns the firmware profile, ISO 7816 routing, installed applets, and
 persistent applet state. The USB worker exposes that core through FIDO HID and
 CCID. The `pkcs11rs` `embedded-virtual-yubikey` feature calls the same core
 through configurable in-process CCID readers. Management is implicit for
-identity, while PIV, FIDO2, OpenPGP, YubiHSM Auth, and Issuer Security Domain
+identity, while PIV, FIDO2, OpenPGP, OATH, YubiHSM Auth, and Issuer Security Domain
 are independently enabled and published through the ordinary CCID slot path.
 
 The core currently implements:
@@ -20,6 +20,8 @@ The core currently implements:
   credentials, PPUAT, and `previewSign`;
 - PIV discovery, authentication, objects, certificates, key lifecycle, signing,
   raw RSA operations, ECDH, Ed25519, and X25519;
+- [YKOATH](oath.md) persistent HOTP/TOTP with SHA1/SHA256/SHA512, password
+  authentication, touch policy, continuation and SCP integration;
 - YubiHSM Auth symmetric and asymmetric credentials, retry policy, touch,
   SCP03 session derivation, and SCP11 key agreement;
 - Issuer Security Domain discovery, factory SCP03 keys, a persistent
@@ -29,7 +31,7 @@ The core currently implements:
 - OpenPGP discovery, PIN lifecycle, persistent keys and certificates, RSA/ECC/
   Ed25519/X25519 operations, touch and factory reset.
 
-OATH, Yubico OTP, biometric verification, and NFC transport
+Yubico OTP, biometric verification, and NFC transport
 are outside the implemented scope. Management implements identity and capability
 discovery and persistent USB configuration; non-default timeout/device-flag
 behavior and physical interface reconfiguration are unsupported. Applet-specific gaps are listed below
@@ -45,7 +47,7 @@ The active priorities are:
 4. qualify OpenPGP key lifecycle and authentication with public CCID tools.
 
 HID support is added when an applet or real client requires it. CCID remains the
-primary transport for PIV, YubiHSM Auth, Issuer SD, and OpenPGP.
+primary transport for PIV, OATH, YubiHSM Auth, Issuer SD, and OpenPGP.
 
 ## Integration pattern
 
@@ -87,8 +89,8 @@ persistence, transport, and error mapping.
 
 The content-addressed token-generation and cross-token fingerprint model is
 specified separately in [`future-storage-model.md`](future-storage-model.md).
-FIDO, PIV, OpenPGP, YubiHSM Auth, and Security Domain use the same independent,
-atomically replaced versioned files in every device form, managed by the
+FIDO, PIV, OpenPGP, OATH, YubiHSM Auth, Management, and Security Domain use
+the same independent, atomically replaced versioned files in every device form, managed by the
 [shared storage runtime](storage.md).
 
 ## Issuer SD and secure channels
@@ -195,3 +197,11 @@ validation before they can authorize the same administrative operations.
   with GnuPG and yubikey-manager.
 - Add optional KDF, AES PSO and Yubico attestation only with matching capability
   advertisements and independent interoperability tests.
+
+### OATH
+
+- Preserve the [YKOATH protocol and pkcs11rs mapping](oath.md), RFC vectors for
+  all three hashes, password and touch policy, persistent counters, and protected
+  continuation across SCP03 and SCP11a/b/c.
+- Qualify live USB CCID with pkcs11rs and public OATH tools. Embedded protocol
+  and PKCS #11 validation do not qualify physical USB or NFC interaction.

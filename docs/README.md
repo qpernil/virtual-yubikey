@@ -15,6 +15,8 @@
   presence, persistence and CTAP2 interoperability.
 - [Browser FIDO test](fido-browser-test.md) - reusable WebAuthn fixture, independent
   U2F/FIDO2 runs, physical-touch checks and measured browser behavior.
+- [YKOATH](oath.md) - persistent HOTP/TOTP, password authentication, touch,
+  continuation, SCP and pkcs11rs interoperability.
 - [OpenPGP card](openpgp.md) - commands, algorithms, PIN/recovery and touch
   policies, persistent keys, reset, and physical RSA qualification.
 - [GlobalPlatform secure messaging](globalplatform-secure-messaging.md) - SCP03

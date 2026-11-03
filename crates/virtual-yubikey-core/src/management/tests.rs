@@ -248,7 +248,7 @@ fn full_device_restore_and_version_two_migration_preserve_all_credential_images(
     assert_eq!(restored.piv_persistent_state().unwrap(), piv);
     assert!(!restored.take_persistent_change());
     let mut decoder = minicbor::Decoder::new(&encoded);
-    assert_eq!(decoder.map().unwrap(), Some(7));
+    assert_eq!(decoder.map().unwrap(), Some(8));
     let mut old = vec![0xa6];
     for _ in 0..6 {
         let start = decoder.position();

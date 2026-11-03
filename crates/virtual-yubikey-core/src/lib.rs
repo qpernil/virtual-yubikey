@@ -14,6 +14,7 @@ mod fido_attestation;
 mod hsmauth;
 mod management;
 pub use management::Management;
+mod oath;
 mod openpgp;
 mod piv;
 mod presence;
@@ -30,6 +31,7 @@ pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0
 pub const ISSUER_SECURITY_DOMAIN_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
 pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
 pub use hsmauth::HSMAUTH_AID;
+pub use oath::OATH_AID;
 pub use openpgp::OPENPGP_AID;
 pub use piv::PIV_AID;
 pub const MAX_DISCOVERABLE_CREDENTIALS: usize = fido::MAX_RESIDENT_CREDENTIALS;
@@ -241,6 +243,7 @@ const CAPABILITY_CCID: u16 = 0x0004;
 const CAPABILITY_FIDO2: u16 = 0x0200;
 const CAPABILITY_U2F: u16 = 0x0002;
 const CAPABILITY_OPENPGP: u16 = 0x0008;
+const CAPABILITY_OATH: u16 = 0x0020;
 const CAPABILITY_PIV: u16 = 0x0010;
 const CAPABILITY_HSMAUTH: u16 = 0x0100;
 
@@ -249,6 +252,7 @@ pub enum Applet {
     IssuerSecurityDomain,
     Management,
     HsmAuth,
+    Oath,
     OpenPgp,
     Piv,
     Fido2,
@@ -260,6 +264,7 @@ impl Applet {
             Self::IssuerSecurityDomain => "issuer-security-domain",
             Self::Management => "management",
             Self::HsmAuth => "hsmauth",
+            Self::Oath => "oath",
             Self::OpenPgp => "openpgp",
             Self::Piv => "piv",
             Self::Fido2 => "fido2",
@@ -272,6 +277,7 @@ pub struct AppletConfiguration {
     pub issuer_security_domain: bool,
     pub management: bool,
     pub hsmauth: bool,
+    pub oath: bool,
     pub openpgp: bool,
     pub piv: bool,
     pub fido2: bool,
@@ -284,6 +290,7 @@ impl AppletConfiguration {
             issuer_security_domain: true,
             management: true,
             hsmauth: true,
+            oath: true,
             openpgp: true,
             piv: true,
             fido2: true,
@@ -296,6 +303,7 @@ impl AppletConfiguration {
             Applet::IssuerSecurityDomain => self.issuer_security_domain,
             Applet::Management => self.management,
             Applet::HsmAuth => self.hsmauth,
+            Applet::Oath => self.oath,
             Applet::OpenPgp => self.openpgp,
             Applet::Piv => self.piv,
             Applet::Fido2 => self.fido2 || self.u2f,
@@ -306,6 +314,7 @@ impl AppletConfiguration {
         let ccid = if self.issuer_security_domain
             || self.management
             || self.hsmauth
+            || self.oath
             || self.openpgp
             || self.piv
             || self.fido2
@@ -319,7 +328,8 @@ impl AppletConfiguration {
         let piv = if self.piv { CAPABILITY_PIV } else { 0 };
         let hsmauth = if self.hsmauth { CAPABILITY_HSMAUTH } else { 0 };
         let fido2 = if self.fido2 { CAPABILITY_FIDO2 } else { 0 };
-        ccid | openpgp | piv | hsmauth | fido2 | if self.u2f { CAPABILITY_U2F } else { 0 }
+        let oath = if self.oath { CAPABILITY_OATH } else { 0 };
+        ccid | openpgp | piv | hsmauth | oath | fido2 | if self.u2f { CAPABILITY_U2F } else { 0 }
     }
 }
 
@@ -609,6 +619,7 @@ pub struct VirtualYubiKey {
     openpgp: openpgp::OpenPgp,
     piv: piv::PivApplet,
     hsmauth: hsmauth::HsmAuthApplet,
+    oath: oath::OathApplet,
     fido: FidoAuthenticator,
 }
 
@@ -706,7 +717,7 @@ impl FidoDispatch<'_> {
 }
 
 impl VirtualYubiKey {
-    const PERSISTENT_STATE_VERSION: u8 = 3;
+    const PERSISTENT_STATE_VERSION: u8 = 4;
 
     pub fn new(profile: DeviceProfile) -> Self {
         Self::with_fido_configuration(profile, FidoConfiguration::default())
@@ -779,6 +790,7 @@ impl VirtualYubiKey {
         let mut fido = None;
         let mut openpgp = None;
         let mut management = None;
+        let mut oath = None;
         for _ in 0..fields {
             match decoder
                 .u8()
@@ -842,6 +854,15 @@ impl VirtualYubiKey {
                     );
                 }
                 7 => return Err("duplicate Management device state"),
+                8 if oath.is_none() => {
+                    oath = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid OATH device state")?
+                            .to_vec(),
+                    );
+                }
+                8 => return Err("duplicate OATH device state"),
                 _ => decoder
                     .skip()
                     .map_err(|_| "persistent device state contains invalid data")?,
@@ -850,7 +871,7 @@ impl VirtualYubiKey {
         if decoder.position() != encoded.len() {
             return Err("persistent device state has trailing data");
         }
-        if !matches!(version, Some(1 | 2 | Self::PERSISTENT_STATE_VERSION)) {
+        if !matches!(version, Some(1 | 2 | 3 | Self::PERSISTENT_STATE_VERSION)) {
             return Err("unsupported persistent device state version");
         }
         let piv = piv.ok_or("persistent device state has no PIV data")?;
@@ -879,17 +900,20 @@ impl VirtualYubiKey {
             FidoAuthenticator::from_persistent_state(profile.serial, fido_configuration, &fido)?;
         let mut device =
             Self::with_applets_and_security_domain(profile, piv, hsmauth, fido, security_domain);
-        if matches!(version, Some(2 | Self::PERSISTENT_STATE_VERSION)) {
+        if matches!(version, Some(2 | 3 | Self::PERSISTENT_STATE_VERSION)) {
             device.openpgp = openpgp::OpenPgp::from_persistent_state(
                 device.profile.serial,
                 device.profile.firmware,
                 &openpgp.ok_or("missing OpenPGP device state")?,
             )?;
         }
-        if version == Some(Self::PERSISTENT_STATE_VERSION) {
+        if matches!(version, Some(3 | Self::PERSISTENT_STATE_VERSION)) {
             device.restore_management_persistent_state(
                 &management.ok_or("missing Management device state")?,
             )?;
+        }
+        if version == Some(Self::PERSISTENT_STATE_VERSION) {
+            device.restore_oath_persistent_state(&oath.ok_or("missing OATH device state")?)?;
         }
         Ok(device)
     }
@@ -919,6 +943,7 @@ impl VirtualYubiKey {
         fido.management = Some(management.clone());
         Self {
             openpgp: openpgp::OpenPgp::new(profile.serial, profile.firmware),
+            oath: oath::OathApplet::new(profile.serial, profile.firmware),
             profile,
             management,
             management_revision: 0,
@@ -979,6 +1004,21 @@ impl VirtualYubiKey {
         self.openpgp.take_persistent_change()
     }
 
+    pub fn oath_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
+        self.oath.persistent_state()
+    }
+    pub fn restore_oath_persistent_state(&mut self, encoded: &[u8]) -> Result<(), &'static str> {
+        self.oath = oath::OathApplet::from_persistent_state(
+            self.profile.serial,
+            self.profile.firmware,
+            encoded,
+        )?;
+        Ok(())
+    }
+    pub fn take_oath_persistent_change(&mut self) -> bool {
+        self.oath.take_persistent_change()
+    }
+
     pub fn fido_persistent_state(&self) -> Result<Vec<u8>, &'static str> {
         self.fido.persistent_state()
     }
@@ -994,7 +1034,7 @@ impl VirtualYubiKey {
         let mut encoded = Vec::new();
         let mut encoder = minicbor::Encoder::new(&mut encoded);
         encoder
-            .map(7)
+            .map(8)
             .map_err(|_| "cannot encode persistent device state")?
             .u8(1)
             .map_err(|_| "cannot encode persistent device state")?
@@ -1025,6 +1065,11 @@ impl VirtualYubiKey {
             .map_err(|_| "encode Management state")?
             .bytes(&management)
             .map_err(|_| "encode Management state")?;
+        encoder
+            .u8(8)
+            .map_err(|_| "encode OATH state")?
+            .bytes(&self.oath.persistent_state()?)
+            .map_err(|_| "encode OATH state")?;
         Ok(encoded)
     }
 
@@ -1085,6 +1130,7 @@ impl VirtualYubiKey {
             | self.take_fido_persistent_change()
             | self.take_openpgp_persistent_change()
             | self.take_management_persistent_change()
+            | self.take_oath_persistent_change()
     }
 
     pub fn profile(&self) -> &DeviceProfile {
@@ -1099,10 +1145,11 @@ impl VirtualYubiKey {
         if aid.is_empty() {
             return None;
         }
-        let candidates: [(Applet, &[u8]); 6] = [
+        let candidates: [(Applet, &[u8]); 7] = [
             (Applet::IssuerSecurityDomain, &ISSUER_SECURITY_DOMAIN_AID),
             (Applet::Management, &MANAGEMENT_AID),
             (Applet::HsmAuth, &HSMAUTH_AID),
+            (Applet::Oath, &OATH_AID),
             (Applet::OpenPgp, &OPENPGP_AID),
             (Applet::Piv, &PIV_AID),
             (Applet::Fido2, &FIDO2_AID),
@@ -1131,6 +1178,7 @@ impl VirtualYubiKey {
         self.secure_channel.reset();
         self.piv.reset_connection();
         self.hsmauth.reset_connection();
+        self.oath.reset_connection();
         self.fido.reset_connection();
         self.openpgp.reset_connection();
     }
@@ -1139,6 +1187,7 @@ impl VirtualYubiKey {
         match applet {
             Applet::Piv => self.piv.reset_connection(),
             Applet::HsmAuth => self.hsmauth.reset_connection(),
+            Applet::Oath => self.oath.reset_connection(),
             Applet::Fido2 => self.fido.reset_connection(),
             Applet::OpenPgp => self.openpgp.reset_connection(),
             Applet::IssuerSecurityDomain | Applet::Management => {}
@@ -1182,7 +1231,13 @@ impl VirtualYubiKey {
         if let Ok(revision) = self.management.revision()
             && revision != self.management_revision
         {
-            for applet in [Applet::Piv, Applet::OpenPgp, Applet::HsmAuth, Applet::Fido2] {
+            for applet in [
+                Applet::Piv,
+                Applet::OpenPgp,
+                Applet::HsmAuth,
+                Applet::Oath,
+                Applet::Fido2,
+            ] {
                 self.reset_applet_connection(applet);
             }
             self.secure_channel.reset();
@@ -1219,7 +1274,19 @@ impl VirtualYubiKey {
         }
         self.presence_command = None;
 
-        if command.cla == 0 && command.ins == INS_GET_RESPONSE {
+        // OATH fragments one logical protected response. SEND REMAINING is
+        // plain even when the original command used SCP; never re-MAC fragments.
+        let continuation = if self.selected == Some(Applet::Oath) {
+            0xa5
+        } else {
+            INS_GET_RESPONSE
+        };
+        if command.cla == 0
+            && command.ins == continuation
+            && command.p1 == 0
+            && command.p2 == 0
+            && command.data.is_empty()
+        {
             return ApduExchange::Complete(self.take_response(command.le).encode());
         }
         self.pending_response.clear();
@@ -1255,7 +1322,11 @@ impl VirtualYubiKey {
         if secure_channel::SecureChannel::begins_establishment(&assembled.borrowed())
             && let Some(selected) = self.selected
         {
-            self.reset_applet_connection(selected);
+            if selected == Applet::Oath {
+                self.oath.clear_authorization();
+            } else {
+                self.reset_applet_connection(selected);
+            }
         }
         let attempt = match self.security_domain.authentication_reference(
             &assembled.borrowed(),
@@ -1346,6 +1417,12 @@ impl VirtualYubiKey {
             Some(Applet::HsmAuth) => match self.hsmauth.exchange(command, presence) {
                 hsmauth::HsmAuthExchange::Complete(response) => response,
                 hsmauth::HsmAuthExchange::PresenceRequired(policy) => {
+                    return ApduExchange::PresenceRequired(policy);
+                }
+            },
+            Some(Applet::Oath) => match self.oath.exchange(command, presence) {
+                oath::Exchange::Complete(response) => response,
+                oath::Exchange::PresenceRequired(policy) => {
                     return ApduExchange::PresenceRequired(policy);
                 }
             },
@@ -1482,6 +1559,7 @@ impl VirtualYubiKey {
                 ResponseApdu::success(data)
             }
             Applet::HsmAuth => ResponseApdu::success(self.hsmauth.select_response()),
+            Applet::Oath => self.oath.select_response(),
             Applet::OpenPgp => self.openpgp.select_response(),
             Applet::Piv => ResponseApdu::success(piv::select_response()),
             Applet::Fido2 => ResponseApdu::success(b"U2F_V2".to_vec()),
@@ -1897,8 +1975,8 @@ mod tests {
         );
         let response = device.transmit(&[0, INS_READ_DEVICE_INFO, 0, 0, 0]);
         assert!(response.windows(6).any(|value| value == [2, 4, 1, 2, 3, 4]));
-        assert!(response.windows(4).any(|value| value == [1, 2, 3, 30]));
-        assert!(response.windows(4).any(|value| value == [3, 2, 3, 30]));
+        assert!(response.windows(4).any(|value| value == [1, 2, 3, 62]));
+        assert!(response.windows(4).any(|value| value == [3, 2, 3, 62]));
         assert!(response.windows(5).any(|value| value == [5, 3, 5, 8, 0]));
         assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
     }
@@ -1915,10 +1993,12 @@ mod tests {
             Some(Applet::Management)
         );
         assert_eq!(
-            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05, 0x27, 0x21]),
+            device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07]),
             Some(Applet::HsmAuth)
         );
         assert_eq!(device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x05]), None);
+        assert_eq!(device.applet_for_aid(&[0xa0, 0, 0, 5, 0x27, 0x21]), None);
+        assert_eq!(device.applet_for_aid(&OATH_AID), Some(Applet::Oath));
         assert_eq!(
             device.applet_for_aid(&[0xa0, 0x00, 0x00, 0x06]),
             Some(Applet::Fido2)

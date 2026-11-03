@@ -8,8 +8,10 @@ APDUs through the common dispatcher.
 
 Beginning SCP03 or SCP11 channel establishment starts a fresh connection to the
 selected applet. It clears that applet's connection-scoped authentication while
-leaving its AID selected. By contrast, reselecting the same AID preserves its
-authentication state, matching validated YubiKey behavior.
+leaving its AID selected. PIV and the other existing applets preserve their
+connection authorization on same-AID reselection. OATH SELECT starts a fresh
+challenge and clears OATH authorization even on reselection; its pending
+challenge survives subsequent channel establishment so VALIDATE can follow it.
 
 SCP03 EXTERNAL AUTHENTICATE accepts both short and extended APDU encoding;
 its command MAC includes the received length encoding. This permits bootstrap
@@ -17,9 +19,14 @@ administration with Yubico host tools as well as pkcs11rs.
 
 The layer supports C-MAC, C-ENC, R-MAC, and R-ENC, protected-command
 segmentation, and response chaining. It covers the Issuer Security Domain,
-Management, PIV, YubiHSM Auth, FIDO2-over-CCID, and the selectable OpenPGP
-fixture. Selecting another AID, resetting the card, or powering it off destroys
-the live channel.
+Management, PIV, OATH, YubiHSM Auth, FIDO2-over-CCID, and OpenPGP. Selecting
+another AID, resetting the card, or powering it off destroys the live channel.
+
+OATH response continuation uses plain `SEND REMAINING` (`A5`) in place of ISO
+`GET RESPONSE` (`C0`). Protection covers the complete logical response before
+fragmentation; the client collects every fragment before verifying its R-MAC
+and decrypting. See [YKOATH](oath.md) for the separate applet access password
+and pkcs11rs interoperability checks.
 
 Protected FIDO2 CTAP messages preserve `P1.b8`, which advertises
 `NFCCTAP_GETRESPONSE` keepalive support. This applet flag is independent of

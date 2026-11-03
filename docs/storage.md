@@ -15,6 +15,7 @@ For serial `12345678`, every host uses these files in its selected directory:
 | `fido-12345678.cbor` | CTAP2 credentials, U2F wrapping key and global counter, PIN state, retry policy and attestation identity |
 | `piv-12345678.cbor` | Keys, objects, PIN/PUK policy and attestation identity |
 | `openpgp-12345678.cbor` | Keys, certificates, PIN verifiers, counters, metadata and lifecycle |
+| `oath-12345678.cbor` | Credentials, application ID/access key, HOTP counters and increasing TOTP challenges |
 | `hsmauth-12345678.cbor` | HSM Auth credentials and management policy |
 | `security-domain-12345678.cbor` | SCP keys, certificates, trust policy and attempt budgets |
 | `management-12345678.cbor` | Enabled USB application mask and configuration-lock verifier |
@@ -58,7 +59,7 @@ The writer takes runtime locks only to encode requested applet snapshots.
 Commands release runtime state locks before waiting for receipts or flushing,
 including FIDO PIN operations routed through CCID. Long-running commands can
 delay snapshots. FIDO signature counters, PIN changes/retries, reset, and U2F wrapping-key
-mutations and Management configuration writes are flushed before their response;
+mutations, OATH mutations and Management configuration writes are flushed before their response;
 embedded hosts conservatively flush all FIDO mutations. The USB writer snapshots
 Management separately from FIDO and CCID runtime locks.
 

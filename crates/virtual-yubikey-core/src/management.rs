@@ -71,6 +71,7 @@ impl Management {
             Applet::Piv => CAPABILITY_PIV,
             Applet::OpenPgp => CAPABILITY_OPENPGP,
             Applet::HsmAuth => CAPABILITY_HSMAUTH,
+            Applet::Oath => crate::CAPABILITY_OATH,
             Applet::Fido2 => CAPABILITY_U2F | CAPABILITY_FIDO2,
         };
         self.usb_enabled_capabilities()

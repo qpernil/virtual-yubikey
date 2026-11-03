@@ -993,7 +993,8 @@ fn serve_ccid(
                             return Err(error);
                         }
                         let changed = state.take_persistent_applets();
-                        force_fido |= changed.contains(&PersistentApplet::Management);
+                        force_fido |= changed.contains(&PersistentApplet::Management)
+                            || changed.contains(&PersistentApplet::Oath);
                         let applet_mutation = ccid.persistence.record_mutations(changed)?;
                         (replies, applet_mutation, force_fido, fido_mutations)
                     };
