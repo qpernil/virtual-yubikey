@@ -66,9 +66,19 @@ ykman config usb --disable FIDO2
 ykman config usb --enable FIDO2
 ```
 
-These are protocol-compatible client commands; qualification of the deployed
-USB worker with the physical `ykman` CLI remains separate from the in-process
-client tests below.
+These U2F/FIDO2 commands are protocol-compatible client commands; their deployed
+USB qualification remains separate from the in-process client tests below.
+OATH enablement is qualified on the Ubuntu3 USB worker with YubiKey Manager
+5.9.2 and the explicit virtual serial:
+
+```sh
+ykman --device 12345678 config usb --disable oath --force
+ykman --device 12345678 config usb --enable oath --force
+```
+
+Disabling OATH makes the application unavailable to the host; re-enabling it
+restores access to the same six persistent smoke credentials. The enabled mask
+also survives worker restart. See [OATH qualification](oath.md#verification-and-limits).
 
 ## Persistence and transport limits
 
