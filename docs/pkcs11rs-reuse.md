@@ -8,21 +8,23 @@ gadget must not depend on the complete PKCS #11 provider. The transport-neutral
 device behavior is implemented in the core and exercised over standalone, USB,
 and in-process CCID paths. `pkcs11rs` uses `virtual-yubikey-core` through its
 optional `embedded-virtual-yubikey` feature. Runtime configuration can create
-one or more logical CCID readers, always with Management identity and with any
-implemented PKCS #11 applet explicitly enabled. Those applets pass through the
+one or more embedded virtual YubiKeys through `embedded.yubikeys`, each with
+Management identity and any implemented PKCS #11 applet explicitly enabled. Those applets pass through the
 ordinary pkcs11rs CCID discovery and slot-construction path.
 
-CI builds an embedded reader with `--no-default-features`, compiling out native
-USB, HID, and PC/SC support while retaining the ordinary CCID controller. A
-feature-enabled build without that flag makes configured embedded readers
-additive to external hardware. Readers are ephemeral by default; persistent
-readers use an ID-scoped directory under pkcs11rs token storage and the same
-[per-applet files, loader, lock and writer](storage.md) as USB workers.
+CI builds an embedded virtual YubiKey with `--no-default-features`, compiling
+out native USB, HID, and PC/SC support while retaining the ordinary CCID controller. A
+feature-enabled build without that flag makes configured embedded virtual
+YubiKeys additive to external hardware. Devices are ephemeral by default; persistent
+virtual YubiKeys use an ID-scoped directory under pkcs11rs token storage and
+the same [per-applet files, loader, lock and writer](storage.md) as USB workers.
 
-Shared-core protocol changes apply to embedded builds when they use the updated
-checkout; pkcs11rs CI selects an exact revision through
-`VIRTUAL_YUBIKEY_REVISION`. Joystick polling, blink scheduling, blocking touch
-deadlines and HID cancellation are USB-worker responsibilities. The embedded
+Shared-core protocol changes apply to embedded builds through the sibling
+checkout. pkcs11rs CI clones the current default branch of each first-party
+dependency, including this repository's `main`, into the same sibling layout.
+The repositories' applet contracts, manifests and lockfiles are maintained
+together. Joystick polling, blink scheduling, blocking touch deadlines and HID
+cancellation are USB-worker responsibilities. The embedded
 CCID connector calls the core directly and provides no physical-presence
 handler, so its tests do not qualify those USB interactions.
 
@@ -62,10 +64,10 @@ and secure-messaging coverage.
 | `software-key-core::arkg` | ARKG-P256 public derivation, authenticated tickets, and matching private-scalar derivation; previewSign retains COSE/CBOR and device seed state |
 | `usb-gadget-supervisor` | ConfigFS, FunctionFS publication and `ep0`, UDC lifecycle, resource capabilities, privilege separation, and systemd integration |
 | `virtual-yubikey` binary | Native USB personality, direct FunctionFS data endpoints, CTAPHID, CCID, display/input policy, and diagnostics |
-| `pkcs11rs` embedded CCID readers | Implement the provider's internal connector trait and exercise configured core applets through normal Management discovery and PKCS #11 slot construction without USB or PC/SC |
+| `pkcs11rs` embedded virtual YubiKeys | Implement the provider's internal connector trait and exercise configured core applets through normal Management discovery and PKCS #11 slot construction without USB or PC/SC |
 
 ```text
-virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs embedded CCID readers
+virtual-yubikey USB HID/CCID ----> virtual-yubikey-core <---- pkcs11rs embedded virtual YubiKeys
                                       |
                                       v
                                  software-key-core <---- pkcs11rs software backend
@@ -97,7 +99,7 @@ select only the combinations advertised by their COSE algorithms.
 3. Exercise FIDO through the Pi's USB HID and CCID transports and Management,
    PIV, OpenPGP, OATH, YubiHSM Auth, and Issuer Security Domain through CCID, including
    shared GlobalPlatform secure messaging.
-4. Keep the `pkcs11rs` embedded-reader tests running against the core for every
+4. Keep the `pkcs11rs` embedded YubiKey tests running against the core for every
    configured applet, including OpenPGP key lifecycle and persistence, Security
    Domain administration, and full-cycle FIDO and PIV post-quantum coverage.
 5. Keep ML-DSA, overlapping ECDSA, and RSA software operations in `pkcs11rs`

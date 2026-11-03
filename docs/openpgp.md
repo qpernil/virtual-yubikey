@@ -2,7 +2,7 @@
 
 The shared core implements the OpenPGP card 3.4.1 command and data-object model
 used by the `pkcs11rs` OpenPGP client. The USB profile enables the applet over
-CCID. Embedded readers install it when their `applets` allowlist includes
+CCID. Embedded virtual YubiKeys install it when their `applets` allowlist includes
 `openpgp`. Both use the same algorithms, access rules and state encoding.
 
 ## Commands and algorithms

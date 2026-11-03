@@ -56,7 +56,7 @@ core. Each feature is then exercised at three boundaries:
 
 1. direct protocol vectors against `virtual-yubikey-core`;
 2. FIDO HID or CCID transport tests in the USB worker; and
-3. full-cycle PKCS #11 tests through configured `pkcs11rs` embedded readers,
+3. full-cycle PKCS #11 tests through configured `pkcs11rs` embedded virtual YubiKeys,
    plus direct host-side protocol tests where applicable.
 
 Capability advertisements derive from installed handlers so the Management
