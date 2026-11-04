@@ -96,19 +96,21 @@ checks OATH disable/re-enable with credential preservation, add/list/delete, all
 three HOTP hashes, rename without resetting the counter, and password
 installation/change/removal with incorrect-password rejection. Yubico's Python SDK
 checks all six RFC 6238 timestamps per hash, ten HOTP counters per hash, and
-fragmented LIST/CALCULATE ALL in plain mode, SCP03 and SCP11b. Password installation, incorrect-password
-rejection, protected login, change and removal pass over USB. An actual worker
-restart preserves the application ID, password, credential and next HOTP counter.
+fragmented LIST/CALCULATE ALL in plain mode, SCP03 and SCP11b. Password
+installation, incorrect-password rejection, protected login, change and removal
+pass over USB. Worker restart preserves the application ID, password, credential
+and next HOTP counter.
 Temporary qualification credentials and password protection are removed afterward.
 
 The deployed gadget-host device retains the same six public-fixture credentials as
 the physical smoke-test YubiKeys: `HOTP-SHA1`, `HOTP-SHA256`, `HOTP-SHA512`,
 `TOTP-SHA1`, `TOTP-SHA256` and `TOTP-SHA512`, all with the `pkcs11rs-smoke:`
 prefix. They use the public RFC 6238 secrets, six-digit HOTP starting at counter
-zero, and eight-digit TOTP with a 30-second period. Provisioning
-does not calculate HOTP codes. Worker restart preserves all six credentials;
-native pkcs11rs discovers their seven OTP object views after module
-reinitialization.
+zero, and eight-digit TOTP with a 30-second period. Provisioning does not
+calculate HOTP codes. Subsequent code generation advances the counters;
+enumeration and worker restart neither advance nor reset them. Worker restart
+preserves all six credentials; native pkcs11rs discovers their seven OTP object
+views after module reinitialization.
 
 Native pkcs11rs USB checks generate codes for all six retained samples, including
 all six RFC 6238 timestamps per hash, repeated output-length queries and
@@ -131,6 +133,14 @@ running iOS 27.2. OATH login reports SCP11b in each case. A different valid card
 key is rejected with `CKR_DEVICE_ERROR`, without authenticated OATH inventory.
 These checks qualify iOS discovery, login and inventory rather than OTP-vector
 generation. The normal app configurations contain no embedded device or pin.
+
+Release-worker builds and `--help` execution are verified on
+gadget-host, build-host and pi-test-host-3. gadget-host supplies the active USB qualification
+above; the other two builds do not add live USB, touch or OTP-vector coverage.
+Native pkcs11rs release-library ABI checks pass on gadget-host and build-host, and the
+embedded-feature library passes on gadget-host. These loader checks use temporary
+storage, disable device discovery and configure no embedded devices. Host reader
+ownership and retained applet/SCP state are described in the [reuse boundary](pkcs11rs-reuse.md#host-ownership-and-command-lifetime).
 
 References: [YKOATH protocol](https://developers.yubico.com/OATH/YKOATH_Protocol.html),
 [Yubico OATH client](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/oath.html),
