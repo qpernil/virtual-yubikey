@@ -50,6 +50,22 @@ direct-USB connector for FIDO and CCID for the smart-card applets, matching
 ordinary host-tool behavior, while CCID remains available for FIDO qualification
 and secure-messaging coverage.
 
+## Host ownership and command lifetime
+
+Reader ownership belongs to the host, not the virtual firmware. For USB CCID,
+pkcs11rs retains an exclusive desktop PC/SC connection; on iOS it retains a
+sensitive CryptoTokenKit smart-card session. Its local operation guard covers
+the APDUs of one device-backed PKCS #11 call, while the selected applet and
+live SCP channel can be reused across calls. Another applet selection or
+connection loss invalidates that transport state. Recreating SCP does not
+resubmit an applet PIN or restore lost applet authorization.
+
+The USB worker does not enforce PC/SC process ownership. Other host clients
+must establish their own ownership and authentication policy. In-process
+embedded virtual YubiKeys use the same applet/SCP controller without a native
+PC/SC connection. See [pkcs11rs operation granularity](https://github.com/qpernil/pkcs11rs/blob/master/docs/ccid.md#applet-state-and-operation-granularity)
+and [its ownership boundary](https://github.com/qpernil/pkcs11rs/blob/master/docs/ccid.md#pcsc-ownership-and-external-daemons).
+
 ## Current boundary
 
 | Component | Responsibility |
