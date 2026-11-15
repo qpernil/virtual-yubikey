@@ -59,6 +59,10 @@ the APDUs of one device-backed PKCS #11 call, while the selected applet and
 live SCP channel can be reused across calls. Another applet selection or
 connection loss invalidates that transport state. Recreating SCP does not
 resubmit an applet PIN or restore lost applet authorization.
+The provider retains the SELECT response only for the active applet and reuses
+it for selection metadata. An actual SELECT replaces that response and the
+live channel. Public Issuer SD certificate bundles are shared with SCP11 setup
+for the same connection and are validated against the configured trust policy.
 
 The USB worker does not enforce PC/SC process ownership. Other host clients
 must establish their own ownership and authentication policy. In-process
@@ -66,11 +70,23 @@ embedded virtual YubiKeys use the same applet/SCP controller without a native
 PC/SC connection. See [pkcs11rs operation granularity](https://github.com/qpernil/pkcs11rs/blob/master/docs/ccid.md#applet-state-and-operation-granularity)
 and [its ownership boundary](https://github.com/qpernil/pkcs11rs/blob/master/docs/ccid.md#pcsc-ownership-and-external-daemons).
 
+## Shared APDU definitions
+
+The dependency-free [`yubikey-apdu`](../crates/yubikey-apdu/README.md) crate
+supplies one ISO wire codec and applet-owned `ApduSpec` definitions to both
+pkcs11rs and the card core. Host applet clients and card applet handlers use
+the same CLA/INS, P1/P2 constraints, envelope lengths, and response policies.
+The generic codec and ISO fragmentation preserve command parameters. TLV
+contents, supported keys/algorithms, authorization and state transitions remain
+with the corresponding implementation. A definition does not imply that every
+card profile supports the command. PKCS #11 errors remain host-owned.
+
 ## Current boundary
 
 | Component | Responsibility |
 | --- | --- |
-| `virtual-yubikey-core` | Firmware profile, ISO 7816 APDUs, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, OATH, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, persistent USB capability configuration, and logical device state |
+| `yubikey-apdu` | ISO command/response wire framing and applet-owned envelope specifications used by host and card |
+| `virtual-yubikey-core` | Firmware profile, ISO 7816 transport state, applet selection, Management, FIDO U2F/CTAP2, PIV, OpenPGP, OATH, YubiHSM Auth, Issuer Security Domain, shared SCP03/SCP11 secure messaging, persistent USB capability configuration, and logical device state |
 | `software-key-core::post_quantum` | Raw ML-DSA parameter sets, seeds, public keys, contexts, verification, and deterministic/required/preferred randomization policy |
 | `software-key-core::rsa_signing` | Raw RSA, PKCS #1 v1.5 payload/digest signing, and PSS with independent message hash, MGF1 hash, and salt length |
 | `software-key-core::software_signing` | Protocol-neutral ECDSA, Ed25519, RSA-profile, and ML-DSA keys, signing, verification, RSA CRT reconstruction, and compact private-key serialization |

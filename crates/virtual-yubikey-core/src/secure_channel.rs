@@ -66,13 +66,28 @@ struct Session {
     security_level: u8,
 }
 
+const INITIALIZE_UPDATE: u8 = yubikey_apdu::scp::INITIALIZE_UPDATE.ins;
+const EXTERNAL_AUTHENTICATE: u8 = yubikey_apdu::scp::EXTERNAL_AUTHENTICATE.ins;
+const INTERNAL_AUTHENTICATE: u8 = yubikey_apdu::scp::INTERNAL_AUTHENTICATE.ins;
+const UPLOAD_CERTIFICATE: u8 = yubikey_apdu::scp::UPLOAD_CERTIFICATE.ins;
+
 impl SecureChannel {
     pub(crate) fn pending_authentication_reference(&self) -> Option<(u8, u8)> {
         self.pending_scp03.as_ref().map(|pending| pending.reference)
     }
 
     pub(crate) fn begins_establishment(command: &CommandApdu<'_>) -> bool {
-        command.cla == 0x80 && matches!(command.ins, 0x50 | 0x88 | 0x82)
+        command.cla == 0x80
+            && matches!(
+                command.ins,
+                INITIALIZE_UPDATE | INTERNAL_AUTHENTICATE | EXTERNAL_AUTHENTICATE
+            )
+    }
+
+    /// Whether a successful protocol step completes an authentication attempt.
+    pub(crate) fn completes_authentication(command: &CommandApdu<'_>) -> bool {
+        command.ins != INITIALIZE_UPDATE
+            && (command.ins != UPLOAD_CERTIFICATE || command.p2 & 0x80 == 0)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -86,16 +101,19 @@ impl SecureChannel {
         command: &CommandApdu<'_>,
         security_domain: &crate::security_domain::SecurityDomain,
     ) -> ChannelOutcome {
-        if Self::begins_establishment(command) && command.ins == 0x50 {
+        if Self::begins_establishment(command) && command.ins == INITIALIZE_UPDATE {
             return ChannelOutcome::Handled(self.initialize_update(command, security_domain));
         }
-        if command.cla == 0x84 && command.ins == 0x82 {
+        if command.cla == 0x84 && command.ins == EXTERNAL_AUTHENTICATE {
             return ChannelOutcome::Handled(self.external_authenticate(command));
         }
         if Self::begins_establishment(command) {
             return ChannelOutcome::Handled(self.scp11_authenticate(command, security_domain));
         }
 
+        if command.cla == 0x80 && command.ins == UPLOAD_CERTIFICATE {
+            return ChannelOutcome::Handled(self.upload_host_certificate(command, security_domain));
+        }
         let protected = command.cla & 0x04 != 0;
         if !protected {
             return ChannelOutcome::Command(OwnedCommandApdu::from_command(command), false);
@@ -159,7 +177,11 @@ impl SecureChannel {
         domain: &crate::security_domain::SecurityDomain,
     ) -> ResponseApdu {
         self.reset();
-        if command.p2 != SCP03_KEY_ID || command.data.len() != 8 {
+        if yubikey_apdu::scp::INITIALIZE_UPDATE
+            .validate(command)
+            .is_err()
+            || command.p2 != SCP03_KEY_ID
+        {
             return ResponseApdu::status(0x6a88);
         }
         let mut card_challenge = [0_u8; 8];
@@ -207,8 +229,9 @@ impl SecureChannel {
             return ResponseApdu::status(0x6985);
         };
         let security_level = command.p1;
-        if command.p2 != 0
-            || command.data.len() != 16
+        if yubikey_apdu::scp::EXTERNAL_AUTHENTICATE
+            .validate(command)
+            .is_err()
             || security_level & !0x33 != 0
             || security_level & SECURITY_C_MAC == 0
             || !bool::from(pending.host_cryptogram.ct_eq(&command.data[..8]))
@@ -248,10 +271,13 @@ impl SecureChannel {
         // Consume uploaded credentials on every attempt, successful or otherwise.
         let host_certificates = self.host_certificates.take();
         self.reset();
+        if let Err(error) = yubikey_apdu::find(yubikey_apdu::scp::COMMANDS, command) {
+            return ResponseApdu::status(error.status());
+        }
         let parameter = match (command.ins, command.p2) {
-            (0x88, 0x13) => 0,
-            (0x82, 0x11) => 1,
-            (0x82, 0x15) => 3,
+            (INTERNAL_AUTHENTICATE, 0x13) => 0,
+            (EXTERNAL_AUTHENTICATE, 0x11) => 1,
+            (EXTERNAL_AUTHENTICATE, 0x15) => 3,
             _ => return ResponseApdu::status(0x6a86),
         };
         let Some(card_static) = security_domain.scp11_key(command.p2, command.p1) else {
@@ -341,6 +367,10 @@ impl SecureChannel {
         command: &CommandApdu<'_>,
         security_domain: &crate::security_domain::SecurityDomain,
     ) -> ResponseApdu {
+        if let Err(error) = yubikey_apdu::scp::UPLOAD_CERTIFICATE.validate(command) {
+            self.reset();
+            return ResponseApdu::status(error.status());
+        }
         let reference = (command.p2 & 0x7f, command.p1);
         if self
             .host_certificates
@@ -434,22 +464,9 @@ fn encode_header_and_data(
     encoded_length: usize,
     data: &[u8],
 ) -> Result<Vec<u8>, u16> {
-    if encoded_length > u16::MAX as usize {
-        return Err(0x6700);
-    }
-    let extended = command.extended || encoded_length > u8::MAX as usize;
-    let mut output = Vec::with_capacity(7 + data.len());
-    output.extend([command.cla, command.ins, command.p1, command.p2]);
-    if encoded_length != 0 {
-        if extended {
-            output.push(0);
-            output.extend_from_slice(&(encoded_length as u16).to_be_bytes());
-        } else {
-            output.push(encoded_length as u8);
-        }
-        output.extend_from_slice(data);
-    }
-    Ok(output)
+    CommandApdu { data, ..*command }
+        .encode_header_and_data(encoded_length)
+        .map_err(|_| 0x6700)
 }
 
 fn parse_scp11_request(data: &[u8], parameter: u8) -> Option<&[u8]> {

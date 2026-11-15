@@ -513,21 +513,32 @@ impl SecurityDomain {
         command: &CommandApdu<'_>,
         admin_dek: Option<&[u8]>,
     ) -> ResponseApdu {
-        let result = if matches!(command.cla, 0 | 0x80) && command.ins == 0xca {
-            self.get_data(command)
-        } else if matches!(
-            (command.cla, command.ins),
-            (0x80, 0xf1 | 0xd8 | 0xe4) | (0, 0xe2)
-        ) {
-            match admin_dek {
-                None => Err(0x6982),
-                Some(dek) => self.administer(command, dek),
+        let read = matches!(command.cla, 0 | 0x80)
+            && command.ins == yubikey_apdu::security_domain::GET_DATA.ins;
+        if !read {
+            if !matches!(
+                (command.cla, command.ins),
+                (0x80, 0xf1 | 0xd8 | 0xe4) | (0, 0xe2)
+            ) {
+                return ResponseApdu::status(0x6d00);
             }
+            if admin_dek.is_none() {
+                return ResponseApdu::status(0x6982);
+            }
+        }
+        let spec = match yubikey_apdu::find(yubikey_apdu::security_domain::COMMANDS, command) {
+            Ok(spec) => spec,
+            Err(error) => return ResponseApdu::status(error.status()),
+        };
+        let result = if read {
+            self.get_data(command)
         } else {
-            Err(0x6d00)
+            admin_dek
+                .ok_or(0x6982_u16)
+                .and_then(|dek| self.administer(command, dek))
         };
         match result {
-            Ok(data) => ResponseApdu::success(data),
+            Ok(data) => ResponseApdu::success(data).checked(spec),
             Err(status) => ResponseApdu::status(status),
         }
     }

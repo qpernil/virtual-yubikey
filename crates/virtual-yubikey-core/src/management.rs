@@ -38,6 +38,22 @@ impl State {
     }
 }
 impl Management {
+    pub(crate) fn exchange_apdu(&self, command: &crate::CommandApdu<'_>) -> crate::ResponseApdu {
+        use crate::ResponseApdu;
+        let spec = match yubikey_apdu::find(yubikey_apdu::management::COMMANDS, command) {
+            Ok(spec) => spec,
+            Err(error) => return ResponseApdu::status(error.status()),
+        };
+        let result = if command.ins == yubikey_apdu::management::READ_INFO.ins {
+            self.read_config(command.p1)
+        } else {
+            self.write_config(command.data).map(|()| Vec::new())
+        };
+        match result {
+            Ok(data) => ResponseApdu::success(data).checked(spec),
+            Err(status) => ResponseApdu::status(status),
+        }
+    }
     pub fn new(profile: DeviceProfile) -> Self {
         let enabled = profile.usb_supported_capabilities();
         Self {

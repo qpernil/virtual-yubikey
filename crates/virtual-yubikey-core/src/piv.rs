@@ -34,9 +34,7 @@ use x509_cert::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub const PIV_AID: [u8; 11] = [
-    0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
-];
+pub const PIV_AID: [u8; 11] = yubikey_apdu::piv::AID;
 
 const PIV_SELECT_RESPONSE: [u8; 19] = [
     0x61, 0x11, 0x4f, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4f, 0x05, 0xa0, 0x00,
@@ -47,22 +45,22 @@ const DISCOVERY_OBJECT: [u8; 20] = [
     0x2f, 0x02, 0x40, 0x00,
 ];
 
-const INS_VERIFY: u8 = 0x20;
-const INS_CHANGE_REFERENCE: u8 = 0x24;
-const INS_RESET_RETRY: u8 = 0x2c;
-const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
-const INS_AUTHENTICATE: u8 = 0x87;
-const INS_GET_DATA: u8 = 0xcb;
-const INS_PUT_DATA: u8 = 0xdb;
-const INS_MOVE_KEY: u8 = 0xf6;
-const INS_GET_VERSION: u8 = 0xfd;
-const INS_GET_SERIAL: u8 = 0xf8;
-const INS_GET_METADATA: u8 = 0xf7;
-const INS_ATTEST: u8 = 0xf9;
-const INS_IMPORT_KEY: u8 = 0xfe;
-const INS_SET_RETRIES: u8 = 0xfa;
-const INS_RESET: u8 = 0xfb;
-const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
+const INS_VERIFY: u8 = yubikey_apdu::piv::VERIFY.ins;
+const INS_CHANGE_REFERENCE: u8 = yubikey_apdu::piv::CHANGE_REFERENCE.ins;
+const INS_RESET_RETRY: u8 = yubikey_apdu::piv::RESET_RETRY.ins;
+const INS_GENERATE_ASYMMETRIC: u8 = yubikey_apdu::piv::GENERATE.ins;
+const INS_AUTHENTICATE: u8 = yubikey_apdu::piv::AUTHENTICATE.ins;
+const INS_GET_DATA: u8 = yubikey_apdu::piv::GET_DATA.ins;
+const INS_PUT_DATA: u8 = yubikey_apdu::piv::PUT_DATA.ins;
+const INS_MOVE_KEY: u8 = yubikey_apdu::piv::MOVE_KEY.ins;
+const INS_GET_VERSION: u8 = yubikey_apdu::piv::VERSION.ins;
+const INS_GET_SERIAL: u8 = yubikey_apdu::piv::SERIAL.ins;
+const INS_GET_METADATA: u8 = yubikey_apdu::piv::METADATA.ins;
+const INS_ATTEST: u8 = yubikey_apdu::piv::ATTEST.ins;
+const INS_IMPORT_KEY: u8 = yubikey_apdu::piv::IMPORT_KEY.ins;
+const INS_SET_RETRIES: u8 = yubikey_apdu::piv::SET_RETRIES.ins;
+const INS_RESET: u8 = yubikey_apdu::piv::RESET.ins;
+const INS_SET_MANAGEMENT_KEY: u8 = yubikey_apdu::piv::SET_MANAGEMENT_KEY.ins;
 const IMPORT_TAG_PQ_SEED: u32 = 0x09;
 const IMPORT_TAG_PQ_EXPANDED: u32 = 0x0a;
 // Provisional ML-DSA GENERAL AUTHENTICATE extensions; not allocated by SP 800-73.
@@ -1122,6 +1120,21 @@ impl PivApplet {
             self.management_challenge = None;
             self.management_authenticated = false;
         }
+        let spec = match yubikey_apdu::find(yubikey_apdu::piv::COMMANDS, command) {
+            Ok(spec) => spec,
+            Err(error) => return ResponseApdu::status(error.status()).into(),
+        };
+        match self.exchange_impl(command, presence) {
+            PivExchange::Complete(response) => response.checked(spec).into(),
+            pending => pending,
+        }
+    }
+
+    fn exchange_impl(
+        &mut self,
+        command: &CommandApdu<'_>,
+        presence: PresenceAuthorization,
+    ) -> PivExchange {
         if command.cla != 0 {
             return ResponseApdu::status(STATUS_CLASS_NOT_SUPPORTED).into();
         }

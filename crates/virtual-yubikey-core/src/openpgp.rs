@@ -8,9 +8,27 @@ use software_key_core::{
 use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
-pub const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+pub const OPENPGP_AID: [u8; 6] = yubikey_apdu::openpgp::AID;
 pub const MAX_RANDOM_RESPONSE_LENGTH: usize = 4096;
 const MAX_OBJECT: usize = 4096;
+const VERIFY: u8 = yubikey_apdu::openpgp::VERIFY.ins;
+const CHANGE_REFERENCE: u8 = yubikey_apdu::openpgp::CHANGE_REFERENCE.ins;
+const RESET_RETRY: u8 = yubikey_apdu::openpgp::RESET_RETRY.ins;
+const GET_DATA: u8 = yubikey_apdu::openpgp::GET_DATA.ins;
+const GET_DATA_ODD: u8 = yubikey_apdu::openpgp::GET_DATA_ODD.ins;
+const GET_NEXT_DATA: u8 = yubikey_apdu::openpgp::GET_NEXT_DATA.ins;
+const SELECT_DATA: u8 = yubikey_apdu::openpgp::SELECT_DATA.ins;
+const PUT_DATA: u8 = yubikey_apdu::openpgp::PUT_DATA.ins;
+const IMPORT_KEY: u8 = yubikey_apdu::openpgp::IMPORT_KEY.ins;
+const GENERATE: u8 = yubikey_apdu::openpgp::GENERATE.ins;
+const MANAGE_SECURITY_ENVIRONMENT: u8 = yubikey_apdu::openpgp::MANAGE_SECURITY_ENVIRONMENT.ins;
+const CHALLENGE: u8 = yubikey_apdu::openpgp::CHALLENGE.ins;
+const VERSION: u8 = yubikey_apdu::openpgp::VERSION.ins;
+const TERMINATE: u8 = yubikey_apdu::openpgp::TERMINATE.ins;
+const ACTIVATE: u8 = yubikey_apdu::openpgp::ACTIVATE.ins;
+const PSO: u8 = yubikey_apdu::openpgp::SIGN.ins;
+const AUTHENTICATE: u8 = yubikey_apdu::openpgp::AUTHENTICATE.ins;
+
 type Result<T> = std::result::Result<T, u16>;
 
 // Never keep submitted PINs; retain a salted verifier and the length needed by CHANGE.
@@ -680,35 +698,35 @@ impl OpenPgp {
     }
     fn command(&mut self, c: &CommandApdu<'_>) -> Result<Vec<u8>> {
         match c.ins {
-            0x20 => self.verify(c),
-            0x24 => self.change(c),
-            0x2c => self.unblock(c),
-            0xca if c.data.is_empty() => self.get(u16::from_be_bytes([c.p1, c.p2])),
-            0xcb => {
+            VERIFY => self.verify(c),
+            CHANGE_REFERENCE => self.change(c),
+            RESET_RETRY => self.unblock(c),
+            GET_DATA if c.data.is_empty() => self.get(u16::from_be_bytes([c.p1, c.p2])),
+            GET_DATA_ODD => {
                 let fields = parse_tlvs(c.data)?;
                 if fields.len() != 1 || fields[0].0 != 0x5c || fields[0].1.len() != 2 {
                     return Err(0x6a80);
                 }
                 self.get(u16::from_be_bytes(fields[0].1.try_into().unwrap()))
             }
-            0xcc if [c.p1, c.p2] == [0x7f, 0x21] && c.data.is_empty() => {
+            GET_NEXT_DATA if [c.p1, c.p2] == [0x7f, 0x21] && c.data.is_empty() => {
                 if self.occurrence >= 2 {
                     return Err(0x6a88);
                 }
                 self.occurrence += 1;
                 self.get(0x7f21)
             }
-            0xa5 => {
+            SELECT_DATA => {
                 if c.p1 > 2 || c.p2 != 4 || c.data != [0x60, 4, 0x5c, 2, 0x7f, 0x21] {
                     return Err(0x6a86);
                 }
                 self.occurrence = usize::from(c.p1);
                 Ok(vec![])
             }
-            0xda => self.put(u16::from_be_bytes([c.p1, c.p2]), c.data),
-            0xdb if [c.p1, c.p2] == [0x3f, 0xff] => self.import(c.data),
-            0x47 => self.generate(c),
-            0x22 => {
+            PUT_DATA => self.put(u16::from_be_bytes([c.p1, c.p2]), c.data),
+            IMPORT_KEY if [c.p1, c.p2] == [0x3f, 0xff] => self.import(c.data),
+            GENERATE => self.generate(c),
+            MANAGE_SECURITY_ENVIRONMENT => {
                 if c.p1 != 0x41
                     || !matches!(c.p2, 0xa4 | 0xb8)
                     || c.data.len() != 3
@@ -724,9 +742,9 @@ impl OpenPgp {
                 }
                 Ok(vec![])
             }
-            0x84 => challenge(c),
-            0xf1 if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => Ok(self.firmware.to_vec()),
-            0xe6 if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => {
+            CHALLENGE => challenge(c),
+            VERSION if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => Ok(self.firmware.to_vec()),
+            TERMINATE if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => {
                 if !self.authorized[2] && self.admin.retries != 0 {
                     return Err(0x6982);
                 }
@@ -735,7 +753,7 @@ impl OpenPgp {
                 self.persistent_change = true;
                 Ok(vec![])
             }
-            0x44 if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => {
+            ACTIVATE if c.p1 == 0 && c.p2 == 0 && c.data.is_empty() => {
                 if self.terminated {
                     *self = Self::new(self.serial, self.firmware);
                     self.persistent_change = true;
@@ -753,10 +771,14 @@ impl OpenPgp {
         if c.cla != 0 {
             return Exchange::Complete(ResponseApdu::status(0x6e00));
         }
-        if self.terminated && c.ins != 0x44 {
+        if self.terminated && c.ins != ACTIVATE {
             return Exchange::Complete(ResponseApdu::status(0x6285));
         }
-        let result = if matches!(c.ins, 0x2a | 0x88) {
+        let spec = match yubikey_apdu::find(yubikey_apdu::openpgp::COMMANDS, c) {
+            Ok(spec) => spec,
+            Err(error) => return Exchange::Complete(ResponseApdu::status(error.status())),
+        };
+        let result = if matches!(c.ins, PSO | AUTHENTICATE) {
             match self.crypto(c, presence) {
                 Ok(data) => Ok(data),
                 Err(CryptoError::Status(sw)) => Err(sw),
@@ -768,7 +790,7 @@ impl OpenPgp {
             self.command(c)
         };
         Exchange::Complete(match result {
-            Ok(data) => ResponseApdu::success(data),
+            Ok(data) => ResponseApdu::success(data).checked(spec),
             Err(sw) => ResponseApdu::status(sw),
         })
     }

@@ -27,9 +27,9 @@ use software_key_core::{
 };
 use std::time::Duration;
 
-pub const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
-pub const ISSUER_SECURITY_DOMAIN_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
-pub const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+pub const MANAGEMENT_AID: [u8; 8] = yubikey_apdu::management::AID;
+pub const ISSUER_SECURITY_DOMAIN_AID: [u8; 8] = yubikey_apdu::security_domain::AID;
+pub const FIDO2_AID: [u8; 8] = yubikey_apdu::fido::AID;
 pub use hsmauth::HSMAUTH_AID;
 pub use oath::OATH_AID;
 pub use openpgp::OPENPGP_AID;
@@ -233,10 +233,12 @@ pub const ATR: [u8; 23] = [
     0x75, 0x62, 0x69, 0x4b, 0x65, 0x79, 0x40,
 ];
 
-const INS_SELECT: u8 = 0xa4;
-const INS_GET_RESPONSE: u8 = 0xc0;
-const INS_READ_DEVICE_INFO: u8 = 0x1d;
-const INS_CTAP_CBOR: u8 = 0x10;
+const INS_SELECT: u8 = yubikey_apdu::iso7816::SELECT.ins;
+#[cfg(test)]
+const INS_GET_RESPONSE: u8 = yubikey_apdu::iso7816::GET_RESPONSE.ins;
+#[cfg(test)]
+const INS_READ_DEVICE_INFO: u8 = yubikey_apdu::management::READ_INFO.ins;
+const INS_CTAP_CBOR: u8 = yubikey_apdu::fido::MESSAGE.ins;
 const ISO7816_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_SELECT_PREFIX: &[u8] = b"Virtual mgr - FW version ";
 const CAPABILITY_CCID: u16 = 0x0004;
@@ -1277,23 +1279,18 @@ impl VirtualYubiKey {
         // OATH fragments one logical protected response. SEND REMAINING is
         // plain even when the original command used SCP; never re-MAC fragments.
         let continuation = if self.selected == Some(Applet::Oath) {
-            0xa5
+            &yubikey_apdu::oath::SEND_REMAINING
         } else {
-            INS_GET_RESPONSE
+            &yubikey_apdu::iso7816::GET_RESPONSE
         };
-        if command.cla == 0
-            && command.ins == continuation
-            && command.p1 == 0
-            && command.p2 == 0
-            && command.data.is_empty()
-        {
+        if continuation.validate(&command).is_ok() {
             return ApduExchange::Complete(self.take_response(command.le).encode());
         }
         self.pending_response.clear();
 
         if command.cla == 0 && command.ins == INS_SELECT && command.p1 == 0x04 {
-            if command.p2 != 0 {
-                return ApduExchange::Complete(ResponseApdu::status(0x6a86).encode());
+            if let Err(error) = yubikey_apdu::iso7816::SELECT.validate(&command) {
+                return ApduExchange::Complete(ResponseApdu::status(error.status()).encode());
             }
             return ApduExchange::Complete(self.select(command.data).encode());
         }
@@ -1351,22 +1348,13 @@ impl VirtualYubiKey {
             secure_channel::ChannelOutcome::Handled(response) => {
                 return self.finish_channel_attempt(
                     attempt,
-                    assembled.ins != 0x50 && response.status == 0x9000,
+                    secure_channel::SecureChannel::completes_authentication(&assembled.borrowed())
+                        && response.status == 0x9000,
                     response,
                 );
             }
             secure_channel::ChannelOutcome::Command(command, protected) => (command, protected),
         };
-        if !protected && command.cla == 0x80 && command.ins == 0x2a {
-            let response = self
-                .secure_channel
-                .upload_host_certificate(&command.borrowed(), &self.security_domain);
-            return self.finish_channel_attempt(
-                attempt,
-                command.p2 & 0x80 == 0 && response.status == 0x9000,
-                response,
-            );
-        }
         let result = self.dispatch_apdu(&command.borrowed(), presence, protected, fido);
         if matches!(result, ApduExchange::PresenceRequired(_)) {
             self.presence_command = Some(PresenceCommand {
@@ -1416,7 +1404,7 @@ impl VirtualYubiKey {
             Some(Applet::IssuerSecurityDomain) => self
                 .security_domain
                 .exchange(command, self.secure_channel.administration_dek(protected)),
-            Some(Applet::Management) => self.management_apdu(command),
+            Some(Applet::Management) => self.management.exchange_apdu(command),
             Some(Applet::HsmAuth) => match self.hsmauth.exchange(command, presence) {
                 hsmauth::HsmAuthExchange::Complete(response) => response,
                 hsmauth::HsmAuthExchange::PresenceRequired(policy) => {
@@ -1569,31 +1557,15 @@ impl VirtualYubiKey {
         }
     }
 
-    fn management_apdu(&self, command: &CommandApdu<'_>) -> ResponseApdu {
-        if command.cla != 0 || command.p2 != 0 {
-            return ResponseApdu::status(0x6d00);
-        }
-        let result = match command.ins {
-            INS_READ_DEVICE_INFO if command.data.is_empty() => {
-                self.management.read_config(command.p1)
-            }
-            0x1c if command.p1 == 0 => self
-                .management
-                .write_config(command.data)
-                .map(|()| Vec::new()),
-            _ => Err(0x6d00),
-        };
-        result
-            .map(ResponseApdu::success)
-            .unwrap_or_else(ResponseApdu::status)
-    }
-
     fn fido2(
         &mut self,
         command: &CommandApdu<'_>,
         presence: PresenceAuthorization,
         fido: &mut FidoDispatch<'_>,
     ) -> Result<ResponseApdu, UserPresencePolicy> {
+        if let Err(error) = yubikey_apdu::find(yubikey_apdu::fido::COMMANDS, command) {
+            return Ok(ResponseApdu::status(error.status()));
+        }
         if command.cla == 0x80 && command.ins == INS_CTAP_CBOR && command.p2 == 0 {
             if !self.management.fido2_enabled() {
                 return Ok(ResponseApdu::status(0x6d00));
@@ -1654,88 +1626,7 @@ impl VirtualYubiKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandApdu<'a> {
-    pub cla: u8,
-    pub ins: u8,
-    pub p1: u8,
-    pub p2: u8,
-    pub data: &'a [u8],
-    pub le: Option<u32>,
-    pub(crate) extended: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ApduDecodeError {
-    TooShort,
-    InvalidLength,
-}
-
-impl<'a> CommandApdu<'a> {
-    pub fn decode(raw: &'a [u8]) -> Result<Self, ApduDecodeError> {
-        if raw.len() < 4 {
-            return Err(ApduDecodeError::TooShort);
-        }
-        let (data, le, extended) = match raw.len() {
-            4 => (&raw[4..4], None, false),
-            5 => (&raw[4..4], Some(short_le(raw[4])), false),
-            _ if raw[4] != 0 => {
-                let length = usize::from(raw[4]);
-                let end = 5 + length;
-                if raw.len() == end {
-                    (&raw[5..end], None, false)
-                } else if raw.len() == end + 1 {
-                    (&raw[5..end], Some(short_le(raw[end])), false)
-                } else {
-                    return Err(ApduDecodeError::InvalidLength);
-                }
-            }
-            7 => (
-                &raw[7..7],
-                Some(extended_le(u16::from_be_bytes([raw[5], raw[6]]))),
-                true,
-            ),
-            _ => {
-                if raw.len() < 7 {
-                    return Err(ApduDecodeError::InvalidLength);
-                }
-                let length = usize::from(u16::from_be_bytes([raw[5], raw[6]]));
-                if length == 0 {
-                    return Err(ApduDecodeError::InvalidLength);
-                }
-                let end = 7 + length;
-                if raw.len() == end {
-                    (&raw[7..end], None, true)
-                } else if raw.len() == end + 2 {
-                    (
-                        &raw[7..end],
-                        Some(extended_le(u16::from_be_bytes([raw[end], raw[end + 1]]))),
-                        true,
-                    )
-                } else {
-                    return Err(ApduDecodeError::InvalidLength);
-                }
-            }
-        };
-        Ok(Self {
-            cla: raw[0],
-            ins: raw[1],
-            p1: raw[2],
-            p2: raw[3],
-            data,
-            le,
-            extended,
-        })
-    }
-}
-
-fn short_le(value: u8) -> u32 {
-    if value == 0 { 256 } else { u32::from(value) }
-}
-
-fn extended_le(value: u16) -> u32 {
-    if value == 0 { 65_536 } else { u32::from(value) }
-}
+pub use yubikey_apdu::{ApduError as ApduDecodeError, CommandApdu};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseApdu {
@@ -1744,6 +1635,19 @@ pub struct ResponseApdu {
 }
 
 impl ResponseApdu {
+    fn checked(self, spec: &yubikey_apdu::ApduSpec) -> Self {
+        if spec
+            .validate_response(&yubikey_apdu::ResponseApdu {
+                data: &self.data,
+                status: self.status,
+            })
+            .is_err()
+        {
+            Self::status(0x6f00)
+        } else {
+            self
+        }
+    }
     pub fn success(data: Vec<u8>) -> Self {
         Self {
             data,
@@ -1758,9 +1662,8 @@ impl ResponseApdu {
         }
     }
 
-    pub fn encode(mut self) -> Vec<u8> {
-        self.data.extend_from_slice(&self.status.to_be_bytes());
-        self.data
+    pub fn encode(self) -> Vec<u8> {
+        yubikey_apdu::ResponseApdu::encode_owned(self.data, self.status)
     }
 }
 

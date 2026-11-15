@@ -4,7 +4,7 @@ use software_key_core::digest::{HashAlgorithm as MessageDigest, hmac};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-pub const OATH_AID: [u8; 7] = [0xa0, 0, 0, 5, 0x27, 0x21, 1];
+pub const OATH_AID: [u8; 7] = yubikey_apdu::oath::AID;
 const MAX_CREDENTIALS: usize = 64;
 const WRONG_DATA: u16 = 0x6a80;
 const NOT_FOUND: u16 = 0x6984;
@@ -138,9 +138,13 @@ impl OathApplet {
         if command.cla != 0 {
             return Exchange::Complete(ResponseApdu::status(0x6e00));
         }
+        let spec = match yubikey_apdu::find(yubikey_apdu::oath::COMMANDS, command) {
+            Ok(spec) => spec,
+            Err(error) => return Exchange::Complete(ResponseApdu::status(error.status())),
+        };
         let result = self.execute(command, presence);
         match result {
-            Ok(Some(data)) => Exchange::Complete(ResponseApdu::success(data)),
+            Ok(Some(data)) => Exchange::Complete(ResponseApdu::success(data).checked(spec)),
             Ok(None) => Exchange::PresenceRequired(UserPresencePolicy::Always),
             Err(status) => Exchange::Complete(ResponseApdu::status(status)),
         }

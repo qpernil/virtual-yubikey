@@ -24,22 +24,63 @@ segmentation, and response chaining. It covers the Issuer Security Domain,
 Management, PIV, OATH, YubiHSM Auth, FIDO2-over-CCID, and OpenPGP. Selecting
 another AID, resetting the card, or powering it off destroys the live channel.
 
-Protected commands use ISO CLA bit `10` for command segmentation. P1/P2 remain
-applet parameters; the SCP dispatcher does not interpret their high bits as
-fragment flags. The complete protected command is reassembled before C-MAC
-verification and decryption. GlobalPlatform's separate P1-based chaining
-mechanism is not implemented.
+The dependency-free `yubikey-apdu` crate supplies the ISO wire codec and SCP
+establishment command definitions shared with pkcs11rs. Applet handlers
+validate request and successful-response envelopes using their own shared
+command sets; the SCP layer preserves applet parameters without interpreting
+them. Certificate-upload sequencing belongs to the SCP handler. `Le` itself is
+plaintext and excluded from C-MAC. The host's ISO transport can correct a bare
+`6Cxx` once by changing only the wire APDU's Le, without new protection or an
+additional SCP counter/MAC-chain advance. A correction on GET RESPONSE or OATH
+SEND REMAINING applies to that continuation, not the original application
+command. Host transport tests verify byte preservation and a single SCP state
+advance; card processing order requires independent qualification. Both `61xx`
+and `6Cxx` are independent of T=0/T=1 in ISO 7816-4:2005 section 5.1.3; their T=0 mapping role does not restrict them to T=0.
+The status alone does not establish the point at which card firmware checked Le.
+The [host qualification](https://github.com/qpernil/pkcs11rs/blob/master/docs/scp03.md)
+records that physical T=1 YubiKey 5.7.4 public-read probes did not produce
+`6Cxx`, so those trials do not qualify physical length-correction behavior.
+The built-in virtual applets do not use `6Cxx` for response sizing.
+The host caches optional PC/SC reader limits for each connection, fragments
+oversized protected commands through ISO CLA chaining when supported, and
+limits outer Le to the reader's advertised response-data capacity. These
+transport steps do not add SCP state advances. Native PC/SC T=0 case 4 removes
+trailing Le at the PC/SC boundary; T=1 retains the full APDU. This follows the
+short case 1/2/3 interface required for T=0 by PC/SC Part 3, section 4.3.2.1;
+full T=0 hardware interoperability is not qualified by the host's T=1 probes.
+Raw capture on that key confirms that Le limits the protected response-data
+field: a smaller Le produces `61xx` fragmentation of ciphertext and R-MAC,
+with GET RESPONSE (or OATH SEND REMAINING) collecting the remaining bytes.
+For R-ENC plus R-MAC, three plaintext version bytes become 24 protected bytes;
+Le=1 returns one byte plus `6117`, followed by 23 bytes on continuation. The
+status bytes are not counted. The core's `prepare_response` likewise applies
+Le after response protection, matching these observed framing semantics.
 
-Protected OpenPGP key generation, public-key reads, signing, and administrator
-deauthentication preserve their P1 selectors. Regression coverage exercises
-these commands and OATH/HSM Auth RESET over SCP03 and SCP11b. SELECT requires
-its complete unprotected header and an accepted P2 value.
+Command segmentation uses ISO CLA bit `10`; P1/P2 remain applet command
+parameters throughout the shared transport and SCP layers. The complete protected
+command is reassembled before C-MAC verification and decryption. GlobalPlatform's
+separate P1-based command-chaining mechanism is not implemented. This follows
+[Yubico's SCP transport pipeline](https://github.com/Yubico/Yubico.NET.SDK/blob/53f2c7cbf1ae3175c41badfc211ef66e5a35d4b1/Yubico.YubiKey/src/Yubico/YubiKey/Scp/ScpConnection.cs)
+and [CLA-based chaining implementation](https://github.com/Yubico/Yubico.NET.SDK/blob/53f2c7cbf1ae3175c41badfc211ef66e5a35d4b1/Yubico.YubiKey/src/Yubico/YubiKey/Pipelines/CommandChainingTransform.cs).
+Protected SD PUT KEY and DELETE regression cases verify that ISO fragment
+acknowledgements do not consume the logical command's SCP state.
+The client's [physical 5.7.4 probe](https://github.com/qpernil/pkcs11rs/blob/master/docs/scp11.md#issuer-sd-command-chaining-probe)
+qualifies ISO reassembly under SCP11b and documents the limits of that result.
 
 OATH response continuation uses plain `SEND REMAINING` (`A5`) in place of ISO
 `GET RESPONSE` (`C0`). Protection covers the complete logical response before
 fragmentation; the client collects every fragment before verifying its R-MAC
 and decrypting. See [YKOATH](oath.md) for the separate applet access password
 and pkcs11rs interoperability checks.
+
+Protected OpenPGP VERIFY, PSO and GENERATE ASYMMETRIC KEY PAIR preserve
+all P1 parameter bits, including deauthentication (`FF`), signature (`9E`),
+and generation/public-key read (`80`/`81`). These parameters are independent
+of secure-command fragmentation. ISO CLA command chaining is assembled before
+C-MAC verification; the complete response is protected before response chaining.
+Regression coverage exercises generation, public-key read, signing, verified
+administrator deauthentication, and OATH/HSM Auth RESET selectors over SCP03
+and SCP11b. The shared decoder has no instruction-specific P1 exceptions.
 
 Protected FIDO2 CTAP messages preserve `P1.b8`, which advertises
 `NFCCTAP_GETRESPONSE` keepalive support. This applet flag is independent of
