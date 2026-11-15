@@ -24,6 +24,17 @@ segmentation, and response chaining. It covers the Issuer Security Domain,
 Management, PIV, OATH, YubiHSM Auth, FIDO2-over-CCID, and OpenPGP. Selecting
 another AID, resetting the card, or powering it off destroys the live channel.
 
+Protected commands use ISO CLA bit `10` for command segmentation. P1/P2 remain
+applet parameters; the SCP dispatcher does not interpret their high bits as
+fragment flags. The complete protected command is reassembled before C-MAC
+verification and decryption. GlobalPlatform's separate P1-based chaining
+mechanism is not implemented.
+
+Protected OpenPGP key generation, public-key reads, signing, and administrator
+deauthentication preserve their P1 selectors. Regression coverage exercises
+these commands and OATH/HSM Auth RESET over SCP03 and SCP11b. SELECT requires
+its complete unprotected header and an accepted P2 value.
+
 OATH response continuation uses plain `SEND REMAINING` (`A5`) in place of ISO
 `GET RESPONSE` (`C0`). Protection covers the complete logical response before
 fragmentation; the client collects every fragment before verifying its R-MAC
@@ -94,7 +105,8 @@ is rejected even if a secure session exists. SCP11b cannot administer keys.
 Private and symmetric imports use the authenticated channel's DEK in addition
 to secure messaging. SCP03 imports verify all three key check values before
 changing state. Installing a custom SCP03 set removes the public factory set;
-up to three custom sets are supported. Replacement requires the old version to
+up to three custom sets are supported. New custom versions are `1`–`127`;
+the factory key set has version `FF`. Replacement requires the old version to
 exist and cannot overwrite another installed version. Deleting the final key
 requires the explicit delete-last flag.
 

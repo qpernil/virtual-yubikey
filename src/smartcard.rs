@@ -158,7 +158,7 @@ impl Card {
 
     fn log_outcome(&self, command: &CommandApdu<'_>, response: &[u8]) {
         let status = response_status(response);
-        if command.ins == 0xa4 && command.p1 == 0x04 {
+        if command.cla == 0 && command.ins == 0xa4 && command.p1 == 0x04 && command.p2 == 0 {
             diagnostics::log(
                 Level::Info,
                 "apdu",

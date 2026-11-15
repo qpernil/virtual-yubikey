@@ -28,7 +28,6 @@ pub(crate) struct SecureChannel {
     pending_scp03: Option<PendingScp03>,
     host_certificates: Option<HostCertificates>,
     session: Option<Session>,
-    chained_protected: Option<OwnedCommandApdu>,
 }
 
 impl std::fmt::Debug for SecureChannel {
@@ -37,7 +36,6 @@ impl std::fmt::Debug for SecureChannel {
             .debug_struct("SecureChannel")
             .field("pending_scp03", &self.pending_scp03.is_some())
             .field("active", &self.session.is_some())
-            .field("chained_protected", &self.chained_protected.is_some())
             .finish()
     }
 }
@@ -81,7 +79,6 @@ impl SecureChannel {
         self.pending_scp03 = None;
         self.host_certificates = None;
         self.session = None;
-        self.chained_protected = None;
     }
 
     pub(crate) fn process(
@@ -103,10 +100,7 @@ impl SecureChannel {
         if !protected {
             return ChannelOutcome::Command(OwnedCommandApdu::from_command(command), false);
         }
-        let Some(command) = self.reassemble_protected(command) else {
-            return ChannelOutcome::Handled(ResponseApdu::success(Vec::new()));
-        };
-        match self.unprotect(&command.borrowed()) {
+        match self.unprotect(command) {
             Ok(command) => ChannelOutcome::Command(command, true),
             Err(status) => {
                 self.reset();
@@ -383,56 +377,6 @@ impl SecureChannel {
         ResponseApdu::success(Vec::new())
     }
 
-    fn reassemble_protected(&mut self, command: &CommandApdu<'_>) -> Option<OwnedCommandApdu> {
-        // SD commands use all P1 bits (STORE DATA uses 0x90; PUT KEY carries
-        // the replacement KVN). Their transport fragmentation is ISO CLA
-        // chaining, assembled before this layer, not the legacy P1 convention.
-        // CTAP's NFCCTAP_MSG uses P1.b8 to advertise keepalive polling.
-        // Preserve it as applet data, rather than treating it as a fragment.
-        if matches!(command.ins, 0xf1 | 0xd8 | 0xe2 | 0xe4 | 0xca)
-            || (command.cla & !0x0c == 0x80 && matches!(command.ins, 0x10 | 0x11))
-        {
-            self.chained_protected = None;
-            return Some(OwnedCommandApdu::from_command(command));
-        }
-        let more = command.p1 & 0x80 != 0;
-        let base_p1 = command.p1 & !0x80;
-        if more {
-            let pending = self
-                .chained_protected
-                .get_or_insert_with(|| OwnedCommandApdu {
-                    cla: command.cla,
-                    ins: command.ins,
-                    p1: base_p1,
-                    p2: command.p2,
-                    data: Vec::new(),
-                    le: None,
-                    extended: false,
-                });
-            if pending.cla != command.cla
-                || pending.ins != command.ins
-                || pending.p1 != base_p1
-                || pending.p2 != command.p2
-            {
-                self.chained_protected = None;
-                return Some(OwnedCommandApdu::from_command(command));
-            }
-            pending.data.extend_from_slice(command.data);
-            return None;
-        }
-        if let Some(mut pending) = self.chained_protected.take()
-            && pending.cla == command.cla
-            && pending.ins == command.ins
-            && pending.p1 == command.p1
-            && pending.p2 == command.p2
-        {
-            pending.data.extend_from_slice(command.data);
-            pending.le = command.le;
-            return Some(pending);
-        }
-        Some(OwnedCommandApdu::from_command(command))
-    }
-
     fn unprotect(&mut self, command: &CommandApdu<'_>) -> Result<OwnedCommandApdu, u16> {
         let session = self.session.as_mut().ok_or(0x6982_u16)?;
         session.encryption_counter = session
@@ -577,6 +521,12 @@ mod tests {
             device: &mut VirtualYubiKey,
             command: &HostCommand<'_>,
         ) -> ResponseApdu {
+            let raw = self.protect_command(command);
+            let response = send(device, &raw);
+            self.unprotect_response(collect_response(device, response))
+        }
+
+        fn protect_command(&mut self, command: &HostCommand<'_>) -> Vec<u8> {
             self.counter += 1;
             let protected_cla = (command.cla & !0x0c) | 0x04;
             let mut data = if command.data.is_empty() {
@@ -613,8 +563,10 @@ mod tests {
             if let Some(le) = command.le {
                 raw.push(le);
             }
-            let response = send(device, &raw);
-            let response = collect_response(device, response);
+            raw
+        }
+
+        fn unprotect_response(&self, response: ResponseApdu) -> ResponseApdu {
             assert!(matches!(response.status, 0x9000 | 0x6200..=0x63ff));
             assert!(response.data.len() >= MAC_LENGTH);
             let mut protected_data = response.data;
@@ -748,6 +700,187 @@ mod tests {
                 assert_eq!(response.status, 0x9000);
                 assert_eq!(response.data, expected);
             }
+        }
+    }
+
+    #[test]
+    fn protected_security_domain_commands_use_iso_chaining() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(42));
+        assert_eq!(
+            send(&mut device, &select(&ISSUER_SECURITY_DOMAIN_AID)).status,
+            0x9000
+        );
+        let mut host = establish_scp03(&mut device);
+        let ca = SoftwareSigningKey::generate_for_kind(KeyKind::Ec(EcCurve::P256)).unwrap();
+        let SoftwarePublicKey::Ec { uncompressed, .. } = ca.public_key() else {
+            unreachable!()
+        };
+        let mut data = vec![1, 0xb0, 65];
+        data.extend_from_slice(&uncompressed);
+        data.extend_from_slice(&[0xf0, 1, 0, 0]);
+        let put = HostCommand {
+            cla: 0x80,
+            ins: 0xd8,
+            p1: 0,
+            p2: 0x20,
+            data: &data,
+            le: Some(0),
+        };
+        let delete = HostCommand {
+            cla: 0x80,
+            ins: 0xe4,
+            p1: 0,
+            p2: 0,
+            data: &[0xd0, 1, 0x20, 0xd2, 1, 1],
+            le: Some(0),
+        };
+        for (command, expected) in [(put, vec![1]), (delete, vec![])] {
+            let raw = host.protect_command(&command);
+            let protected = CommandApdu::decode(&raw).unwrap();
+            let split = protected.data.len() / 2;
+            let mut first = vec![
+                protected.cla | 0x10,
+                protected.ins,
+                protected.p1,
+                protected.p2,
+                split as u8,
+            ];
+            first.extend_from_slice(&protected.data[..split]);
+            let ack = send(&mut device, &first);
+            assert_eq!(ack, ResponseApdu::success(vec![]));
+            let mut last = vec![
+                protected.cla,
+                protected.ins,
+                protected.p1,
+                protected.p2,
+                (protected.data.len() - split) as u8,
+            ];
+            last.extend_from_slice(&protected.data[split..]);
+            last.push(0);
+            let response = send(&mut device, &last);
+            assert_eq!(host.unprotect_response(response).data, expected);
+        }
+    }
+
+    #[test]
+    fn applet_p1_parameters_are_preserved_without_an_exception_list() {
+        let cases: &[(&[u8], HostCommand<'_>)] = &[
+            // RESET has a high P1 selector in both applets.
+            (
+                &OATH_AID,
+                HostCommand {
+                    cla: 0,
+                    ins: 4,
+                    p1: 0xde,
+                    p2: 0xad,
+                    data: &[],
+                    le: Some(0),
+                },
+            ),
+            (
+                &HSMAUTH_AID,
+                HostCommand {
+                    cla: 0,
+                    ins: 6,
+                    p1: 0xde,
+                    p2: 0xad,
+                    data: &[],
+                    le: Some(0),
+                },
+            ),
+        ];
+        for scp11 in [false, true] {
+            for (aid, command) in cases {
+                let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(42));
+                assert_eq!(send(&mut device, &select(aid)).status, 0x9000);
+                let mut host = if scp11 {
+                    establish_scp11b(&mut device)
+                } else {
+                    establish_scp03(&mut device)
+                };
+                assert_eq!(host.exchange(&mut device, command).status, 0x9000);
+                // The reset executed and the protected channel remains synchronized.
+                let version =
+                    HostCommand::short(if *aid == OATH_AID { 0xa1 } else { 7 }, 0, &[], 0);
+                assert_eq!(host.exchange(&mut device, &version).status, 0x9000);
+            }
+        }
+    }
+
+    #[test]
+    fn select_requires_its_full_unprotected_header() {
+        let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(42));
+        assert_eq!(send(&mut device, &select(&OPENPGP_AID)).status, 0x9000);
+        establish_scp03(&mut device);
+        let mut invalid = select(&PIV_AID);
+        invalid[3] = 1;
+        assert_eq!(send(&mut device, &invalid).status, 0x6a86);
+        assert_eq!(device.selected_applet(), Some(Applet::OpenPgp));
+        // An applet-specific CLA does not become an unprotected SELECT.
+        invalid[0] = 0x80;
+        invalid[3] = 0;
+        assert_eq!(send(&mut device, &invalid).status, 0x6e00);
+        assert_eq!(device.selected_applet(), Some(Applet::OpenPgp));
+        // A protected header must go through C-MAC verification.
+        invalid[0] = 4;
+        assert_eq!(send(&mut device, &invalid).status, 0x6982);
+        assert_eq!(device.selected_applet(), Some(Applet::OpenPgp));
+        assert!(device.secure_channel.session.is_none());
+        let mut host = establish_scp03(&mut device);
+        assert_eq!(
+            host.exchange(&mut device, &HostCommand::short(0x84, 0, &[], 8))
+                .data
+                .len(),
+            8
+        );
+    }
+
+    #[test]
+    fn protected_openpgp_commands_preserve_p1_parameters() {
+        for scp11 in [false, true] {
+            let mut device = VirtualYubiKey::new(DeviceProfile::yubikey_5_8_ccid(42));
+            assert_eq!(send(&mut device, &select(&OPENPGP_AID)).status, 0x9000);
+            let mut channel = if scp11 {
+                establish_scp11b(&mut device)
+            } else {
+                establish_scp03(&mut device)
+            };
+            let admin = HostCommand::short(0x20, 0x83, b"12345678", 0);
+            assert_eq!(channel.exchange(&mut device, &admin).status, 0x9000);
+            let generate = HostCommand {
+                cla: 0,
+                ins: 0x47,
+                p1: 0x80,
+                p2: 0,
+                data: &[0xb6, 0],
+                le: Some(0),
+            };
+            let public = channel.exchange(&mut device, &generate);
+            assert_eq!(public.status, 0x9000);
+            assert_eq!(&public.data[..2], &[0x7f, 0x49]);
+            let read = HostCommand {
+                p1: 0x81,
+                ..generate
+            };
+            assert_eq!(channel.exchange(&mut device, &read).data, public.data);
+            let user = HostCommand::short(0x20, 0x81, b"123456", 0);
+            assert_eq!(channel.exchange(&mut device, &user).status, 0x9000);
+            let sign = HostCommand {
+                cla: 0,
+                ins: 0x2a,
+                p1: 0x9e,
+                p2: 0x9a,
+                data: b"protected OpenPGP payload",
+                le: Some(0),
+            };
+            let signature = channel.exchange(&mut device, &sign);
+            assert_eq!(signature.status, 0x9000);
+            assert_eq!(signature.data.len(), 256);
+            let query = HostCommand::short(0x20, 0x83, &[], 0);
+            assert_eq!(channel.exchange(&mut device, &query).status, 0x9000);
+            let revoke = HostCommand { p1: 0xff, ..query };
+            assert_eq!(channel.exchange(&mut device, &revoke).status, 0x9000);
+            assert_eq!(channel.exchange(&mut device, &query).status, 0x63c3);
         }
     }
 

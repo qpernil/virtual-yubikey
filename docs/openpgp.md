@@ -80,7 +80,11 @@ virtual devices.
 Optional OpenPGP KDF configuration, AES PSO, PIN-block format 2, application-
 specific secure messaging and Yubico OpenPGP attestation are not advertised.
 GlobalPlatform SCP03/SCP11 protection remains available through the shared card
-channel. Firmware-specific retry-configuration commands are not implemented.
+channel. Protected command decoding preserves the full P1 parameter for VERIFY,
+PSO and GENERATE ASYMMETRIC KEY PAIR, including their high-bit selectors.
+Generation, public-key read, signing and administrator deauthentication are
+covered over SCP03 and SCP11b. Firmware-specific retry-configuration commands
+are not implemented.
 
 The core tests cover PIN recovery and lifecycle, key persistence, RSA import at all nine sizes from 2048 through 4096 in 256-bit steps,
 signing, authentication and decipher, every advertised EC signing and key-agreement algorithm,

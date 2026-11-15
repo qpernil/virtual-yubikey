@@ -1291,7 +1291,10 @@ impl VirtualYubiKey {
         }
         self.pending_response.clear();
 
-        if command.ins == INS_SELECT && command.p1 == 0x04 {
+        if command.cla == 0 && command.ins == INS_SELECT && command.p1 == 0x04 {
+            if command.p2 != 0 {
+                return ApduExchange::Complete(ResponseApdu::status(0x6a86).encode());
+            }
             return ApduExchange::Complete(self.select(command.data).encode());
         }
 

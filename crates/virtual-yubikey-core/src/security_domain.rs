@@ -703,7 +703,7 @@ impl SecurityDomain {
             0xd8 => {
                 let (&kvn, mut data) = command.data.split_first().ok_or(0x6a80_u16)?;
                 if command.p2 == 0x81 {
-                    if kvn == 0 || kvn == 0xff {
+                    if !valid_version(kvn) {
                         return Err(0x6a80);
                     }
                     let mut keys = Zeroizing::new(Vec::new());
@@ -1514,6 +1514,47 @@ mod tests {
             },
             Some(&FACTORY_SCP03_KEY),
         )
+    }
+
+    #[test]
+    fn scp03_provisioning_enforces_seven_bit_key_versions_without_mutation() {
+        let mut domain = SecurityDomain::new(42, [5, 8, 0], 1);
+        let before = domain.persistent_state().unwrap();
+        let key = [0; 16];
+        let wrapped = software_key_core::software_symmetric::encrypt_aes_cbc(
+            &FACTORY_SCP03_KEY,
+            &[0; 16],
+            &key,
+        )
+        .unwrap();
+        let kcv = encrypt_aes_block(&key, &[1; 16]).unwrap();
+        let data = |kvn| {
+            let mut data = vec![kvn];
+            for _ in 0..3 {
+                data.extend_from_slice(&[0x88, 16]);
+                data.extend_from_slice(&wrapped);
+                data.push(3);
+                data.extend_from_slice(&kcv[..3]);
+            }
+            data
+        };
+        for (new, replace, status) in [
+            (0, 0, 0x6a80),
+            (128, 0, 0x6a80),
+            (254, 0, 0x6a80),
+            (255, 0, 0x6a80),
+        ] {
+            assert_eq!(
+                execute(&mut domain, 0xd8, replace, 0x81, &data(new)).status,
+                status
+            );
+            assert_eq!(domain.persistent_state().unwrap(), before);
+        }
+        assert_eq!(
+            execute(&mut domain, 0xd8, 0xff, 0x81, &data(127)).status,
+            0x9000
+        );
+        assert!(domain.scp03_keys(127).is_some());
     }
 
     #[test]
