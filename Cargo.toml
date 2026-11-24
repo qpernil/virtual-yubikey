@@ -17,10 +17,10 @@ resolver = "2"
 [dependencies]
 libc = "0.2.191"
 software-key-core = { path = "../software-key-core", features = ["state-persistence"] }
-usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
 display-backends = { path = "../display-backends" }
 gpiocdev-uapi = "0.7.0"
 
@@ -29,6 +29,7 @@ name = "virtual-yubikey-worker"
 path = "src/main.rs"
 
 [dev-dependencies]
+usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 signature = "3.0.0"
 toml = "0.9.12"
