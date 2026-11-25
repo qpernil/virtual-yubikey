@@ -8,55 +8,55 @@ const OLED_IDLE_FRAME: &[u8; OLED_FRAME_SIZE] = include_bytes!("../assets/yubike
 const OLED_ACTIVE_FRAME: &[u8; OLED_FRAME_SIZE] =
     include_bytes!("../assets/yubikey-oled-active.mono1");
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::diagnostics::{self, Level};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use display_backends::indicator::{
     AttentionGuard, Cadence, CommandGuard, Controller as IndicatorController, IdlePolicy,
     IndicatorRenderer, Policy,
 };
-#[cfg(target_os = "linux")]
-use display_backends::{Backend, Display};
-#[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::io;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::{Arc, Condvar, Mutex};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::thread::{self, JoinHandle};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use usb_gadget_worker_io::File;
+#[cfg(unix)]
+use usb_gadget_worker_io::display::{Backend, Display};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const BUSY_CADENCE: Cadence = Cadence::new(Duration::from_millis(67), Duration::from_millis(33));
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const PRESENCE_CADENCE: Cadence =
     Cadence::new(Duration::from_millis(384), Duration::from_millis(384));
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const MINIMUM_EDGE: Duration = Duration::from_millis(8);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const MINIMUM_ACTIVITY_OFF: Duration = Duration::from_millis(20);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const MINIMUM_ACTIVITY_ON: Duration = Duration::from_micros(33_500);
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn indicator_policy() -> Policy {
     Policy::new(BUSY_CADENCE, IdlePolicy::Off, MINIMUM_EDGE)
         .with_minimum_activity_off(MINIMUM_ACTIVITY_OFF)
         .with_minimum_activity_on(MINIMUM_ACTIVITY_ON)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone)]
 pub(crate) struct Activity {
     inner: display_backends::indicator::Activity,
     presence: Arc<PresenceIndication>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Activity {
     pub(crate) fn begin(&self) -> Option<CommandGuard> {
         let state = self.presence.state.lock().ok()?;
@@ -111,13 +111,13 @@ impl Activity {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) struct PresenceGuard {
     guard: Option<AttentionGuard>,
     presence: Arc<PresenceIndication>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
         if let Ok(mut state) = self.presence.lock() {
@@ -127,13 +127,13 @@ impl Drop for PresenceGuard {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct U2fPrompt {
     deadline: Instant,
     _guard: AttentionGuard,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Default)]
 struct PresenceState {
     u2f: Option<U2fPrompt>,
@@ -141,7 +141,7 @@ struct PresenceState {
     stopped: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl PresenceState {
     fn clear_u2f(&mut self, reason: &str) {
         if self.u2f.take().is_some() {
@@ -155,14 +155,14 @@ impl PresenceState {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Default)]
 struct PresenceIndication {
     state: Mutex<PresenceState>,
     changed: Condvar,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl PresenceIndication {
     fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, PresenceState>> {
         self.state
@@ -171,13 +171,13 @@ impl PresenceIndication {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct IndicationExpiry {
     presence: Arc<PresenceIndication>,
     thread: Option<JoinHandle<io::Result<()>>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl IndicationExpiry {
     fn start(presence: Arc<PresenceIndication>) -> io::Result<Self> {
         let timer = Arc::clone(&presence);
@@ -228,21 +228,21 @@ impl IndicationExpiry {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for IndicationExpiry {
     fn drop(&mut self) {
         let _ = self.finish();
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) struct Controller {
     expiry: IndicationExpiry,
     indicator: IndicatorController,
     hardware: Arc<Mutex<Hardware>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Controller {
     pub(crate) fn start(
         bus: File,
@@ -315,19 +315,19 @@ impl Controller {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn lock_hardware(hardware: &Mutex<Hardware>) -> io::Result<std::sync::MutexGuard<'_, Hardware>> {
     hardware
         .lock()
         .map_err(|_| io::Error::other("YubiKey display lock poisoned"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct HardwareRenderer {
     hardware: Arc<Mutex<Hardware>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl IndicatorRenderer for HardwareRenderer {
     fn set_indicator(&mut self, lit: bool) -> io::Result<()> {
         lock_hardware(&self.hardware)?.render(lit);
@@ -335,7 +335,7 @@ impl IndicatorRenderer for HardwareRenderer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct Hardware {
     bus: File,
     control: File,
@@ -344,7 +344,7 @@ struct Hardware {
     error_reported: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Hardware {
     fn new(bus: File, control: File, kind: crate::cli::DisplayKind) -> Self {
         Self {
@@ -430,14 +430,14 @@ impl Hardware {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 pub(crate) struct TestIndicator {
     pub(crate) activity: Activity,
     _expiry: IndicationExpiry,
     _indicator: IndicatorController,
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 impl TestIndicator {
     pub(crate) fn new(renderer: impl IndicatorRenderer) -> io::Result<Self> {
         let indicator =
@@ -461,7 +461,7 @@ impl TestIndicator {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn u2f_polls_preserve_visible_blink_phase_and_expire_without_further_calls() {
         let (sender, edges) = std::sync::mpsc::channel();
@@ -507,7 +507,7 @@ mod tests {
         assert!(fixture.activity.begin().is_some());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn successful_u2f_presence_ends_the_indication_before_its_timeout() {
         let (sender, edges) = std::sync::mpsc::channel();
@@ -555,7 +555,7 @@ mod tests {
         assert_ne!(OLED_IDLE_FRAME, OLED_ACTIVE_FRAME);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn indicator_policy_matches_measured_yubikey_cadences() {
         assert_eq!(BUSY_CADENCE.on, Duration::from_millis(67));

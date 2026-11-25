@@ -1,34 +1,33 @@
 //! Unprivileged YubiKey protocol worker for `usb-gadget-supervisor`.
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod buttons;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod ccid;
 mod cli;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod ctaphid;
 mod diagnostics;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod display;
 mod functionfs;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod keepalive;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod presence;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod smartcard;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod usb_identity;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 mod worker_protocol;
 
 use std::env;
 use std::io;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
@@ -42,23 +41,23 @@ fn run() -> io::Result<()> {
     let options = cli::parse(env::args().skip(1))?;
     diagnostics::set_level(options.log_level);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         install_signal_handlers()?;
         functionfs::run_worker(options.serial, options.display, options.persistence)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = options;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "the virtual YubiKey worker is Linux-only",
+            "the virtual YubiKey worker requires Unix handles",
         ))
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn install_signal_handlers() -> io::Result<()> {
     unsafe extern "C" fn stop(_signal: i32) {
         STOP_REQUESTED.store(true, Ordering::Relaxed);

@@ -2,7 +2,6 @@
 
 use crate::diagnostics::{self, Level};
 use crate::presence::USER_PRESENCE_TOUCH;
-use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixDatagram;
@@ -12,6 +11,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
+use usb_gadget_worker_io::File;
+use usb_gadget_worker_io::gpio as gpiocdev_uapi;
 
 const GPIO_V2_LINE_EVENT_SIZE: usize = 48;
 const GPIO_V2_LINE_EVENT_ID_OFFSET: usize = 8;

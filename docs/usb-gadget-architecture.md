@@ -9,6 +9,16 @@ unprivileged worker.
 A printable version is available as
 [USB gadget architecture (PDF)](../output/pdf/usb-gadget-architecture.pdf).
 
+## Worker testing without a USB controller
+
+The separate `usb-gadget-harness` crate in the supervisor repository launches
+the real worker on macOS or Linux, supplies the normal control/resource handles,
+and exchanges opaque endpoint transfers. A shared compatibility layer maps
+socket handles to simulated I/O and device handles to the Linux operations.
+There is no worker test-mode flag. The protocol implementation and embedded
+core APIs retain their roles. See the repository README's worker process tests
+and the supervisor's `docs/worker-harness.md` for scope and validation limits.
+
 ## System architecture
 
 Solid arrows below carry USB protocol data. Dashed arrows carry configuration

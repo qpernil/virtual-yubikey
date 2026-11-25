@@ -19,20 +19,20 @@ libc = "0.2.191"
 software-key-core = { path = "../software-key-core", features = ["state-persistence"] }
 virtual-yubikey-core = { path = "crates/virtual-yubikey-core" }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
+usb-gadget-worker-io = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker-io" }
 usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
 display-backends = { path = "../display-backends" }
-gpiocdev-uapi = "0.7.0"
 
 [[bin]]
 name = "virtual-yubikey-worker"
 path = "src/main.rs"
 
 [dev-dependencies]
-usb-gadget-worker = { path = "../usb-gadget-supervisor/crates/usb-gadget-worker" }
+usb-gadget-harness = { path = "../usb-gadget-supervisor/crates/usb-gadget-harness" }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "precomputed-tables", "std"] }
 signature = "3.0.0"
 toml = "0.9.12"
 
-# The USB binary deliberately calls Linux interfaces directly. Protocol and
-# emulator dependencies live in the transport-neutral core crate.
+# Physical USB uses Linux device handles; process tests use the shared Unix
+# handle compatibility layer. Device behavior lives in the core crate.

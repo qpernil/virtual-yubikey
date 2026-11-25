@@ -1,32 +1,32 @@
 //! Shared physical-presence service for every virtual YubiKey applet.
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::diagnostics::{self, Level};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::display;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::{Arc, Mutex, TryLockError};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::thread;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub(crate) const USER_PRESENCE_TOUCH: u8 = b'T';
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UserPresenceCommand {
     Touch,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl UserPresenceCommand {
     fn decode(value: u8) -> Option<Self> {
         match value {
@@ -38,14 +38,14 @@ impl UserPresenceCommand {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WaitControl {
     Continue,
     Cancel,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WaitOutcome {
     Granted,
@@ -53,13 +53,13 @@ pub(crate) enum WaitOutcome {
     TimedOut,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone)]
 pub(crate) struct Service {
     inner: Arc<Inner>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct Inner {
     touch_socket: PathBuf,
     display_activity: display::Activity,
@@ -67,7 +67,7 @@ struct Inner {
     touch_pressed: Box<dyn Fn() -> io::Result<bool> + Send + Sync>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Service {
     pub(crate) fn new(
         touch_socket: PathBuf,
@@ -259,7 +259,7 @@ fn with_context(error: io::Error, context: &str) -> io::Error {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn u2f_samples_once_per_poll_without_waiting_or_caching_touches() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

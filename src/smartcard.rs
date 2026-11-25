@@ -33,12 +33,12 @@ impl Card {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn from_device(device: VirtualYubiKey) -> Self {
         Self { device }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn persistent_applet(
         &self,
         applet: virtual_yubikey_core::storage::PersistentApplet,
@@ -46,7 +46,7 @@ impl Card {
         self.device.persistent_applet(applet)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn take_persistent_applets(
         &mut self,
     ) -> Vec<virtual_yubikey_core::storage::PersistentApplet> {

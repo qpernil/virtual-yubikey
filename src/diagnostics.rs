@@ -1,6 +1,6 @@
 //! Small dependency-free diagnostic logger.
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -31,12 +31,12 @@ pub(crate) fn set_level(level: Level) {
     LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 pub(crate) fn enabled(level: Level) -> bool {
     LEVEL.load(Ordering::Relaxed) >= level as u8
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 pub(crate) fn log(level: Level, component: &str, event: &str, details: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
@@ -54,7 +54,7 @@ pub(crate) fn log(level: Level, component: &str, event: &str, details: fmt::Argu
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(unix, test))]
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut output = String::with_capacity(bytes.len() * 2);

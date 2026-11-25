@@ -1,13 +1,13 @@
 //! Versioned worker-control records and `SCM_RIGHTS` endpoint transfer.
 
 use std::ffi::c_void;
-use std::fs::File;
 use std::io;
 #[cfg(test)]
 use std::os::fd::AsFd;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 #[cfg(test)]
 use std::os::unix::net::UnixStream;
+use usb_gadget_worker_io::File;
 
 pub(crate) const STATE_DIRECTORY_ENV: &str = "STATE_DIRECTORY";
 pub(crate) const RUNTIME_DIRECTORY_ENV: &str = "RUNTIME_DIRECTORY";

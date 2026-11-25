@@ -21,7 +21,7 @@ pub(crate) enum DisplayKind {
 }
 
 impl DisplayKind {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::St7789Spi => "st7789-spi",

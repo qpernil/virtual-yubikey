@@ -1,59 +1,59 @@
 //! Unprivileged FunctionFS transport for the virtual YubiKey worker.
 
-#[cfg(target_os = "linux")]
 use crate::STOP_REQUESTED;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::diagnostics::{self, Level};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::worker_protocol::{
     Channel, Kind, RUNTIME_DIRECTORY_ENV, Record, STATE_DIRECTORY_ENV, validate_initial_resources,
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use software_key_core::state_persistence::{MutationReceipt, PersistenceMode};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::env;
-#[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::io::{self, Read, Write};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::atomic::Ordering;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use usb_gadget_worker::{EndpointLifecycle, UsbBusEvent};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
+use usb_gadget_worker_io::File;
+#[cfg(unix)]
+#[cfg(unix)]
 use virtual_yubikey_core::storage::{
     AppletPersistenceHandle, DevicePersistenceHandle, DeviceStorage, PersistentApplet,
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use virtual_yubikey_core::{
     ApduExchange, DeviceProfile, FidoAuthenticator, FidoConfiguration, FidoProtocol,
     PresenceAuthorization,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const HID_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(100);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const HID_PROCESSING_KEEPALIVE_DELAY: Duration = Duration::from_millis(100);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const HID_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const CCID_TOUCH_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const FIDO_TOUCH_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn run_worker(
     serial: u32,
     display_kind: crate::cli::DisplayKind,
@@ -257,7 +257,7 @@ pub(crate) fn run_worker(
         .and(display_result)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct InitialResources {
     display_bus: File,
     display_control: File,
@@ -265,7 +265,7 @@ struct InitialResources {
     reconnect_button: File,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl InitialResources {
     fn parse(resources: Vec<(String, File)>) -> io::Result<Self> {
         let mut display_bus = None;
@@ -297,7 +297,7 @@ impl InitialResources {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn required_path(name: &str) -> io::Result<PathBuf> {
     let value = env::var_os(name).ok_or_else(|| {
         io::Error::new(
@@ -315,7 +315,7 @@ fn required_path(name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct Endpoints {
     fido_out: File,
     fido_in: File,
@@ -324,19 +324,19 @@ struct Endpoints {
     ccid_interrupt: File,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct WorkerStorage {
     touch_socket: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Clone)]
 struct CcidPersistenceHandle {
     state: Arc<Mutex<crate::ccid::Device>>,
     persistence: DevicePersistenceHandle,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct EndpointServices<'a> {
     serial: u32,
     storage: &'a WorkerStorage,
@@ -346,7 +346,7 @@ struct EndpointServices<'a> {
     lifecycle: Arc<EndpointLifecycle>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct HidRuntime {
     serial: u32,
     persistence: DevicePersistenceHandle,
@@ -356,7 +356,7 @@ struct HidRuntime {
     lifecycle: Arc<EndpointLifecycle>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct CcidRuntime {
     fido: AppletPersistenceHandle<FidoAuthenticator>,
     fido_operations: Arc<FidoOperationCoordinator>,
@@ -366,13 +366,13 @@ struct CcidRuntime {
     lifecycle: Arc<EndpointLifecycle>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[derive(Default)]
 struct FidoOperationCoordinator {
     active: Mutex<()>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl FidoOperationCoordinator {
     fn try_begin(&self) -> io::Result<Option<MutexGuard<'_, ()>>> {
         match self.active.try_lock() {
@@ -383,13 +383,13 @@ impl FidoOperationCoordinator {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct EndpointRuntime {
     notifications: Option<SyncSender<()>>,
     threads: Vec<thread::JoinHandle<()>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl EndpointRuntime {
     fn notifications(&self) -> &SyncSender<()> {
         self.notifications.as_ref().unwrap()
@@ -406,7 +406,7 @@ impl EndpointRuntime {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Endpoints {
     fn from_record(record: Record) -> io::Result<Self> {
         let count = record
@@ -606,18 +606,18 @@ impl Endpoints {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn required_endpoint(file: Option<File>, name: &str) -> io::Result<File> {
     file.ok_or_else(|| data_error(format!("missing {name} endpoint")))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 enum ControlOutcome {
     Quiesce { request_id: u32, ejected: bool },
     Exit,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn serve_control(
     control: &Channel<'static>,
     generation: u32,
@@ -774,7 +774,7 @@ fn serve_control(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn wait_for_reinsert(
     control: &Channel<'static>,
     generation: u32,
@@ -841,7 +841,7 @@ fn wait_for_reinsert(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
     let setup: &[u8; 8] = request
         .get(..8)
@@ -909,7 +909,7 @@ fn respond_to_control_request(request: &[u8]) -> io::Result<Vec<u8>> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn serve_ccid(
     mut output: File,
     replies_out: SyncSender<Vec<u8>>,
@@ -1022,7 +1022,7 @@ fn serve_ccid(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn serve_hid(
     output: File,
     mut input: File,
@@ -1245,13 +1245,13 @@ fn serve_hid(
     result.and(reader_result)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct HidReader {
     receiver: Receiver<io::Result<Vec<u8>>>,
     thread: thread::JoinHandle<()>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl HidReader {
     fn start(mut output: File, lifecycle: Arc<EndpointLifecycle>) -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -1297,7 +1297,7 @@ impl HidReader {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exchange_persistent_fido_with_keepalives(
     fido: &AppletPersistenceHandle<FidoAuthenticator>,
     input: &mut File,
@@ -1333,7 +1333,7 @@ fn exchange_persistent_fido_with_keepalives(
     Ok((response, mutation))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exchange_shared_fido(
     fido: &AppletPersistenceHandle<FidoAuthenticator>,
     operations: &FidoOperationCoordinator,
@@ -1387,7 +1387,7 @@ fn exchange_shared_fido(
     result
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exchange_shared_fido_inner(
     fido: &AppletPersistenceHandle<FidoAuthenticator>,
     operations: &FidoOperationCoordinator,
@@ -1494,7 +1494,7 @@ fn exchange_shared_fido_inner(
     Ok((response, mutation))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn exchange_fido_with_keepalives(
     input: &mut File,
     reports: &Receiver<io::Result<Vec<u8>>>,
@@ -1614,7 +1614,7 @@ fn exchange_fido_with_keepalives(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn wait_for_touch(
     input: &mut File,
     reports: &Receiver<io::Result<Vec<u8>>>,
@@ -1674,7 +1674,7 @@ fn wait_for_touch(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn try_receive_hid_report(reports: &Receiver<io::Result<Vec<u8>>>) -> io::Result<Option<Vec<u8>>> {
     match reports.try_recv() {
         Ok(Ok(report)) => Ok(Some(report)),
@@ -1685,7 +1685,7 @@ fn try_receive_hid_report(reports: &Receiver<io::Result<Vec<u8>>>) -> io::Result
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn ctap_command_name(command: u8) -> &'static str {
     match command {
         0x01 => "make_credential",
@@ -1703,7 +1703,7 @@ fn ctap_command_name(command: u8) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn ctap_status_name(status: u8) -> &'static str {
     match status {
         0x00 => "ok",
@@ -1729,14 +1729,14 @@ fn ctap_status_name(status: u8) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn queue_ccid_reply(sender: &SyncSender<Vec<u8>>, reply: Vec<u8>) -> io::Result<()> {
     sender
         .send(reply)
         .map_err(|_| io::Error::other("CCID response writer stopped"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn serve_ccid_replies(mut input: impl Write, replies: Receiver<Vec<u8>>) -> io::Result<()> {
     while let Ok(reply) = replies.recv() {
         write_ccid_transfer(&mut input, &reply)?;
@@ -1744,7 +1744,7 @@ fn serve_ccid_replies(mut input: impl Write, replies: Receiver<Vec<u8>>) -> io::
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn write_ccid_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     write_transfer(file, bytes)?;
     // CCID 1.1 section 3.1 requires a ZLP after every bulk-IN message
@@ -1759,7 +1759,7 @@ fn write_ccid_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn write_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     loop {
         match file.write(bytes) {
@@ -1780,12 +1780,12 @@ fn write_transfer(file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn endpoint_is_unavailable(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(11 | 19 | 32 | 108))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn set_nonblocking(file: &File) -> io::Result<()> {
     // FunctionFS continues to block for an enabled transfer. O_NONBLOCK only
     // prevents a new operation from sleeping while its endpoint is disabled.
@@ -1799,17 +1799,17 @@ fn set_nonblocking(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn invalid<T>(message: impl Into<String>) -> io::Result<T> {
     Err(data_error(message))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn data_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

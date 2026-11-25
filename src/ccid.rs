@@ -61,7 +61,7 @@ impl Device {
         Self::with_card(Card::new(serial))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn from_device(device: virtual_yubikey_core::VirtualYubiKey) -> Self {
         Self::with_card(Card::from_device(device))
     }
@@ -81,7 +81,7 @@ impl Device {
         Self::with_card(Card::with_profile(profile))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn persistent_applet(
         &self,
         applet: virtual_yubikey_core::storage::PersistentApplet,
@@ -89,7 +89,7 @@ impl Device {
         self.card.persistent_applet(applet)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub(crate) fn take_persistent_applets(
         &mut self,
     ) -> Vec<virtual_yubikey_core::storage::PersistentApplet> {
@@ -122,7 +122,7 @@ impl Device {
         .expect("test CCID receive has infallible service callbacks")
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn receive_with_keepalives(
         &mut self,
         bytes: &[u8],

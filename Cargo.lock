@@ -1588,12 +1588,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "usb-gadget-harness"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "usb-gadget-worker",
+ "usb-gadget-worker-io",
+]
+
+[[package]]
 name = "usb-gadget-worker"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "libc",
  "serde",
  "serde_bytes",
+]
+
+[[package]]
+name = "usb-gadget-worker-io"
+version = "0.1.0"
+dependencies = [
+ "display-backends",
+ "gpiocdev-uapi",
+ "libc",
 ]
 
 [[package]]
@@ -1601,13 +1620,14 @@ name = "virtual-yubikey"
 version = "0.1.0"
 dependencies = [
  "display-backends",
- "gpiocdev-uapi",
  "libc",
  "p256",
  "signature",
  "software-key-core",
  "toml",
+ "usb-gadget-harness",
  "usb-gadget-worker",
+ "usb-gadget-worker-io",
  "virtual-yubikey-core",
 ]
 
