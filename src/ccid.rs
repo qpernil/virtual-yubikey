@@ -1069,14 +1069,44 @@ mod tests {
         );
     }
 
+    // Keep work pending until a real scheduler tick reaches the CCID sender.
+    // A fixed short sleep races thread scheduling on loaded CI runners.
+    struct ExtensionGate {
+        signal: mpsc::SyncSender<()>,
+        observed: std::sync::Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl ExtensionGate {
+        fn new() -> Self {
+            let (signal, observed) = mpsc::sync_channel(1);
+            Self {
+                signal,
+                observed: std::sync::Mutex::new(observed),
+            }
+        }
+
+        fn wait(&self) {
+            self.observed
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("CCID work did not receive its first time extension");
+        }
+
+        fn observe(&self) {
+            let _ = self.signal.try_send(());
+        }
+    }
+
     #[test]
     fn slow_work_emits_extensions_only_until_its_result_is_ready() {
         let scheduler = keepalive::Scheduler::start().unwrap();
         let clock = scheduler.handle();
         let mut extensions = Vec::new();
+        let gate = ExtensionGate::new();
         let result = run_with_keepalives(
             || {
-                thread::sleep(Duration::from_millis(35));
+                gate.wait();
                 42
             },
             0,
@@ -1086,6 +1116,7 @@ mod tests {
             Duration::from_millis(5),
             &mut |frame| {
                 extensions.push(frame.to_vec());
+                gate.observe();
                 Ok(())
             },
         )
@@ -1121,10 +1152,11 @@ mod tests {
         );
         let scheduler = keepalive::Scheduler::start().unwrap();
         let mut extensions = Vec::new();
+        let gate = ExtensionGate::new();
         let response = run_with_keepalives(
             || {
                 card.transmit_with_presence(&calculate, || {
-                    thread::sleep(Duration::from_millis(35));
+                    gate.wait();
                     Ok(true)
                 })
             },
@@ -1135,6 +1167,7 @@ mod tests {
             Duration::from_millis(5),
             &mut |frame| {
                 extensions.push(frame.to_vec());
+                gate.observe();
                 Ok(())
             },
         )
@@ -1160,10 +1193,11 @@ mod tests {
         let scheduler = keepalive::Scheduler::start().unwrap();
         let clock = scheduler.handle();
         let mut extensions = Vec::new();
+        let gate = ExtensionGate::new();
         let response = run_with_keepalives(
             || {
                 card.transmit_with_presence(&calculate, || {
-                    thread::sleep(Duration::from_millis(35));
+                    gate.wait();
                     Ok(true)
                 })
             },
@@ -1174,6 +1208,7 @@ mod tests {
             Duration::from_millis(5),
             &mut |frame| {
                 extensions.push(frame.to_vec());
+                gate.observe();
                 Ok(())
             },
         )
@@ -1195,10 +1230,11 @@ mod tests {
         let scheduler = keepalive::Scheduler::start().unwrap();
         let clock = scheduler.handle();
         let mut extensions = Vec::new();
+        let gate = ExtensionGate::new();
         let response = run_with_keepalives(
             || {
                 card.transmit_with_presence(&calculate, || {
-                    thread::sleep(Duration::from_millis(35));
+                    gate.wait();
                     Ok(false)
                 })
             },
@@ -1209,6 +1245,7 @@ mod tests {
             Duration::from_millis(5),
             &mut |frame| {
                 extensions.push(frame.to_vec());
+                gate.observe();
                 Ok(())
             },
         )
