@@ -14,6 +14,10 @@ publish = false
 members = ["crates/virtual-yubikey-core", "crates/yubikey-apdu"]
 resolver = "2"
 
+[features]
+# Build the ordinary worker against simulated I/O for process tests.
+worker-harness = ["usb-gadget-worker-io/simulated"]
+
 [dependencies]
 libc = "0.2.191"
 software-key-core = { path = "../software-key-core", features = ["state-persistence"] }
@@ -36,3 +40,8 @@ toml = "0.9.12"
 
 # Physical USB uses Linux device handles; process tests use the shared Unix
 # handle compatibility layer. Device behavior lives in the core crate.
+
+[[test]]
+name = "worker_harness"
+path = "tests/worker_harness.rs"
+required-features = ["worker-harness"]

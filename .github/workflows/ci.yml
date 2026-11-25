@@ -35,6 +35,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check normal worker build
+        run: cargo check --locked -p virtual-yubikey --bin virtual-yubikey-worker
+
   msrv:
     runs-on: ubuntu-latest
 

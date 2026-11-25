@@ -13,8 +13,9 @@ A printable version is available as
 
 The separate `usb-gadget-harness` crate in the supervisor repository launches
 the real worker on macOS or Linux, supplies the normal control/resource handles,
-and exchanges opaque endpoint transfers. A shared compatibility layer maps
-socket handles to simulated I/O and device handles to the Linux operations.
+and exchanges opaque endpoint transfers. A build-selected compatibility layer
+provides fake I/O for harness builds; Linux production uses the real APIs.
+There is no runtime backend selection.
 There is no worker test-mode flag. The protocol implementation and embedded
 core APIs retain their roles. See the repository README's worker process tests
 and the supervisor's `docs/worker-harness.md` for scope and validation limits.
